@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+
+# Tooling
+.pytest_cache/
+.python-version
+
+# Runtime state
+agent_runs/
+orchestrator_state.json
+
+# Editor
+.idea/
+.vscode/

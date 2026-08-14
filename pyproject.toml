@@ -1,0 +1,31 @@
+[project]
+name = "agents-army"
+version = "0.1.0"
+description = "Orchestrator that runs coding-agent CLIs as a GitHub-issue conversation."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "PyYAML>=6",
+    "PyJWT>=2",
+    "cryptography>=42",
+]
+
+[project.scripts]
+agents-army = "orchestrator:main"
+orchestrator = "orchestrator:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backends"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"orchestrator.py" = "orchestrator.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
