@@ -1,0 +1,30 @@
+rules:
+  - id: no-shell-true-subprocess
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess call uses shell=True. Every backend here builds a CLI
+      command from a user-supplied prompt (see backends/claude.py,
+      backends/codex.py); shell=True on that path is command injection.
+      Pass args as a list instead.
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(..., shell=True, ...)
+          - pattern: subprocess.Popen(..., shell=True, ...)
+          - pattern: subprocess.call(..., shell=True, ...)
+          - pattern: subprocess.check_call(..., shell=True, ...)
+          - pattern: subprocess.check_output(..., shell=True, ...)
+
+  - id: no-bare-except
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Bare `except:` swallows every exception, including the ones a caller
+      needs to see (KeyboardInterrupt, a genuine bug). Name the exception
+      type(s) actually expected.
+    patterns:
+      - pattern: |
+          try:
+              ...
+          except:
+              ...

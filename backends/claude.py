@@ -44,8 +44,7 @@ class ClaudeBackend(AgentBackend):
         )
         if proc.returncode != 0:
             raise ClaudeTurnError(
-                f"claude exited {proc.returncode}\n"
-                f"stderr: {proc.stderr[-2000:]}"
+                f"claude exited {proc.returncode}\nstderr: {proc.stderr[-2000:]}"
             )
         try:
             payload = json.loads(proc.stdout)

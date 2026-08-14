@@ -16,8 +16,8 @@ session every time.
 ## Setup
 
 ```sh
-uv sync --extra dev   # install project + dev tools
-uv run pytest         # run the test suite
+uv sync --all-groups   # install project + dev tools
+uv run pytest          # run the test suite
 ```
 
 ## The orchestrator CLI
@@ -72,6 +72,7 @@ the class in the `_BACKENDS` table in `backends/registry.py`.
 # backends/grok.py
 from pathlib import Path
 from backends.base import AgentBackend, TurnResult
+
 
 class GrokBackend(AgentBackend):
     name = "grok"
@@ -129,4 +130,21 @@ backends/          # AgentBackend interface + implementations (claude, codex)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator.py    # the orchestrator CLI (spawn / talk / list / delete)
 tests/             # pytest suite
+tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)
+```
+
+## Quality gates
+
+This project is developed mainly by AI agents, so its checks are
+deterministic and self-enforcing rather than left to review. `make ci` is
+the full gate: lint, format, types, coverage floor, mutation testing,
+static security scanning (Bandit, Semgrep, pip-audit), and secret scanning
+(Gitleaks). `make hooks` wires it into git so `make verify` runs on every
+commit and `make ci` runs on every push. See [AGENTS.md](AGENTS.md) for the
+rules behind the gates.
+
+```sh
+make hooks   # install the pre-commit/pre-push gate (run once per clone)
+make verify  # lint, types, tests, coverage, mutation — the local gate
+make ci      # verify + security scanning — the full gate
 ```

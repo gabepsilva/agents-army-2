@@ -8,6 +8,12 @@ build/
 # Tooling
 .pytest_cache/
 .python-version
+.ruff_cache/
+.coverage
+coverage.xml
+coverage.json
+reports/
+mutants/
 
 # Runtime state
 agent_runs/

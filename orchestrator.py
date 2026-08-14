@@ -12,8 +12,8 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from backends import AgentBackend, TurnResult, get_backend, list_backends
 
@@ -87,10 +87,13 @@ class Orchestrator:
         return {}
 
     def _persist(self) -> None:
-        state = {name: {
-            "backend": a.backend.name,
-            "session_id": a.session_id,
-        } for name, a in self.agents.items()}
+        state = {
+            name: {
+                "backend": a.backend.name,
+                "session_id": a.session_id,
+            }
+            for name, a in self.agents.items()
+        }
         self.state_file.write_text(
             json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -99,6 +102,7 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="spawn")
@@ -163,5 +167,5 @@ def main(argv: list[str] | None = None) -> None:
     COMMANDS[argv[0]](orchestrator, argv[1:])
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
