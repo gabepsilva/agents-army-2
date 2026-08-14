@@ -44,8 +44,7 @@ class CodexBackend(AgentBackend):
         )
         if proc.returncode != 0:
             raise CodexTurnError(
-                f"codex exited {proc.returncode}\n"
-                f"stderr: {proc.stderr[-2000:]}"
+                f"codex exited {proc.returncode}\nstderr: {proc.stderr[-2000:]}"
             )
         return self._parse(proc.stdout, proc.stderr)
 

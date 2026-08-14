@@ -14,9 +14,6 @@ dependencies = [
 agents-army = "orchestrator:main"
 orchestrator = "orchestrator:main"
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -27,5 +24,96 @@ packages = ["backends"]
 [tool.hatch.build.targets.wheel.force-include]
 "orchestrator.py" = "orchestrator.py"
 
+[dependency-groups]
+dev = [
+    "actionlint-py>=1.7,<2",
+    "bandit>=1.9,<2",
+    "diff-cover>=10.4,<11",
+    "mutmut>=3,<4",
+    "pip-audit>=2.10,<3",
+    "pre-commit>=4.0,<5",
+    "pytest>=8",
+    "pytest-cov>=7,<8",
+    "pytest-xdist>=3,<4",
+    "ruff>=0.16.0,<0.17",
+    "ty>=0.0.14,<0.1",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
+    "RUF",
+    "DTZ",
+    "LOG",
+    "G",
+    "RET",
+    "ARG",
+    "PT",
+    "C901",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Fakes here mirror subprocess.run's real signature (args, **kwargs); the
+# unused parameters are the point, not an oversight.
+"tests/**/*.py" = ["ARG001", "ARG002"]
+
 [tool.pytest.ini_options]
+# `orchestrator.py` is wheel force-included (see [tool.hatch.build.targets.
+# wheel.force-include] above), so an installed copy sits in site-packages
+# alongside the editable install. Without this, `import orchestrator` in
+# tests can silently resolve to that installed copy instead of the source
+# file being edited, and both tests and coverage would exercise stale code.
+pythonpath = ["."]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--tb=short",
+    "--cov-fail-under=100",
+    "-n",
+    "4",
+]
 testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [".venv/*", "tests/*"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_empty = true
+
+[tool.mutmut]
+source_paths = [
+    "orchestrator.py",
+    "backends/base.py",
+    "backends/claude.py",
+    "backends/codex.py",
+    "backends/registry.py",
+]
+also_copy = ["backends/", "orchestrator.py"]
+pytest_add_cli_args_test_selection = ["tests/test_backends.py"]
+pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.ty.environment]
+python-version = "3.11"

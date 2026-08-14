@@ -1,0 +1,35 @@
+# Action revisions are pinned by SHA and dependency versions are pinned in
+# uv.lock. Pinning without an updater drifts into stale-and-vulnerable, and
+# pip-audit eventually fails with no automated path to a fix. These updates
+# supply that path.
+#
+# Not covered: the Semgrep image is digest-pinned inside the Makefile, which
+# Dependabot cannot see. Review it by hand when the scheduled audit flags it.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # One PR for all actions rather than one per action; each still has to
+    # clear the full quality and security gate.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 3
