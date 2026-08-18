@@ -7,6 +7,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def describe_command(args: list[str], prompt: str) -> str:
+    """Render a CLI invocation for logs with the prompt replaced by its size.
+
+    The prompt is the one unbounded argument, and a verbose run that echoes it
+    buries the flags — the part worth reading — under the whole request.
+    """
+    rendered = list(args)
+    for i in range(len(rendered) - 1, -1, -1):
+        if rendered[i] == prompt:
+            rendered[i] = f"<prompt:{len(prompt)}chars>"
+            break
+    return " ".join(rendered)
+
+
 @dataclass
 class TurnResult:
     """Outcome of one non-interactive turn against a CLI session."""

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 import orchestrator
-from backends.base import AgentBackend, TurnResult
+from backends.base import AgentBackend, TurnResult, describe_command
 from backends.claude import ClaudeBackend, ClaudeTurnError
 from backends.codex import CodexBackend, CodexTurnError
 from backends.registry import get_backend, list_backends, register_backend
@@ -21,6 +24,45 @@ from orchestrator import (
     cmd_talk,
     main,
 )
+
+
+def _messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Log lines are asserted verbatim: a wrong one is a wrong diagnostic."""
+    return [record.getMessage() for record in caplog.records]
+
+
+def _reported_seconds(message: str, pattern: str) -> float:
+    """Return the duration a log line claims, so an implausible one fails.
+
+    Matching the shape of the number is not enough: computing the elapsed time
+    with the wrong sign still prints a well-formed float. Only its magnitude —
+    process uptime rather than a turn duration — distinguishes the two.
+    """
+    match = re.fullmatch(pattern, message)
+    assert match is not None, f"unexpected log line: {message!r}"
+    return float(match.group(1))
+
+
+class EchoBackend(AgentBackend):
+    """A backend that answers without a CLI, for tests about everything else."""
+
+    @property
+    def name(self) -> str:
+        return "echo"
+
+    def run_turn(self, prompt: str, session_id: str | None, cwd: Path) -> TurnResult:
+        return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
+
+
+@pytest.fixture(autouse=True)
+def register_echo_backend() -> None:
+    """Registered for every test, not just the class that introduced it.
+
+    The registry is module-level state, so a class relying on another class
+    having registered it first passes or fails on test ordering — which xdist
+    is free to change.
+    """
+    register_backend("echo", EchoBackend)
 
 
 def _assert_subprocess_kwargs(kwargs: dict, cwd: Path) -> None:
@@ -91,9 +133,23 @@ class TestClaudeRunTurn:
         assert result.session_id == "s1"
         assert result.reply == "hi"
         assert result.raw == payload
-        assert caplog.records[-1].getMessage() == (
-            f"claude turn: cwd={tmp_path} resume=False"
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"claude turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
         )
+        assert messages[1] == (
+            "claude turn: invoking "
+            "claude --print --output-format json -p <prompt:5chars>"
+        )
+        assert (
+            _reported_seconds(
+                messages[2],
+                rf"claude turn: exited 0 after (\d+\.\d)s with {len(payload)} "
+                rf"chars of stdout",
+            )
+            < 60
+        )
+        assert messages[3] == "claude turn: parsed session=s1 reply_chars=2"
 
     def test_resume_turn_passes_resume_flag(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -122,9 +178,16 @@ class TestClaudeRunTurn:
             result = backend.run_turn("again", "s1", tmp_path)
         assert result.session_id == "s1"
         assert result.reply == "still here"
-        assert caplog.records[-1].getMessage() == (
-            f"claude turn: cwd={tmp_path} resume=True"
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"claude turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
         )
+        # The resumed session id stays readable; only the prompt is summarised.
+        assert messages[1] == (
+            "claude turn: invoking "
+            "claude --print --output-format json --resume s1 -p <prompt:5chars>"
+        )
+        assert messages[3] == "claude turn: parsed session=s1 reply_chars=10"
 
     def test_error_reply_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
@@ -198,9 +261,23 @@ class TestCodexRunTurn:
             result = backend.run_turn("hello", None, tmp_path)
         assert result.session_id == "t1"
         assert result.reply == "yo"
-        assert caplog.records[-1].getMessage() == (
-            f"codex turn: cwd={tmp_path} resume=False"
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"codex turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
         )
+        # The prompt sits mid-argv for codex, so the summary must find it there.
+        assert messages[1] == (
+            "codex turn: invoking "
+            "codex exec <prompt:5chars> --json --skip-git-repo-check"
+        )
+        assert (
+            _reported_seconds(
+                messages[2],
+                r"codex turn: exited 0 after (\d+\.\d)s with \d+ chars of stdout",
+            )
+            < 60
+        )
+        assert messages[3] == "codex turn: parsed session=t1 messages=1 reply_chars=2"
 
     def test_resume_turn_uses_thread_id(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -229,9 +306,15 @@ class TestCodexRunTurn:
             result = backend.run_turn("again", "t1", tmp_path)
         assert result.session_id == "t1"
         assert result.reply == "back"
-        assert caplog.records[-1].getMessage() == (
-            f"codex turn: cwd={tmp_path} resume=True"
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"codex turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
         )
+        assert messages[1] == (
+            "codex turn: invoking "
+            "codex exec resume t1 <prompt:5chars> --json --skip-git-repo-check"
+        )
+        assert messages[3] == "codex turn: parsed session=t1 messages=1 reply_chars=4"
 
     def test_no_thread_id_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = CodexBackend()
@@ -428,20 +511,6 @@ class TestOrchestrator:
 class TestCLI:
     """cmd_* dispatch and printed output, backed by a fake CLI-free backend."""
 
-    class _EchoBackend(AgentBackend):
-        @property
-        def name(self) -> str:
-            return "echo"
-
-        def run_turn(
-            self, prompt: str, session_id: str | None, cwd: Path
-        ) -> TurnResult:
-            return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
-
-    @pytest.fixture(autouse=True)
-    def _register_echo(self) -> None:
-        register_backend("echo", self._EchoBackend)
-
     def test_cmd_spawn_prints_confirmation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -544,7 +613,9 @@ class TestCLI:
             main([])
         captured = capsys.readouterr()
         assert captured.err == (
-            "usage: orchestrator <command> [args...]\n"
+            "usage: orchestrator [-v|-vv] <command> [args...]\n"
+            "  -v, --verbose   log each step and how long it took\n"
+            "  -vv, --verbose2  also log full prompts and replies\n"
             "commands: spawn, talk, list, delete\n"
         )
         assert captured.out == ""
@@ -555,14 +626,14 @@ class TestCLI:
         monkeypatch.setattr("sys.argv", ["orchestrator", "bogus"])
         with pytest.raises(SystemExit, match="2"):
             main()
-        assert "usage: orchestrator <command>" in capsys.readouterr().err
+        assert "usage: orchestrator [-v|-vv] <command>" in capsys.readouterr().err
 
     def test_main_unknown_command_exits(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
             main(["bogus"])
-        assert "usage: orchestrator <command>" in capsys.readouterr().err
+        assert "usage: orchestrator [-v|-vv] <command>" in capsys.readouterr().err
 
     def test_main_dispatches_using_sys_argv_when_none_given(
         self,
@@ -593,3 +664,261 @@ class TestCLI:
         )
         main(["spawn", "a", "-b", "echo"])
         assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+
+
+class TestDescribeCommand:
+    def test_prompt_is_replaced_by_its_size(self) -> None:
+        assert describe_command(["claude", "-p", "hello"], "hello") == (
+            "claude -p <prompt:5chars>"
+        )
+
+    def test_prompt_in_the_middle_is_found(self) -> None:
+        assert describe_command(["codex", "exec", "hi", "--json"], "hi") == (
+            "codex exec <prompt:2chars> --json"
+        )
+
+    def test_output_does_not_grow_with_the_prompt(self) -> None:
+        """The whole point: a 10k prompt must not produce a 10k log line."""
+        short = describe_command(["claude", "-p", "x"], "x")
+        long = describe_command(["claude", "-p", "x" * 10_000], "x" * 10_000)
+        assert len(long) - len(short) == len("10000") - len("1")
+
+    def test_flags_are_left_intact(self) -> None:
+        args = ["claude", "--resume", "s1", "-p", "hi"]
+        assert describe_command(args, "hi") == "claude --resume s1 -p <prompt:2chars>"
+
+    def test_only_the_prompt_slot_is_replaced_when_it_matches_a_flag(self) -> None:
+        args = ["codex", "exec", "resume", "t1", "resume", "--json"]
+        assert describe_command(args, "resume") == (
+            "codex exec resume t1 <prompt:6chars> --json"
+        )
+
+    def test_unmatched_prompt_leaves_args_unchanged(self) -> None:
+        assert describe_command(["claude", "-p", "hello"], "other") == "claude -p hello"
+
+    def test_empty_args_render_as_empty(self) -> None:
+        assert describe_command([], "hello") == ""
+
+    def test_prompt_in_the_first_two_slots_is_still_replaced(self) -> None:
+        assert describe_command(["hello"], "hello") == "<prompt:5chars>"
+        assert describe_command(["codex", "hi"], "hi") == "codex <prompt:2chars>"
+
+
+class TestVerboseFlag:
+    @pytest.fixture(autouse=True)
+    def isolated_orchestrator(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator,
+            "Orchestrator",
+            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+        )
+        for name in ("orchestrator", "backends", "third_party"):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+    @pytest.mark.parametrize(
+        ("flag", "expected"),
+        [
+            ("-v", logging.DEBUG),
+            ("--verbose", logging.DEBUG),
+            ("-vv", orchestrator.TRACE),
+            ("--verbose2", orchestrator.TRACE),
+        ],
+    )
+    def test_each_flag_selects_its_level(self, flag: str, expected: int) -> None:
+        main([flag, "list"])
+        assert logging.getLogger("orchestrator").level == expected
+        assert logging.getLogger("backends").level == expected
+
+    @pytest.mark.parametrize("flag", ["-v", "--verbose", "-vv", "--verbose2"])
+    def test_no_flag_leaks_third_party_debug_output(self, flag: str) -> None:
+        """A dependency's debug output would bury the signal being asked for."""
+        main([flag, "list"])
+        assert logging.getLogger("third_party").getEffectiveLevel() > logging.DEBUG
+
+    @pytest.mark.parametrize("flag", ["-v", "--verbose", "-vv", "--verbose2"])
+    def test_flag_is_not_treated_as_a_command(self, flag: str, capsys) -> None:
+        main([flag, "list"])
+        assert capsys.readouterr().out == "no agents\n"
+
+    def test_the_loudest_flag_given_wins(self) -> None:
+        main(["-v", "-vv", "list"])
+        assert logging.getLogger("orchestrator").level == orchestrator.TRACE
+
+    def test_without_a_flag_our_loggers_stay_quiet(self) -> None:
+        main(["list"])
+        assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
+
+    def test_no_arguments_at_all_stays_quiet(self, capsys) -> None:
+        """The empty argv path still picks a verbosity before printing usage."""
+        with pytest.raises(SystemExit, match="2"):
+            main([])
+        assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
+
+    def test_trace_sits_below_debug(self) -> None:
+        """Above DEBUG it would fire at -v, dumping transcripts unasked."""
+        assert orchestrator.TRACE < logging.DEBUG
+        assert logging.getLevelName(orchestrator.TRACE) == "TRACE"
+
+    def test_take_verbosity_consumes_only_a_leading_run(self) -> None:
+        assert orchestrator._take_verbosity([]) == (0, [])
+        assert orchestrator._take_verbosity(["-v"]) == (1, [])
+        assert orchestrator._take_verbosity(["-v", "-vv", "talk", "-v"]) == (
+            2,
+            ["talk", "-v"],
+        )
+        assert orchestrator._take_verbosity(["talk", "-v"]) == (0, ["talk", "-v"])
+
+    def test_prompt_token_equal_to_a_verbose_flag_is_kept(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        main(["talk", "a", "add", "-v", "please"])
+        assert "echo:add -v please" in capsys.readouterr().out
+        assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
+
+    def test_leading_flag_does_not_strip_the_same_token_from_the_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        main(["-v", "talk", "a", "add", "-v", "please"])
+        assert "echo:add -v please" in capsys.readouterr().out
+        assert logging.getLogger("orchestrator").level == logging.DEBUG
+
+
+class TestStepLogging:
+    def test_state_load_and_write_are_logged(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        state_file = tmp_path / "s.json"
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            orch = Orchestrator(state_file=state_file)
+            orch.spawn("a", "echo")
+        messages = _messages(caplog)
+        assert f"state: loaded 0 agent(s) from {state_file}" in messages
+        assert f"state: wrote 1 agent(s) to {state_file}" in messages
+
+    def test_turn_start_and_duration_are_logged(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            orch.talk("a", "hi")
+        messages = _messages(caplog)
+        assert "agent 'a' (echo): starting turn, resume=False" in messages
+        durations = [
+            _reported_seconds(m, r"agent 'a': turn finished in (\d+\.\d)s")
+            for m in messages
+            if m.startswith("agent 'a': turn finished")
+        ]
+        assert len(durations) == 1
+        assert durations[0] < 60
+
+    def test_prompt_and_reply_are_logged_in_full_at_trace(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        prompt = "line one\nline two"
+        with caplog.at_level(orchestrator.TRACE, logger="orchestrator"):
+            orch.talk("a", prompt)
+        messages = _messages(caplog)
+        # Multi-line prompts must survive intact; this is the level you turn on
+        # precisely to read exactly what went in and came back.
+        assert f"agent 'a' prompt in:\n{prompt}" in messages
+        assert f"agent 'a' reply out:\necho:{prompt}" in messages
+
+    def test_transcripts_stay_out_of_the_step_level_view(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """-v is the level meant to be readable and safe to paste."""
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        with caplog.at_level(logging.DEBUG, logger="orchestrator"):
+            orch.talk("a", "secret prompt")
+        assert not any("secret prompt" in message for message in _messages(caplog))
+
+    def test_a_resumed_turn_is_logged_as_such(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """resume= must reflect the session, not be hardcoded by either turn."""
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        orch.talk("a", "first")
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            orch.talk("a", "second")
+        assert "agent 'a' (echo): starting turn, resume=True" in _messages(caplog)
+
+    def test_cli_argument_shape_and_dispatch_are_logged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator,
+            "Orchestrator",
+            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+        )
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            main(["-v", "spawn", "a", "-b", "echo"])
+        messages = _messages(caplog)
+        # Four arguments remain once -v is stripped.
+        assert "cli: 4 argument(s) after flag removal" in messages
+        assert "cli: dispatching 'spawn'" in messages
+
+
+class TestLoggingConfiguration:
+    """basicConfig() only acts on a root logger that has no handlers yet.
+
+    pytest installs its own capture handler around every test phase, so the
+    handlers have to be cleared inside the test body — clearing them in a
+    fixture is undone before the body runs, and every assertion here would
+    then be measuring pytest's logging setup rather than this project's.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_root(self) -> Iterator[None]:
+        root = logging.getLogger()
+        handlers, level = root.handlers[:], root.level
+        yield
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    def test_root_is_pinned_to_warning(self) -> None:
+        root = logging.getLogger()
+        root.handlers.clear()
+        # Start from the level the call must overwrite: WARNING is also the
+        # default, so starting there would pass without the level ever applying.
+        root.setLevel(logging.DEBUG)
+
+        orchestrator._configure_logging(False)
+
+        assert root.level == logging.WARNING
+
+    def test_records_carry_time_level_and_logger_name(self) -> None:
+        root = logging.getLogger()
+        root.handlers.clear()
+
+        orchestrator._configure_logging(False)
+
+        record = logging.LogRecord(
+            "backends.claude", logging.WARNING, "p", 1, "msg", None, None
+        )
+        assert re.fullmatch(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} "
+            r"WARNING backends\.claude: msg",
+            root.handlers[0].format(record),
+        )

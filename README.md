@@ -45,6 +45,38 @@ uv run orchestrator list
 uv run orchestrator delete reviewer
 ```
 
+### Verbosity
+
+A turn blocks until the CLI it drives returns, which can take minutes with no
+output. Two flags say what is happening meanwhile:
+
+```sh
+# -v / --verbose: each step and how long it took
+uv run orchestrator -v talk reviewer "summarise the auth module"
+
+# -vv / --verbose2: the above, plus the full prompt sent and reply received
+uv run orchestrator -vv talk reviewer "summarise the auth module"
+```
+
+```
+DEBUG orchestrator:      cli: dispatching 'talk'
+INFO  orchestrator:      agent 'reviewer' (claude): starting turn, resume=True
+DEBUG backends.claude:   claude turn: cwd=/w resume=True prompt_chars=25 timeout=1800s
+DEBUG backends.claude:   claude turn: invoking claude --print --resume s1 -p <prompt:25chars>
+DEBUG backends.claude:   claude turn: exited 0 after 12.4s with 812 chars of stdout
+INFO  orchestrator:      agent 'reviewer': turn finished in 12.4s
+```
+
+Logging goes to stderr, so it stays out of the reply on stdout and a pipe is
+unaffected. Two things worth knowing:
+
+- **The flags must come before the command.** Only a leading run is consumed,
+  so `talk dev "compare -v and -vv"` keeps `-v` in the prompt where it belongs.
+- **`-vv` writes whole conversations to stderr.** `-v` deliberately prints the
+  prompt's size rather than its text, and stays a fixed size however long the
+  prompt is; `-vv` is the opt-in to the full transcript, so mind where stderr
+  is going before turning it on.
+
 ### Example
 
 ```sh
