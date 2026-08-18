@@ -40,7 +40,16 @@ RATCHET_BASE ?= origin/master
 	verify-regression mutation semgrep security-static secrets \
 	test-integrity ratchet workflows verify-quick \
 	verify-coverage verify-mutation verify-security verify ci ci-hosted \
-	hooks hook-check
+	hooks hook-check dev
+
+# orchestrator.py is force-included into the wheel (see pyproject) rather than
+# living in a package, so an editable install copies it instead of linking it:
+# the `orchestrator` console script keeps running the copy in site-packages
+# until it is reinstalled. Tests are unaffected — pyproject sets
+# pythonpath=["."] for exactly this reason — which is what makes the staleness
+# easy to miss. Run this after editing orchestrator.py.
+dev:
+	uv sync --reinstall-package agents-army
 
 format:
 	uv run ruff format .

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 
-from backends.base import AgentBackend, TurnResult
+from backends.base import AgentBackend, TurnResult, describe_command
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,15 @@ class ClaudeBackend(AgentBackend):
             args += ["--resume", session_id]
         args += ["-p", prompt]
 
-        log.debug("claude turn: cwd=%s resume=%s", cwd, bool(session_id))
+        log.debug(
+            "claude turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
+            cwd,
+            bool(session_id),
+            len(prompt),
+            timeout,
+        )
+        log.debug("claude turn: invoking %s", describe_command(args, prompt))
+        started = time.monotonic()
         proc = subprocess.run(
             args,
             cwd=str(cwd),
@@ -41,6 +50,12 @@ class ClaudeBackend(AgentBackend):
             text=True,
             check=False,
             timeout=timeout,
+        )
+        log.debug(
+            "claude turn: exited %d after %.1fs with %d chars of stdout",
+            proc.returncode,
+            time.monotonic() - started,
+            len(proc.stdout),
         )
         if proc.returncode != 0:
             raise ClaudeTurnError(
@@ -55,8 +70,14 @@ class ClaudeBackend(AgentBackend):
 
         if payload.get("is_error"):
             raise ClaudeTurnError(f"claude reported an error: {payload.get('result')}")
-        return TurnResult(
+        result = TurnResult(
             session_id=payload.get("session_id"),
             reply=payload.get("result", ""),
             raw=proc.stdout,
         )
+        log.debug(
+            "claude turn: parsed session=%s reply_chars=%d",
+            result.session_id,
+            len(result.reply),
+        )
+        return result

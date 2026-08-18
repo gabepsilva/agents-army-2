@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 
-from backends.base import AgentBackend, TurnResult
+from backends.base import AgentBackend, TurnResult, describe_command
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,15 @@ class CodexBackend(AgentBackend):
             args += ["resume", session_id]
         args += [prompt, "--json", "--skip-git-repo-check"]
 
-        log.debug("codex turn: cwd=%s resume=%s", cwd, bool(session_id))
+        log.debug(
+            "codex turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
+            cwd,
+            bool(session_id),
+            len(prompt),
+            timeout,
+        )
+        log.debug("codex turn: invoking %s", describe_command(args, prompt))
+        started = time.monotonic()
         proc = subprocess.run(
             args,
             cwd=str(cwd),
@@ -41,6 +50,12 @@ class CodexBackend(AgentBackend):
             text=True,
             check=False,
             timeout=timeout,
+        )
+        log.debug(
+            "codex turn: exited %d after %.1fs with %d chars of stdout",
+            proc.returncode,
+            time.monotonic() - started,
+            len(proc.stdout),
         )
         if proc.returncode != 0:
             raise CodexTurnError(
@@ -73,8 +88,15 @@ class CodexBackend(AgentBackend):
                 f"codex did not report a thread_id\nstdout: {stdout[-2000:]}"
                 f"\nstderr: {stderr[-2000:]}"
             )
+        reply = "\n".join(reply_parts)
+        log.debug(
+            "codex turn: parsed session=%s messages=%d reply_chars=%d",
+            session_id,
+            len(reply_parts),
+            len(reply),
+        )
         return TurnResult(
             session_id=session_id,
-            reply="\n".join(reply_parts),
+            reply=reply,
             raw=stdout,
         )

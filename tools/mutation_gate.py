@@ -9,18 +9,20 @@ report.
 
 Raise MUTATION_SCORE_FLOOR as survivors are killed. Never lower it.
 
-Recorded 2026-08-14 at 377/384 (98.2%). The 7 survivors are equivalent
-mutants — they cannot change behavior, so no test can detect them:
+Recorded 2026-08-18 at 562/569 (98.8%), previously 542/550 (98.5%). The 7
+survivors are equivalent mutants — they cannot change behavior, so no test
+can detect them:
 
   * `encoding="utf-8"` -> `encoding="UTF-8"` (Orchestrator._load_state,
     Orchestrator._persist): codec names are normalized case-insensitively.
-  * `encoding="utf-8"` -> `encoding=None` (same two sites): falls back to
-    the locale encoding, which is UTF-8 wherever this runs.
+  * `encoding="utf-8"` -> `encoding=None` (_load_state, _persist) or
+    omitted entirely (_persist): falls back to the locale encoding, which
+    is UTF-8 wherever this runs.
   * `default="claude"` -> `default="CLAUDE"` (Orchestrator.spawn,
     cmd_spawn's --backend flag): backends.registry.get_backend()
     lower()s the name before lookup, so both resolve to the same backend.
 
-Do not chase this last 1.8%, and do not silence it with
+Do not chase this last 1.2%, and do not silence it with
 `# pragma: no mutate` either — an equivalent mutant is evidence the code is
 precise, not evidence a test is missing.
 """
