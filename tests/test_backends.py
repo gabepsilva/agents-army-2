@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import re
@@ -13,9 +14,21 @@ import pytest
 
 import orchestrator
 from backends.base import AgentBackend, TurnResult, describe_command
-from backends.claude import ClaudeBackend, ClaudeTurnError
+from backends.claude import (
+    OPT_IN_REQUIRED_REASON,
+    PERMISSION_MODE,
+    ClaudeBackend,
+    ClaudeTurnError,
+    _stdout_for_error,
+    parse_claude_stdout,
+)
 from backends.codex import CodexBackend, CodexTurnError
-from backends.registry import get_backend, list_backends, register_backend
+from backends.registry import (
+    UnknownBackendError,
+    get_backend,
+    list_backends,
+    register_backend,
+)
 from orchestrator import (
     Orchestrator,
     cmd_delete,
@@ -24,6 +37,22 @@ from orchestrator import (
     cmd_talk,
     main,
 )
+
+
+def _flock_is_held(path: Path) -> bool:
+    """Is someone holding this lock file?
+
+    flock is owned by the open file description, not the process, so a second
+    handle here contends with the orchestrator's exactly as another process
+    would — the lock this asks about is the real one, not a stand-in.
+    """
+    with path.open("a+", encoding="utf-8") as probe:
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+        return False
 
 
 def _messages(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -109,6 +138,9 @@ class TestAgentBackendInterface:
 
 
 class TestClaudeRunTurn:
+    def test_permission_mode_is_the_noninteractive_opt_in(self) -> None:
+        assert PERMISSION_MODE == "bypassPermissions"
+
     def test_new_turn_parses_session_and_result(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -121,6 +153,8 @@ class TestClaudeRunTurn:
                 "--print",
                 "--output-format",
                 "json",
+                "--permission-mode",
+                PERMISSION_MODE,
                 "-p",
                 "hello",
             ]
@@ -139,7 +173,8 @@ class TestClaudeRunTurn:
         )
         assert messages[1] == (
             "claude turn: invoking "
-            "claude --print --output-format json -p <prompt:5chars>"
+            "claude --print --output-format json --permission-mode "
+            f"{PERMISSION_MODE} -p <prompt:5chars>"
         )
         assert (
             _reported_seconds(
@@ -162,6 +197,8 @@ class TestClaudeRunTurn:
                 "--print",
                 "--output-format",
                 "json",
+                "--permission-mode",
+                PERMISSION_MODE,
                 "--resume",
                 "s1",
                 "-p",
@@ -185,7 +222,8 @@ class TestClaudeRunTurn:
         # The resumed session id stays readable; only the prompt is summarised.
         assert messages[1] == (
             "claude turn: invoking "
-            "claude --print --output-format json --resume s1 -p <prompt:5chars>"
+            "claude --print --output-format json --permission-mode "
+            f"{PERMISSION_MODE} --resume s1 -p <prompt:5chars>"
         )
         assert messages[3] == "claude turn: parsed session=s1 reply_chars=10"
 
@@ -194,12 +232,18 @@ class TestClaudeRunTurn:
 
         def fake_run(args, **kwargs):
             _assert_subprocess_kwargs(kwargs, tmp_path)
-            payload = json.dumps({"is_error": True, "result": "boom"})
+            # Session id present, so is_error is the only thing making this a
+            # failure: a check that stopped reading the flag would return a
+            # perfectly ordinary reply here.
+            payload = json.dumps(
+                {"is_error": True, "session_id": "s1", "result": "boom"}
+            )
             return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with pytest.raises(ClaudeTurnError, match="boom"):
+        with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "claude reported an error: boom"
 
     def test_result_defaults_to_empty_reply(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
@@ -237,8 +281,155 @@ class TestClaudeRunTurn:
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
         assert str(excinfo.value) == (
-            f"claude output was not JSON\nstdout: {stdout[-2000:]}"
+            f"claude output was not JSON\nstdout: {stdout[:400]}\n…\n{stdout[-1600:]}"
         )
+        assert stdout[:400] in str(excinfo.value)
+        assert stdout[-1600:] in str(excinfo.value)
+
+    def test_text_prefix_then_json_envelope_is_parsed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression: Claude print mode wrote the reply, then the JSON."""
+        backend = ClaudeBackend()
+        envelope = {
+            "type": "result",
+            "subtype": "success",
+            "session_id": "s1",
+            "result": "I've read both skills",
+        }
+        stdout = "I've read both skills\n" + json.dumps(envelope)
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.session_id == "s1"
+        assert result.reply == "I've read both skills"
+
+    def test_opt_in_reason_is_a_failure_not_a_reply(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A turn that ran with no tools exits 0 and says so only here."""
+        backend = ClaudeBackend()
+        payload = json.dumps(
+            {
+                "type": "result",
+                "reason": OPT_IN_REQUIRED_REASON,
+                "session_id": "s1",
+                "result": "I could not run that command",
+            }
+        )
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"claude ran without tools: reason={OPT_IN_REQUIRED_REASON}. "
+            f"--permission-mode {PERMISSION_MODE} did not take effect."
+        )
+
+    def test_another_reason_is_still_a_normal_reply(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = ClaudeBackend()
+        payload = json.dumps(
+            {"type": "result", "reason": "stop", "session_id": "s1", "result": "done"}
+        )
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("x", None, tmp_path).reply == "done"
+
+    def test_missing_session_id_raises_rather_than_returning_none(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """None here would be persisted over the id the agent already has."""
+        backend = ClaudeBackend()
+        payload = json.dumps({"type": "system", "result": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"claude did not report a session_id\nstdout: {payload}"
+        )
+
+    def test_blank_session_id_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = ClaudeBackend()
+        payload = json.dumps({"session_id": "", "result": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError, match="did not report a session_id"):
+            backend.run_turn("x", None, tmp_path)
+
+    def test_non_string_session_id_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = ClaudeBackend()
+        payload = json.dumps({"session_id": 17, "result": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError, match="did not report a session_id"):
+            backend.run_turn("x", None, tmp_path)
+
+
+class TestParseClaudeStdout:
+    def test_plain_object(self) -> None:
+        payload = {"session_id": "s1", "result": "hi"}
+        assert parse_claude_stdout(json.dumps(payload)) == payload
+
+    def test_empty_is_an_error(self) -> None:
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            parse_claude_stdout("   ")
+        assert str(excinfo.value) == "claude output was not JSON\nstdout: "
+
+    def test_picks_the_type_result_object(self) -> None:
+        result_obj = json.dumps(
+            {"type": "result", "session_id": "keep", "result": "done"}
+        )
+        later = json.dumps({"type": "system", "session_id": "later"})
+        parsed = parse_claude_stdout(f"{result_obj}\n{later}")
+        assert parsed["session_id"] == "keep"
+        assert parsed["result"] == "done"
+
+    def test_falls_back_to_the_last_object(self) -> None:
+        parsed = parse_claude_stdout(
+            'noise {"other": 1} then {"result": "ok", "session_id": "s"}'
+        )
+        assert parsed == {"result": "ok", "session_id": "s"}
+
+    def test_short_garbage_keeps_the_whole_dump(self) -> None:
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            parse_claude_stdout("not json")
+        assert str(excinfo.value) == "claude output was not JSON\nstdout: not json"
+
+    def test_skips_a_broken_brace_and_keeps_the_next_object(self) -> None:
+        parsed = parse_claude_stdout('{{"result": "ok"}')
+        assert parsed == {"result": "ok"}
+
+    def test_last_object_when_none_look_like_a_result(self) -> None:
+        assert parse_claude_stdout('{"a": 1}{"b": 2}{"c": 3}') == {"c": 3}
+
+    def test_error_snippet_keeps_exactly_2000_chars(self) -> None:
+        text = "x" * 2000
+        assert _stdout_for_error(text) == text
+
+    def test_error_snippet_splits_a_2001_char_dump(self) -> None:
+        text = ("H" * 400) + "M" + ("T" * 1600)
+        assert _stdout_for_error(text) == f"{'H' * 400}\n…\n{'T' * 1600}"
 
 
 class TestCodexRunTurn:
@@ -507,6 +698,180 @@ class TestOrchestrator:
         with pytest.raises(KeyError, match="no agent named"):
             orch.delete("nope")
 
+    def test_reloaded_agent_keeps_the_name_from_state(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "s.json"
+        Orchestrator(state_file=state_file).spawn("named", "echo")
+        loaded = Orchestrator(state_file=state_file)
+        assert loaded.agents["named"].name == "named"
+
+    def test_agent_talk_resumes_on_the_same_instance(self, tmp_path: Path) -> None:
+        seen: list[str | None] = []
+
+        class Rec(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "rec"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                seen.append(session_id)
+                return TurnResult(session_id="sid", reply="r", raw="")
+
+        register_backend("rec", Rec)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "rec")
+        agent = orch.agents["a"]
+        agent.talk("one")
+        agent.talk("two")
+        assert seen == [None, "sid"]
+
+    def test_spawn_takes_an_exclusive_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[int] = []
+
+        def fake_flock(_fd: int, op: int) -> None:
+            seen.append(op)
+
+        monkeypatch.setattr(fcntl, "flock", fake_flock)
+        Orchestrator(state_file=tmp_path / "s.json").spawn("a", "echo")
+        assert fcntl.LOCK_EX in seen
+        assert fcntl.LOCK_UN in seen
+        assert (tmp_path / "s.json.lock").is_file()
+
+    def test_talk_keeps_agents_spawned_during_the_turn(self, tmp_path: Path) -> None:
+        """A long talk must not clobber a concurrent spawn (issue #2)."""
+        state_file = tmp_path / "state.json"
+
+        class MidTurnSpawn(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "midturn"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                Orchestrator(state_file=state_file).spawn("b", "echo")
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("midturn", MidTurnSpawn)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "midturn")
+        orch.talk("a", "hi")
+        reloaded = Orchestrator(state_file=state_file)
+        assert reloaded.list_agents() == ["a", "b"]
+        assert reloaded.agents["a"].session_id == "s1"
+
+    def test_talk_holds_a_per_agent_lock_for_the_whole_turn(
+        self, tmp_path: Path
+    ) -> None:
+        """Two turns on one agent must not both resume its session."""
+        state_file = tmp_path / "state.json"
+        held: list[tuple[bool, bool]] = []
+
+        class ProbeLock(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "probelock"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                probe = Orchestrator(state_file=state_file)
+                held.append(
+                    (
+                        _flock_is_held(probe._agent_lock_path("a")),
+                        _flock_is_held(probe._agent_lock_path("other")),
+                    )
+                )
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("probelock", ProbeLock)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "probelock")
+        orch.talk("a", "hi")
+        # Locked for this agent only, and released once the turn is over.
+        assert held == [(True, False)]
+        assert _flock_is_held(orch._agent_lock_path("a")) is False
+
+    def test_agent_lock_paths_sit_beside_the_state_file(self, tmp_path: Path) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        first = orch._agent_lock_path("a")
+        assert first.parent == tmp_path
+        assert first.name.startswith("state.json.")
+        assert first.name.endswith(".lock")
+        assert first != orch._agent_lock_path("b")
+        assert first != orch._lock_path()
+
+    def test_a_backend_reporting_no_session_keeps_the_stored_one(
+        self, tmp_path: Path
+    ) -> None:
+        """Overwriting a live session id with None restarts the conversation."""
+        state_file = tmp_path / "state.json"
+        replies = iter([TurnResult("s1", "first", ""), TurnResult(None, "second", "")])
+
+        class Forgetful(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "forgetful"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                return next(replies)
+
+        register_backend("forgetful", Forgetful)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "forgetful")
+        orch.talk("a", "one")
+        assert orch.talk("a", "two").reply == "second"
+        assert orch.agents["a"].session_id == "s1"
+        assert Orchestrator(state_file=state_file).agents["a"].session_id == "s1"
+
+    def test_corrupt_state_names_the_file(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{", encoding="utf-8")
+        with pytest.raises(orchestrator.StateError) as excinfo:
+            Orchestrator(state_file=state_file)
+        assert str(excinfo.value).startswith(f"{state_file} is not valid JSON: ")
+
+    def test_state_entry_without_a_backend_is_reported(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"a": {"session_id": "s1"}}', encoding="utf-8")
+        with pytest.raises(orchestrator.StateError) as excinfo:
+            Orchestrator(state_file=state_file)
+        assert excinfo.value.args[0] == f"{state_file}: agent 'a' has no backend"
+
+    def test_state_naming_an_unknown_backend_is_reported(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"a": {"backend": "ghost"}}', encoding="utf-8")
+        with pytest.raises(UnknownBackendError, match="Unknown backend 'ghost'"):
+            Orchestrator(state_file=state_file)
+
+    def test_talk_fails_if_the_agent_is_deleted_during_the_turn(
+        self, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+
+        class DeleteDuring(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "delduring"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                Orchestrator(state_file=state_file).delete("a")
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("delduring", DeleteDuring)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "delduring")
+        with pytest.raises(KeyError, match="no agent named 'a'"):
+            orch.talk("a", "hi")
+        assert Orchestrator(state_file=state_file).list_agents() == []
+
 
 class TestCLI:
     """cmd_* dispatch and printed output, backed by a fake CLI-free backend."""
@@ -546,12 +911,14 @@ class TestCLI:
         assert "session=echo-sid" in out
         assert "echo:hello there" in out
 
-    def test_cmd_talk_empty_prompt_warns(
+    def test_cmd_talk_empty_prompt_exits_nonzero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """Exit 0 here reads as a turn that ran to a caller under `set -e`."""
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a", "echo")
-        cmd_talk(orch, ["a", "   "])
+        with pytest.raises(SystemExit, match="2"):
+            cmd_talk(orch, ["a", "   "])
         captured = capsys.readouterr()
         assert captured.err == "usage: talk <agent> <prompt>\n"
         assert captured.out == ""
@@ -563,6 +930,48 @@ class TestCLI:
         with pytest.raises(SystemExit, match="2"):
             cmd_talk(orch, [])
         assert capsys.readouterr().err.startswith("usage: talk ")
+
+    def test_cmd_talk_prints_backend_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class BoomBackend(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "boom"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise ClaudeTurnError("claude output was not JSON")
+
+        register_backend("boom", BoomBackend)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("b", "boom")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_talk(orch, ["b", "hi"])
+        captured = capsys.readouterr()
+        assert captured.err == "claude output was not JSON\n"
+        assert captured.out == ""
+
+    def test_cmd_talk_prints_codex_backend_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class BoomCodex(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "boomcodex"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise CodexTurnError("codex did not report a thread_id")
+
+        register_backend("boomcodex", BoomCodex)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("c", "boomcodex")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_talk(orch, ["c", "hi"])
+        assert capsys.readouterr().err == "codex did not report a thread_id\n"
 
     def test_cmd_list_empty(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -614,6 +1023,10 @@ class TestCLI:
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator [-v|-vv] <command> [args...]\n"
+            "       orchestrator [-v|-vv] --agent NAME --skill NAME[,NAME...] "
+            "--prompt TEXT\n"
+            "       orchestrator [-v|-vv] --list {agents,skills}\n"
+            "  -h, --help      show this message\n"
             "  -v, --verbose   log each step and how long it took\n"
             "  -vv, --verbose2  also log full prompts and replies\n"
             "commands: spawn, talk, list, delete\n"
@@ -664,6 +1077,101 @@ class TestCLI:
         )
         main(["spawn", "a", "-b", "echo"])
         assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+
+    def test_main_unknown_agent_is_one_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="1"):
+            main(["talk", "nope", "hi"])
+        captured = capsys.readouterr()
+        assert captured.err == "no agent named 'nope'\n"
+        assert captured.out == ""
+        assert "Traceback" not in captured.err
+
+    def test_main_duplicate_spawn_is_one_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        main(["spawn", "a", "-b", "echo"])
+        capsys.readouterr()
+        with pytest.raises(SystemExit, match="1"):
+            main(["spawn", "a", "-b", "echo"])
+        captured = capsys.readouterr()
+        assert captured.err == "agent 'a' already exists\n"
+        assert "Traceback" not in captured.err
+
+    def test_main_unknown_delete_is_one_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="1"):
+            main(["delete", "nope"])
+        assert capsys.readouterr().err == "no agent named 'nope'\n"
+
+    @pytest.mark.parametrize("flag", ["-h", "--help"])
+    def test_main_help_describes_the_whole_cli(
+        self, flag: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Routing every dash token to the skill parser hid the commands."""
+        main([flag])
+        captured = capsys.readouterr()
+        assert (
+            captured.out
+            == f"{orchestrator.USAGE}\ncommands: spawn, talk, list, delete\n"
+        )
+        assert "--skill" in captured.out
+        assert captured.err == ""
+
+    def test_main_lets_an_internal_error_surface(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A bug inside a backend must not print as a one-word usage error."""
+
+        class BuggyBackend(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "buggy"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise KeyError("some internal dict key")
+
+        register_backend("buggy", BuggyBackend)
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        main(["spawn", "b", "-b", "buggy"])
+        capsys.readouterr()
+        with pytest.raises(KeyError, match="some internal dict key"):
+            main(["talk", "b", "hi"])
+
+    def test_main_corrupt_state_is_one_line(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        state = tmp_path / "s.json"
+        state.write_text("{", encoding="utf-8")
+        monkeypatch.setattr(orchestrator, "STATE_FILE", state)
+        with pytest.raises(SystemExit, match="1"):
+            main(["list"])
+        err = capsys.readouterr().err
+        assert err.endswith("\n")
+        assert "Traceback" not in err
+        assert err.count("\n") == 1
 
 
 class TestDescribeCommand:

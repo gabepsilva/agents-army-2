@@ -38,11 +38,22 @@ uv run orchestrator spawn dev -b codex
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer "what did we decide about issue #23?"
 
+# Talk with one or more skills: each name is resolved to a markdown file
+# under SKILLS/ (any subfolder) and that path is prepended to the prompt
+uv run orchestrator --agent reviewer --skill tdd,code-review --prompt "add a test for X"
+
 # List all agents and their session ids
 uv run orchestrator list
 
+# Same agent listing, or the SKILLS/ catalog, via flags (`list` stays)
+uv run orchestrator --list agents
+uv run orchestrator --list skills
+
 # Delete an agent
 uv run orchestrator delete reviewer
+
+# Every form above, listed in one place
+uv run orchestrator --help
 ```
 
 ### Verbosity
@@ -130,6 +141,11 @@ A backend only has to implement `name` and `run_turn(prompt, session_id, cwd)`.
 otherwise, returning a `TurnResult` with the reply and the session id for the
 next turn.
 
+The Claude backend runs `claude --print --output-format json --permission-mode
+bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
+with `sdk_opt_in_required` and can still exit 0 — the orchestrator would get a
+half-written JSON dump instead of a reply.
+
 ### State
 
 The entire registry lives in one JSON file, `orchestrator_state.json`:
@@ -152,6 +168,11 @@ state never leaks into the venv. To relocate it, set `AGENTS_ARMY_HOME`:
 AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator spawn dev -b claude
 ```
 
+Skill files are read from `SKILLS/` next to that same home. `--skill tdd`
+walks the whole tree and attaches the matching markdown path to the prompt.
+A skill name must be unique across every subfolder; a collision is an error.
+To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
+
 ## Project layout
 
 ```
@@ -160,7 +181,8 @@ backends/          # AgentBackend interface + implementations (claude, codex)
   claude.py        # ClaudeBackend (resumes via --resume)
   codex.py         # CodexBackend (resumes via codex exec resume)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator.py    # the orchestrator CLI (spawn / talk / list / delete)
+orchestrator/      # the orchestrator CLI (spawn / talk / list / delete)
+  skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
 tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)
 ```

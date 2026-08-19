@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := ci
 
 SEMGREP_IMAGE := semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
-PYTHON_SOURCES := orchestrator.py backends tools
+PYTHON_SOURCES := orchestrator backends tools
 
 # Parallelize independent gate recipes by default. Set `JOBS=N` (`JOBS=1` for
 # serial logs) to override consistently across the older GNU Make shipped by
@@ -42,14 +42,11 @@ RATCHET_BASE ?= origin/master
 	verify-coverage verify-mutation verify-security verify ci ci-hosted \
 	hooks hook-check dev
 
-# orchestrator.py is force-included into the wheel (see pyproject) rather than
-# living in a package, so an editable install copies it instead of linking it:
-# the `orchestrator` console script keeps running the copy in site-packages
-# until it is reinstalled. Tests are unaffected — pyproject sets
-# pythonpath=["."] for exactly this reason — which is what makes the staleness
-# easy to miss. Run this after editing orchestrator.py.
+# Editable installs now link the orchestrator/ and backends/ packages, so an
+# edit is what `uv run orchestrator` executes. Re-sync after a fresh clone
+# or a lockfile change.
 dev:
-	uv sync --reinstall-package agents-army
+	uv sync --locked --all-groups
 
 format:
 	uv run ruff format .

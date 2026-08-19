@@ -17,6 +17,70 @@ class ClaudeTurnError(RuntimeError):
     """Raised when the Claude CLI returns something unusable."""
 
 
+# Print mode denies tools (gh, Bash, WebFetch) unless a permission mode
+# is set. bypassPermissions is the non-interactive opt-in; without it
+# Claude still exits 0 and the result JSON carries reason=sdk_opt_in_required.
+PERMISSION_MODE = "bypassPermissions"
+
+# The marker that opt-in carries when it did not happen. The CLI keeps exit 0
+# and is_error false, so a turn that ran with no tools at all is otherwise
+# indistinguishable from one that worked: if PERMISSION_MODE ever stops being
+# honoured, only this check turns the degraded reply into a failure.
+OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
+
+
+def _stdout_for_error(stdout: str) -> str:
+    """Keep both ends of a long dump: the parse error is at char 0, the
+    result envelope is usually at the tail."""
+    if len(stdout) <= 2000:
+        return stdout
+    return f"{stdout[:400]}\n…\n{stdout[-1600:]}"
+
+
+def _json_objects(text: str) -> list[dict]:
+    """Scan `text` for every top-level JSON object, in order of appearance."""
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    idx = 0
+    while idx < len(text):
+        start = text.find("{", idx)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        found.append(obj)
+        idx = end
+    return found
+
+
+def _pick_result_object(candidates: list[dict]) -> dict:
+    for obj in reversed(candidates):
+        if obj.get("type") == "result":
+            return obj
+    return candidates[-1]
+
+
+def parse_claude_stdout(stdout: str) -> dict:
+    """Return the Claude result object from `--output-format json` stdout.
+
+    Print mode sometimes writes a text reply (or a stream of objects) before
+    the envelope. json.loads of the whole buffer then fails at column 1 even
+    though a valid result object is sitting at the end.
+    """
+    stripped = stdout.strip()
+    if not stripped:
+        raise ClaudeTurnError("claude output was not JSON\nstdout: ")
+    candidates = _json_objects(stripped)
+    if not candidates:
+        raise ClaudeTurnError(
+            f"claude output was not JSON\nstdout: {_stdout_for_error(stdout)}"
+        )
+    return _pick_result_object(candidates)
+
+
 class ClaudeBackend(AgentBackend):
     """Backend for Anthropic's Claude Code CLI (`claude`)."""
 
@@ -29,7 +93,14 @@ class ClaudeBackend(AgentBackend):
         cwd: Path,
         timeout: int = 1800,
     ) -> TurnResult:
-        args = ["claude", "--print", "--output-format", "json"]
+        args = [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+        ]
         if session_id:
             args += ["--resume", session_id]
         args += ["-p", prompt]
@@ -61,17 +132,26 @@ class ClaudeBackend(AgentBackend):
             raise ClaudeTurnError(
                 f"claude exited {proc.returncode}\nstderr: {proc.stderr[-2000:]}"
             )
-        try:
-            payload = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise ClaudeTurnError(
-                f"claude output was not JSON\nstdout: {proc.stdout[-2000:]}"
-            ) from exc
+        payload = parse_claude_stdout(proc.stdout)
 
         if payload.get("is_error"):
             raise ClaudeTurnError(f"claude reported an error: {payload.get('result')}")
+        if payload.get("reason") == OPT_IN_REQUIRED_REASON:
+            raise ClaudeTurnError(
+                f"claude ran without tools: reason={OPT_IN_REQUIRED_REASON}. "
+                f"--permission-mode {PERMISSION_MODE} did not take effect."
+            )
+        session_id = payload.get("session_id")
+        # No session id means the turn cannot be resumed. Returning None here
+        # would be written over the id already on file, so the next turn would
+        # start a new conversation instead of continuing this agent's.
+        if not isinstance(session_id, str) or not session_id:
+            raise ClaudeTurnError(
+                f"claude did not report a session_id\n"
+                f"stdout: {_stdout_for_error(proc.stdout)}"
+            )
         result = TurnResult(
-            session_id=payload.get("session_id"),
+            session_id=session_id,
             reply=payload.get("result", ""),
             raw=proc.stdout,
         )

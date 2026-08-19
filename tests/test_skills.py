@@ -1,0 +1,666 @@
+"""Skill catalog lookup, prompt composition, and flag-based CLI invocation."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+
+import orchestrator
+from backends.base import AgentBackend, TurnResult
+from backends.claude import ClaudeTurnError
+from backends.registry import register_backend
+from orchestrator import (
+    Orchestrator,
+    cmd_flag_list,
+    cmd_invoke_skills,
+    cmd_list,
+    cmd_talk,
+    main,
+)
+from orchestrator.skills import (
+    PROMPT_HEADER,
+    SkillError,
+    compose_skill_prompt,
+    format_skill_listing,
+    index_skills,
+    parse_skill_names,
+    resolve_skills,
+)
+
+
+class EchoBackend(AgentBackend):
+    """CLI-free backend so these tests never spawn a real agent."""
+
+    @property
+    def name(self) -> str:
+        return "echo"
+
+    def run_turn(self, prompt: str, session_id: str | None, cwd: Path) -> TurnResult:
+        return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
+
+
+@pytest.fixture(autouse=True)
+def register_echo_backend() -> None:
+    register_backend("echo", EchoBackend)
+
+
+@pytest.fixture
+def skills_tree(tmp_path: Path) -> Path:
+    """A catalog with unique names, a three-way clash, and files that are not skills."""
+    root = tmp_path / "SKILLS"
+    foo = root / "nested" / "foo"
+    foo.mkdir(parents=True)
+    (foo / "SKILL.md").write_text("# foo\n", encoding="utf-8")
+    (foo / "extra.md").write_text("# extra companion\n", encoding="utf-8")
+    (foo / "README.md").write_text("# skill-local readme\n", encoding="utf-8")
+    bar = root / "nested" / "deep" / "bar"
+    bar.mkdir(parents=True)
+    (bar / "SKILL.md").write_text("# bar\n", encoding="utf-8")
+    one = root / "one" / "clash"
+    one.mkdir(parents=True)
+    (one / "SKILL.md").write_text("# clash-one\n", encoding="utf-8")
+    two = root / "two" / "clash"
+    two.mkdir(parents=True)
+    (two / "SKILL.md").write_text("# clash-two\n", encoding="utf-8")
+    also = root / "also"
+    also.mkdir()
+    (also / "clash.md").write_text("# clash-loose\n", encoding="utf-8")
+    (root / "loose.md").write_text("# loose\n", encoding="utf-8")
+    (root / "README.md").write_text("# catalog readme\n", encoding="utf-8")
+    # A directory whose name matches the glob must not be indexed as a skill.
+    (root / "not-a-file.md").mkdir()
+    return root
+
+
+def _foo_path(root: Path) -> Path:
+    return (root / "nested" / "foo" / "SKILL.md").resolve()
+
+
+def _bar_path(root: Path) -> Path:
+    return (root / "nested" / "deep" / "bar" / "SKILL.md").resolve()
+
+
+def _loose_path(root: Path) -> Path:
+    return (root / "loose.md").resolve()
+
+
+def _clash_paths(root: Path) -> list[Path]:
+    return sorted(
+        [
+            (root / "also" / "clash.md").resolve(),
+            (root / "one" / "clash" / "SKILL.md").resolve(),
+            (root / "two" / "clash" / "SKILL.md").resolve(),
+        ],
+        key=str,
+    )
+
+
+def _expected_skill_listing(root: Path) -> str:
+    lines = [f"{'bar':20} {_bar_path(root)}"]
+    lines.extend(f"{'clash':20} {path}" for path in _clash_paths(root))
+    lines.append(f"{'foo':20} {_foo_path(root)}")
+    lines.append(f"{'loose':20} {_loose_path(root)}")
+    return "\n".join(lines)
+
+
+class TestParseSkillNames:
+    def test_splits_on_comma_and_strips_whitespace(self) -> None:
+        assert parse_skill_names("tdd, code-review") == ["tdd", "code-review"]
+
+    def test_preserves_cli_order(self) -> None:
+        assert parse_skill_names("code-review,tdd") == ["code-review", "tdd"]
+
+    def test_single_name(self) -> None:
+        assert parse_skill_names("tdd") == ["tdd"]
+
+    def test_empty_token_is_an_error(self) -> None:
+        for raw in ("tdd,", ",tdd", "", "tdd,,code-review"):
+            with pytest.raises(SkillError) as excinfo:
+                parse_skill_names(raw)
+            assert str(excinfo.value) == "empty skill name in --skill"
+
+    def test_duplicate_name_is_an_error(self) -> None:
+        for raw in ("tdd,tdd", "tdd, code-review, tdd"):
+            with pytest.raises(SkillError) as excinfo:
+                parse_skill_names(raw)
+            assert str(excinfo.value) == "duplicate skill name 'tdd' in --skill"
+
+
+class TestIndexSkills:
+    def test_indexes_directory_and_loose_skills(self, skills_tree: Path) -> None:
+        catalog = index_skills(skills_tree)
+        assert set(catalog) == {"foo", "bar", "loose", "clash"}
+        assert catalog["foo"] == [_foo_path(skills_tree)]
+        assert catalog["bar"] == [_bar_path(skills_tree)]
+        assert catalog["loose"] == [_loose_path(skills_tree)]
+        assert catalog["clash"] == _clash_paths(skills_tree)
+
+    def test_does_not_index_companions_or_readmes(self, skills_tree: Path) -> None:
+        catalog = index_skills(skills_tree)
+        for paths in catalog.values():
+            names = {path.name for path in paths}
+            assert "extra.md" not in names
+            assert "README.md" not in names
+
+    def test_missing_directory_is_an_error(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nope"
+        with pytest.raises(SkillError, match=f"skills directory not found: {missing}"):
+            index_skills(missing)
+
+    def test_file_where_a_directory_is_expected_is_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "SKILLS"
+        target.write_text("not a dir\n", encoding="utf-8")
+        with pytest.raises(SkillError, match=f"skills directory not found: {target}"):
+            index_skills(target)
+
+    def test_empty_directory_indexes_nothing(self, tmp_path: Path) -> None:
+        root = tmp_path / "SKILLS"
+        root.mkdir()
+        assert index_skills(root) == {}
+
+
+class TestResolveSkills:
+    def test_directory_skill_is_the_skill_md(self, skills_tree: Path) -> None:
+        assert resolve_skills(["foo"], skills_tree) == [("foo", _foo_path(skills_tree))]
+
+    def test_nested_directory_skill(self, skills_tree: Path) -> None:
+        assert resolve_skills(["bar"], skills_tree) == [("bar", _bar_path(skills_tree))]
+
+    def test_loose_file_skill(self, skills_tree: Path) -> None:
+        assert resolve_skills(["loose"], skills_tree) == [
+            ("loose", _loose_path(skills_tree))
+        ]
+
+    def test_preserves_requested_order(self, skills_tree: Path) -> None:
+        assert resolve_skills(["bar", "foo"], skills_tree) == [
+            ("bar", _bar_path(skills_tree)),
+            ("foo", _foo_path(skills_tree)),
+        ]
+
+    def test_unique_skill_resolves_when_another_name_clashes(
+        self, skills_tree: Path
+    ) -> None:
+        assert resolve_skills(["foo"], skills_tree)[0][1] == _foo_path(skills_tree)
+
+    def test_unknown_name_lists_available_skills(self, skills_tree: Path) -> None:
+        with pytest.raises(SkillError, match="unknown skill 'nope'") as excinfo:
+            resolve_skills(["nope"], skills_tree)
+        assert str(excinfo.value) == (
+            "unknown skill 'nope'. available skills: bar, clash, foo, loose"
+        )
+
+    def test_unknown_name_in_empty_catalog(self, tmp_path: Path) -> None:
+        root = tmp_path / "SKILLS"
+        root.mkdir()
+        with pytest.raises(SkillError) as excinfo:
+            resolve_skills(["nope"], root)
+        assert str(excinfo.value) == "unknown skill 'nope'. no skills found"
+
+    def test_conflict_lists_every_colliding_path(self, skills_tree: Path) -> None:
+        with pytest.raises(SkillError) as excinfo:
+            resolve_skills(["clash"], skills_tree)
+        listed = "\n".join(f"  {path}" for path in _clash_paths(skills_tree))
+        assert str(excinfo.value) == f"skill name 'clash' is not unique:\n{listed}"
+
+    def test_two_way_conflict_is_still_a_conflict(self, tmp_path: Path) -> None:
+        root = tmp_path / "SKILLS"
+        left = root / "left" / "dup"
+        right = root / "right" / "dup"
+        left.mkdir(parents=True)
+        right.mkdir(parents=True)
+        (left / "SKILL.md").write_text("# left\n", encoding="utf-8")
+        (right / "SKILL.md").write_text("# right\n", encoding="utf-8")
+        with pytest.raises(SkillError) as excinfo:
+            resolve_skills(["dup"], root)
+        listed = "\n".join(
+            f"  {path}"
+            for path in sorted(
+                [(left / "SKILL.md").resolve(), (right / "SKILL.md").resolve()],
+                key=str,
+            )
+        )
+        assert str(excinfo.value) == f"skill name 'dup' is not unique:\n{listed}"
+
+    def test_conflict_paths_are_sorted_as_strings(self, tmp_path: Path) -> None:
+        """Path comparison orders these opposite to str; the message uses str."""
+        root = tmp_path / "SKILLS"
+        (root / "x").mkdir(parents=True)
+        (root / "x-y").mkdir(parents=True)
+        (root / "x" / "clash.md").write_text("# x\n", encoding="utf-8")
+        (root / "x-y" / "clash.md").write_text("# x-y\n", encoding="utf-8")
+        hyphen = (root / "x-y" / "clash.md").resolve()
+        slash = (root / "x" / "clash.md").resolve()
+        with pytest.raises(SkillError) as excinfo:
+            resolve_skills(["clash"], root)
+        assert str(excinfo.value) == (
+            f"skill name 'clash' is not unique:\n  {hyphen}\n  {slash}"
+        )
+
+
+class TestComposeSkillPrompt:
+    def test_paths_come_before_the_user_text(self, skills_tree: Path) -> None:
+        resolved = resolve_skills(["foo", "bar"], skills_tree)
+        prompt = compose_skill_prompt(resolved, "do the work")
+        foo = _foo_path(skills_tree)
+        bar = _bar_path(skills_tree)
+        extra = (skills_tree / "nested" / "foo" / "extra.md").resolve()
+        assert extra not in {foo, bar}
+        assert str(extra) not in prompt
+        assert prompt == (
+            f"{PROMPT_HEADER}\n\n- foo: {foo}\n- bar: {bar}\n\n---\n\ndo the work"
+        )
+
+    def test_single_skill_still_separates_path_from_prompt(
+        self, skills_tree: Path
+    ) -> None:
+        resolved = resolve_skills(["loose"], skills_tree)
+        path = _loose_path(skills_tree)
+        assert compose_skill_prompt(resolved, "only this") == (
+            f"{PROMPT_HEADER}\n\n- loose: {path}\n\n---\n\nonly this"
+        )
+
+
+class TestFormatSkillListing:
+    def test_empty_catalog(self) -> None:
+        assert format_skill_listing({}) == "no skills"
+
+    def test_lists_each_file_sorted_by_name(self, skills_tree: Path) -> None:
+        catalog = index_skills(skills_tree)
+        listing = format_skill_listing(catalog)
+        assert listing == _expected_skill_listing(skills_tree)
+        extra = str((skills_tree / "nested" / "foo" / "extra.md").resolve())
+        assert extra not in listing
+        assert "README.md" not in listing
+
+    def test_does_not_use_path_comparison_order(self, tmp_path: Path) -> None:
+        """str sort puts x-y before x/...; Path sort is the opposite."""
+        root = tmp_path / "SKILLS"
+        (root / "x").mkdir(parents=True)
+        (root / "x-y").mkdir(parents=True)
+        (root / "x" / "clash.md").write_text("# x\n", encoding="utf-8")
+        (root / "x-y" / "clash.md").write_text("# x-y\n", encoding="utf-8")
+        hyphen = (root / "x-y" / "clash.md").resolve()
+        slash = (root / "x" / "clash.md").resolve()
+        listing = format_skill_listing(index_skills(root))
+        assert listing == f"{'clash':20} {hyphen}\n{'clash':20} {slash}"
+
+
+class TestCmdFlagList:
+    @pytest.fixture
+    def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
+        return Orchestrator(state_file=tmp_path / "s.json")
+
+    def test_list_agents_matches_the_list_command(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch.spawn("a", "echo")
+        cmd_list(orch, [])
+        via_command = capsys.readouterr().out
+        cmd_flag_list(orch, ["--list", "agents"])
+        via_flag = capsys.readouterr().out
+        assert via_flag == via_command
+        assert via_flag == "a                    backend=echo   session=-\n"
+
+    def test_list_agents_empty(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cmd_flag_list(orch, ["--list", "agents"])
+        assert capsys.readouterr().out == "no agents\n"
+
+    def test_list_skills_prints_catalog(
+        self,
+        orch: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cmd_flag_list(orch, ["--list", "skills"])
+        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+
+    def test_list_skills_empty_catalog(
+        self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        empty = tmp_path / "SKILLS"
+        empty.mkdir()
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", empty)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_flag_list(orch, ["--list", "skills"])
+        assert capsys.readouterr().out == "no skills\n"
+
+    def test_list_skills_missing_dir(
+        self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        missing = tmp_path / "absent"
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_flag_list(orch, ["--list", "skills"])
+        captured = capsys.readouterr()
+        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.out == ""
+
+    def test_missing_list_flag_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_flag_list(orch, [])
+        err = capsys.readouterr().err
+        assert "usage: orchestrator" in err
+        assert "--list" in err
+
+    def test_unknown_list_target_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_flag_list(orch, ["--list", "bogus"])
+        err = capsys.readouterr().err
+        assert "usage: orchestrator" in err
+        assert "bogus" in err
+
+    def test_list_rejects_extra_args(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_flag_list(orch, ["--list", "agents", "extra"])
+        assert "usage: orchestrator" in capsys.readouterr().err
+
+    def test_only_list_tokens_are_the_list_invocation(self) -> None:
+        assert orchestrator._is_list_invocation(["--list", "agents"]) is True
+        assert orchestrator._is_list_invocation(["--list=skills"]) is True
+        assert orchestrator._is_list_invocation(["--agent", "a"]) is False
+        assert orchestrator._is_list_invocation(["list"]) is False
+        assert orchestrator._is_list_invocation(["--list-skills"]) is False
+
+
+class TestCmdInvokeSkills:
+    @pytest.fixture
+    def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        return orch
+
+    def test_prints_talk_style_reply(
+        self,
+        orch: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cmd_invoke_skills(orch, ["--agent", "a", "--skill", "foo", "--prompt", "do it"])
+        out = capsys.readouterr().out
+        assert "session=echo-sid" in out
+        assert f"- foo: {_foo_path(skills_tree)}" in out
+        assert out.strip().endswith("do it")
+        extra = str((skills_tree / "nested" / "foo" / "extra.md").resolve())
+        assert extra not in out
+
+    def test_attaches_skills_in_cli_order(
+        self,
+        orch: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cmd_invoke_skills(
+            orch,
+            ["--agent", "a", "--skill", "bar, foo", "--prompt", "both"],
+        )
+        out = capsys.readouterr().out
+        assert out.index(f"- bar: {_bar_path(skills_tree)}") < out.index(
+            f"- foo: {_foo_path(skills_tree)}"
+        )
+
+    def test_unknown_skill_exits_without_talking(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(
+                orch, ["--agent", "a", "--skill", "nope", "--prompt", "x"]
+            )
+        captured = capsys.readouterr()
+        assert "unknown skill 'nope'" in captured.err
+        assert captured.out == ""
+
+    def test_conflict_exits_without_talking(
+        self,
+        orch: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(
+                orch, ["--agent", "a", "--skill", "clash", "--prompt", "x"]
+            )
+        captured = capsys.readouterr()
+        assert "skill name 'clash' is not unique" in captured.err
+        for path in _clash_paths(skills_tree):
+            assert str(path) in captured.err
+        assert captured.out == ""
+
+    def test_unknown_agent_exits_without_a_traceback(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "missing", "--skill", "foo", "--prompt", "x"],
+            )
+        captured = capsys.readouterr()
+        assert captured.err == "no agent named 'missing'\n"
+        assert captured.out == ""
+
+    def test_empty_prompt_exits_nonzero_like_talk(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(
+                orch, ["--agent", "a", "--skill", "foo", "--prompt", "   "]
+            )
+        captured = capsys.readouterr()
+        assert captured.err == (
+            "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"
+        )
+        assert captured.out == ""
+
+    def test_missing_prompt_flag_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(orch, ["--agent", "a", "--skill", "foo"])
+        err = capsys.readouterr().err
+        assert "usage: orchestrator" in err
+        assert "--prompt" in err
+
+    def test_missing_agent_flag_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(orch, ["--skill", "foo", "--prompt", "x"])
+        err = capsys.readouterr().err
+        assert "usage: orchestrator" in err
+        assert "--agent" in err
+
+    def test_missing_skill_flag_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(orch, ["--agent", "a", "--prompt", "x"])
+        err = capsys.readouterr().err
+        assert "usage: orchestrator" in err
+        assert "--skill" in err
+
+    def test_duplicate_skill_flag_value_exits(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "a", "--skill", "foo,foo", "--prompt", "x"],
+            )
+        assert "duplicate skill name 'foo'" in capsys.readouterr().err
+
+    def test_backend_error_is_printed_not_a_traceback(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class BoomBackend(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "boom"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise ClaudeTurnError("claude output was not JSON")
+
+        register_backend("boom", BoomBackend)
+        orch.spawn("b", "boom")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(orch, ["--agent", "b", "--skill", "foo", "--prompt", "x"])
+        captured = capsys.readouterr()
+        assert captured.err == "claude output was not JSON\n"
+        assert captured.out == ""
+
+    def test_logs_attached_skill_names(
+        self, orch: Orchestrator, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO", logger="orchestrator"):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "a", "--skill", "foo,bar", "--prompt", "x"],
+            )
+        assert "agent 'a': attaching skill(s) foo, bar" in [
+            r.getMessage() for r in caplog.records
+        ]
+
+
+class TestMainSkillInvocation:
+    @pytest.fixture
+    def isolated(
+        self, tmp_path: Path, skills_tree: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> Orchestrator:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
+        for name in ("orchestrator", "backends"):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+        return orch
+
+    def test_flag_path_sends_composed_prompt(
+        self,
+        isolated: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        main(["--agent", "a", "--skill", "foo", "--prompt", "do it"])
+        out = capsys.readouterr().out
+        assert "session=echo-sid" in out
+        assert f"- foo: {_foo_path(skills_tree)}" in out
+        assert "do it" in out
+
+    def test_verbose_flag_is_peeled_before_skill_flags(
+        self,
+        isolated: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            main(["-v", "--agent", "a", "--skill", "foo", "--prompt", "do it"])
+        assert "session=echo-sid" in capsys.readouterr().out
+        assert "cli: dispatching skill invocation" in [
+            r.getMessage() for r in caplog.records
+        ]
+
+    def test_prompt_token_equal_to_a_verbose_flag_is_kept(
+        self,
+        isolated: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        main(["--agent", "a", "--skill", "foo", "--prompt", "add -v please"])
+        assert "add -v please" in capsys.readouterr().out
+        assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
+
+    def test_talk_positional_form_is_unchanged(
+        self,
+        isolated: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        cmd_talk(isolated, ["a", "hello", "there"])
+        assert "echo:hello there" in capsys.readouterr().out
+
+    def test_talk_via_main_is_unchanged(
+        self,
+        isolated: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        main(["talk", "a", "plain"])
+        out = capsys.readouterr().out
+        assert "echo:plain" in out
+        assert PROMPT_HEADER not in out
+
+    def test_list_agents_via_main(
+        self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["--list", "agents"])
+        assert (
+            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        )
+
+    def test_list_skills_via_main(
+        self,
+        isolated: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        main(["--list", "skills"])
+        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+
+    def test_list_equals_form_is_accepted(
+        self,
+        isolated: Orchestrator,
+        skills_tree: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        main(["--list=skills"])
+        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+
+    def test_list_command_is_unchanged(
+        self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        main(["list"])
+        assert (
+            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        )
+
+    def test_verbose_flag_is_peeled_before_list(
+        self,
+        isolated: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            main(["-v", "--list", "agents"])
+        assert (
+            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        )
+        assert "cli: dispatching --list" in [r.getMessage() for r in caplog.records]
+
+    def test_missing_skills_dir_exits(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        missing = tmp_path / "absent"
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
+        with pytest.raises(SystemExit, match="1"):
+            main(["--agent", "a", "--skill", "foo", "--prompt", "x"])
+        captured = capsys.readouterr()
+        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.out == ""
