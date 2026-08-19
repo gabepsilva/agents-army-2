@@ -424,6 +424,15 @@ class TestCmdInvokeSkills:
         assert "unknown skill 'nope'" in captured.err
         assert captured.out == ""
 
+    def test_unknown_skill_creates_no_agent(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            cmd_invoke_skills(
+                orch, ["--agent", "missing", "--skill", "nope", "--prompt", "x"]
+            )
+        assert orch.list_agents() == ["a"]
+
     def test_conflict_exits_without_talking(
         self,
         orch: Orchestrator,
@@ -440,17 +449,18 @@ class TestCmdInvokeSkills:
             assert str(path) in captured.err
         assert captured.out == ""
 
-    def test_unknown_agent_exits_without_a_traceback(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    def test_unknown_agent_is_created_then_talked_to(
+        self, orch: Orchestrator, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
-                orch,
-                ["--agent", "missing", "--skill", "foo", "--prompt", "x"],
-            )
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        cmd_invoke_skills(
+            orch,
+            ["--agent", "missing", "--skill", "foo", "--prompt", "x"],
+        )
         captured = capsys.readouterr()
-        assert captured.err == "no agent named 'missing'\n"
-        assert captured.out == ""
+        assert captured.err == "spawned agent 'missing' backend=echo\n"
+        assert "session=echo-sid" in captured.out
+        assert orch.list_agents() == ["a", "missing"]
 
     def test_empty_prompt_exits_nonzero_like_talk(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
