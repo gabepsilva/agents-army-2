@@ -9,15 +9,27 @@ so each agent keeps its own conversation history across messages.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from backends import AgentBackend, TurnResult, get_backend, list_backends
+from backends.claude import ClaudeTurnError
+from backends.codex import CodexTurnError
+from skills import (
+    SkillError,
+    compose_skill_prompt,
+    format_skill_listing,
+    index_skills,
+    parse_skill_names,
+    resolve_skills,
+)
 
 # State lives in the caller's working directory (override with AGENTS_ARMY_HOME)
 # rather than next to the installed package, so it doesn't leak into the venv.
@@ -25,6 +37,8 @@ HOME = Path(os.environ.get("AGENTS_ARMY_HOME", Path.cwd()))
 STATE_FILE = HOME / "orchestrator_state.json"
 # Agents run their CLI sessions from a single shared working directory.
 WORKDIR = HOME
+# Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
+SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", HOME / "SKILLS"))
 
 # Named explicitly rather than via __name__: this module runs both as a script
 # (__main__) and as the `orchestrator` console script, and _configure_logging
@@ -36,6 +50,9 @@ log = logging.getLogger("orchestrator")
 # safe to paste, and -vv is the deliberate opt-in to the whole transcript.
 TRACE = logging.DEBUG - 5
 logging.addLevelName(TRACE, "TRACE")
+
+# User-facing failures that must print one line and exit 1, never a traceback.
+_CLI_ERRORS = (KeyError, ValueError, json.JSONDecodeError)
 
 
 class Agent:
@@ -72,43 +89,71 @@ class Orchestrator:
     agent once and talk to it later, resuming the same CLI session.
     """
 
-    def __init__(self, state_file: Path = STATE_FILE) -> None:
-        self.state_file = state_file
+    def __init__(self, state_file: Path | None = None) -> None:
+        self.state_file = STATE_FILE if state_file is None else state_file
         self.agents: dict[str, Agent] = {}
-        state = self._load_state()
-        for name, entry in state.items():
-            agent = Agent(name, get_backend(entry["backend"]))
-            agent.session_id = entry.get("session_id")
-            self.agents[name] = agent
+        self._reload()
         log.debug(
             "state: loaded %d agent(s) from %s", len(self.agents), self.state_file
         )
 
     def spawn(self, name: str, backend: str = "claude") -> Agent:
-        if name in self.agents:
-            raise ValueError(f"agent '{name}' already exists")
-        agent = Agent(name, get_backend(backend))
-        self.agents[name] = agent
-        self._persist()
-        return agent
+        with self._exclusive():
+            self._reload()
+            if name in self.agents:
+                raise ValueError(f"agent '{name}' already exists")
+            agent = Agent(name, get_backend(backend))
+            self.agents[name] = agent
+            self._persist()
+            return agent
 
     def talk(self, name: str, prompt: str) -> TurnResult:
-        agent = self.agents.get(name)
-        if agent is None:
-            raise KeyError(f"no agent named '{name}'")
+        with self._exclusive():
+            self._reload()
+            agent = self.agents.get(name)
+            if agent is None:
+                raise KeyError(f"no agent named '{name}'")
         result = agent.talk(prompt)
-        self._persist()
+        with self._exclusive():
+            self._reload()
+            if name not in self.agents:
+                raise KeyError(f"no agent named '{name}'")
+            self.agents[name].session_id = result.session_id
+            self._persist()
         return result
 
     def list_agents(self) -> list[str]:
         return sorted(self.agents)
 
     def delete(self, name: str) -> Agent:
-        agent = self.agents.pop(name, None)
-        if agent is None:
-            raise KeyError(f"no agent named '{name}'")
-        self._persist()
-        return agent
+        with self._exclusive():
+            self._reload()
+            agent = self.agents.pop(name, None)
+            if agent is None:
+                raise KeyError(f"no agent named '{name}'")
+            self._persist()
+            return agent
+
+    def _lock_path(self) -> Path:
+        return self.state_file.with_name(self.state_file.name + ".lock")
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        path = self._lock_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _reload(self) -> None:
+        self.agents = {}
+        for name, entry in self._load_state().items():
+            agent = Agent(name, get_backend(entry["backend"]))
+            agent.session_id = entry.get("session_id")
+            self.agents[name] = agent
 
     def _load_state(self) -> dict[str, dict]:
         if self.state_file.exists():
@@ -123,9 +168,10 @@ class Orchestrator:
             }
             for name, a in self.agents.items()
         }
-        self.state_file.write_text(
-            json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+        tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(self.state_file)
         log.debug("state: wrote %d agent(s) to %s", len(state), self.state_file)
 
 
@@ -152,14 +198,16 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     if not prompt:
         print("usage: talk <agent> <prompt>", file=sys.stderr)
         return
-    result = orchestrator.talk(opts.name, prompt)
+    try:
+        result = orchestrator.talk(opts.name, prompt)
+    except (ClaudeTurnError, CodexTurnError) as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
     print(f"[{opts.name} session={result.session_id}]")
     print(result.reply)
 
 
-def cmd_list(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="list")
-    parser.parse_args(args)
+def _print_agents(orchestrator: Orchestrator) -> None:
     agents = orchestrator.list_agents()
     if not agents:
         print("no agents")
@@ -170,12 +218,75 @@ def cmd_list(orchestrator: Orchestrator, args: list[str]) -> None:
         print(f"{name:20} backend={agent.backend.name:6} session={sid}")
 
 
+def cmd_list(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="list")
+    parser.parse_args(args)
+    _print_agents(orchestrator)
+
+
 def cmd_delete(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="delete")
     parser.add_argument("name")
     opts = parser.parse_args(args)
     agent = orchestrator.delete(opts.name)
     print(f"deleted agent '{agent.name}' backend={agent.backend.name}")
+
+
+def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="orchestrator")
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--skill", required=True)
+    parser.add_argument("--prompt", required=True)
+    opts = parser.parse_args(args)
+    prompt = opts.prompt.strip()
+    if not prompt:
+        print(
+            "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT",
+            file=sys.stderr,
+        )
+        return
+    try:
+        names = parse_skill_names(opts.skill)
+        resolved = resolve_skills(names, SKILLS_DIR)
+    except SkillError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
+    composed = compose_skill_prompt(resolved, prompt)
+    log.info(
+        "agent '%s': attaching skill(s) %s",
+        opts.agent,
+        ", ".join(name for name, _path in resolved),
+    )
+    try:
+        result = orchestrator.talk(opts.agent, composed)
+    except KeyError:
+        print(f"no agent named '{opts.agent}'", file=sys.stderr)
+        raise SystemExit(1) from None
+    except (ClaudeTurnError, CodexTurnError) as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(f"[{opts.agent} session={result.session_id}]")
+    print(result.reply)
+
+
+def cmd_flag_list(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = argparse.ArgumentParser(prog="orchestrator")
+    parser.add_argument("--list", required=True, choices=("agents", "skills"))
+    opts = parser.parse_args(args)
+    if opts.list == "agents":
+        _print_agents(orchestrator)
+        return
+    try:
+        catalog = index_skills(SKILLS_DIR)
+    except SkillError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(format_skill_listing(catalog))
+
+
+def _is_list_invocation(argv: list[str]) -> bool:
+    token = argv[0]
+    return token == "--list" or token.startswith("--list=")
 
 
 COMMANDS: dict[str, Callable[[Orchestrator, list[str]], None]] = {
@@ -200,6 +311,8 @@ OWN_LOGGERS = ("orchestrator", "backends")
 
 USAGE = (
     "usage: orchestrator [-v|-vv] <command> [args...]\n"
+    "       orchestrator [-v|-vv] --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"
+    "       orchestrator [-v|-vv] --list {agents,skills}\n"
     "  -v, --verbose   log each step and how long it took\n"
     "  -vv, --verbose2  also log full prompts and replies"
 )
@@ -235,13 +348,28 @@ def main(argv: list[str] | None = None) -> None:
     # The prompt is one of these arguments, so log the shape and not the values.
     log.debug("cli: %d argument(s) after flag removal", len(argv))
 
-    if not argv or argv[0] not in COMMANDS:
+    if not argv or (argv[0] not in COMMANDS and not argv[0].startswith("-")):
         print(USAGE, file=sys.stderr)
         print(f"commands: {', '.join(COMMANDS)}", file=sys.stderr)
         raise SystemExit(2)
-    orchestrator = Orchestrator()
-    log.debug("cli: dispatching '%s'", argv[0])
-    COMMANDS[argv[0]](orchestrator, argv[1:])
+
+    try:
+        orch = Orchestrator()
+        if argv[0] in COMMANDS:
+            log.debug("cli: dispatching '%s'", argv[0])
+            COMMANDS[argv[0]](orch, argv[1:])
+            return
+        if _is_list_invocation(argv):
+            log.debug("cli: dispatching --list")
+            cmd_flag_list(orch, argv)
+            return
+        log.debug("cli: dispatching skill invocation")
+        cmd_invoke_skills(orch, argv)
+    except _CLI_ERRORS as exc:
+        # KeyError(str) renders as '"message"' — print the payload, not repr.
+        message = exc.args[0] if exc.args else str(exc)
+        print(message, file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":  # pragma: no cover

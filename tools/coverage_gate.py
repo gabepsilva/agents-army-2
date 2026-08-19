@@ -22,11 +22,16 @@ COVERAGE_PATH = Path("coverage.json")
 # and event-parsing branches were closed rather than floored down), so there
 # is no legacy slack to grandfather in.
 FLOORS: dict[str, float] = {
-    "orchestrator.py": 100.0,
+    "orchestrator/__init__.py": 100.0,
+    "skills/__init__.py": 100.0,
     "backends/base.py": 100.0,
     "backends/claude.py": 100.0,
     "backends/codex.py": 100.0,
     "backends/registry.py": 100.0,
+    "tools/coverage_gate.py": 100.0,
+    "tools/mutation_gate.py": 100.0,
+    "tools/ratchet_gate.py": 100.0,
+    "tools/test_integrity.py": 100.0,
 }
 
 # A module added after this gate existed has no legacy excuse.
@@ -92,5 +97,5 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())

@@ -19,10 +19,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backends"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"orchestrator.py" = "orchestrator.py"
+packages = ["backends", "orchestrator", "skills"]
 
 [dependency-groups]
 dev = [
@@ -73,11 +70,8 @@ select = [
 "tests/**/*.py" = ["ARG001", "ARG002"]
 
 [tool.pytest.ini_options]
-# `orchestrator.py` is wheel force-included (see [tool.hatch.build.targets.
-# wheel.force-include] above), so an installed copy sits in site-packages
-# alongside the editable install. Without this, `import orchestrator` in
-# tests can silently resolve to that installed copy instead of the source
-# file being edited, and both tests and coverage would exercise stale code.
+# Prefer the checkout over a leftover site-packages copy so tests exercise
+# the files being edited. Editable installs now link these packages live.
 pythonpath = ["."]
 addopts = [
     "--strict-config",
@@ -102,14 +96,18 @@ skip_empty = true
 
 [tool.mutmut]
 source_paths = [
-    "orchestrator.py",
+    "orchestrator/__init__.py",
+    "skills/__init__.py",
     "backends/base.py",
     "backends/claude.py",
     "backends/codex.py",
     "backends/registry.py",
 ]
-also_copy = ["backends/", "orchestrator.py"]
-pytest_add_cli_args_test_selection = ["tests/test_backends.py"]
+also_copy = ["backends/", "orchestrator/", "skills/"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_backends.py",
+    "tests/test_skills.py",
+]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]
 
 [tool.bandit]

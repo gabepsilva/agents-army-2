@@ -9,20 +9,22 @@ report.
 
 Raise MUTATION_SCORE_FLOOR as survivors are killed. Never lower it.
 
-Recorded 2026-08-18 at 562/569 (98.8%), previously 542/550 (98.5%). The 7
-survivors are equivalent mutants — they cannot change behavior, so no test
-can detect them:
+Recorded 2026-08-19 at 859/876 (98.1%). The survivors are equivalent
+mutants — they cannot change behavior, so no test can detect them:
 
-  * `encoding="utf-8"` -> `encoding="UTF-8"` (Orchestrator._load_state,
-    Orchestrator._persist): codec names are normalized case-insensitively.
-  * `encoding="utf-8"` -> `encoding=None` (_load_state, _persist) or
-    omitted entirely (_persist): falls back to the locale encoding, which
-    is UTF-8 wherever this runs.
+  * `encoding="utf-8"` -> `encoding="UTF-8"` / `None` (Orchestrator._load_state,
+    Orchestrator._persist): codec names are case-insensitive; None falls
+    back to UTF-8 wherever this runs.
   * `default="claude"` -> `default="CLAUDE"` (Orchestrator.spawn,
-    cmd_spawn's --backend flag): backends.registry.get_backend()
-    lower()s the name before lookup, so both resolve to the same backend.
+    cmd_spawn's --backend flag): get_backend() lower()s the name.
+  * `catalog.get(name, [])` -> `catalog.get(name, None)` (skills.resolve_skills):
+    a missing name still hits `if not matches`.
+  * `self.agents = {}` -> `None` in Orchestrator.__init__: `_reload()`
+    replaces it immediately.
+  * `str(exc)` -> `str(None)` in the empty-args branch of main(): every
+    KeyError/ValueError/JSONDecodeError we raise has args.
 
-Do not chase this last 1.2%, and do not silence it with
+Do not chase this last 1.9%, and do not silence it with
 `# pragma: no mutate` either — an equivalent mutant is evidence the code is
 precise, not evidence a test is missing.
 """
@@ -68,5 +70,5 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
