@@ -41,6 +41,9 @@ STATE_FILE = HOME / "orchestrator_state.json"
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
 SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", HOME / "SKILLS"))
+# The backend an agent gets when none is named: by `spawn`, and by the agent a
+# talk creates for a name that does not exist yet.
+DEFAULT_BACKEND = "claude"
 
 # Named explicitly rather than via __name__: this module runs both as a script
 # (__main__) and as the `orchestrator` console script, and _configure_logging
@@ -127,15 +130,40 @@ class Orchestrator:
             "state: loaded %d agent(s) from %s", len(self.agents), self.state_file
         )
 
-    def spawn(self, name: str, backend: str = "claude") -> Agent:
+    def spawn(self, name: str, backend: str | None = None) -> Agent:
         with self._exclusive():
             self._reload()
             if name in self.agents:
                 raise AgentExistsError(f"agent '{name}' already exists")
-            agent = Agent(name, get_backend(backend))
-            self.agents[name] = agent
-            self._persist()
-            return agent
+            return self._create(name, backend)
+
+    def ensure(self, name: str, backend: str | None = None) -> tuple[Agent, bool]:
+        """Return the named agent, creating it first if it does not exist.
+
+        Reports whether it had to create one, so a caller can say so. The
+        lookup and the create share one lock rather than being a `spawn` after
+        a failed `talk`: two processes naming the same new agent at once then
+        get one agent between them, not a spawn that loses to a duplicate.
+        """
+        with self._exclusive():
+            self._reload()
+            existing = self.agents.get(name)
+            if existing is not None:
+                return existing, False
+            return self._create(name, backend), True
+
+    def _create(self, name: str, backend: str | None) -> Agent:
+        """Register and persist a new agent. The caller holds `_exclusive()`.
+
+        `None` means "whatever the default backend is now": resolving it here
+        rather than in a default argument keeps DEFAULT_BACKEND a live lookup.
+        """
+        agent = Agent(
+            name, get_backend(DEFAULT_BACKEND if backend is None else backend)
+        )
+        self.agents[name] = agent
+        self._persist()
+        return agent
 
     def talk(self, name: str, prompt: str) -> TurnResult:
         with self._agent_lock(name):
@@ -247,6 +275,21 @@ def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
     print(f"spawned agent '{agent.name}' backend={agent.backend.name}")
 
 
+def _ensure_agent(orchestrator: Orchestrator, name: str) -> None:
+    """Create `name` if talking to it would otherwise fail, and say so.
+
+    The notice goes to stderr: stdout carries the reply and is what a pipe
+    reads, and an agent having been created is commentary on the turn, not
+    part of it.
+    """
+    agent, created = orchestrator.ensure(name)
+    if created:
+        print(
+            f"spawned agent '{agent.name}' backend={agent.backend.name}",
+            file=sys.stderr,
+        )
+
+
 def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="talk")
     parser.add_argument("name")
@@ -258,6 +301,7 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
         # `set -e` must not read "nothing ran" as a turn that succeeded.
         print("usage: talk <agent> <prompt>", file=sys.stderr)
         raise SystemExit(2)
+    _ensure_agent(orchestrator, opts.name)
     try:
         result = orchestrator.talk(opts.name, prompt)
     except (ClaudeTurnError, CodexTurnError) as exc:
@@ -317,11 +361,11 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
         opts.agent,
         ", ".join(name for name, _path in resolved),
     )
+    # After the skills resolve, so a bad --skill exits without having left a
+    # new agent behind for a turn that never ran.
+    _ensure_agent(orchestrator, opts.agent)
     try:
         result = orchestrator.talk(opts.agent, composed)
-    except KeyError:
-        print(f"no agent named '{opts.agent}'", file=sys.stderr)
-        raise SystemExit(1) from None
     except (ClaudeTurnError, CodexTurnError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None

@@ -657,6 +657,45 @@ class TestOrchestrator:
         with pytest.raises(ValueError, match="already exists"):
             orch.spawn("a1", "claude")
 
+    def test_ensure_creates_a_missing_agent(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        agent, created = orch.ensure("fresh", "echo")
+        assert created is True
+        assert agent.name == "fresh"
+        assert agent.backend.name == "echo"
+        assert Orchestrator(state_file=state_file).list_agents() == ["fresh"]
+
+    def test_ensure_defaults_to_the_default_backend(self, tmp_path: Path) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        agent, _created = orch.ensure("fresh")
+        assert agent.backend.name == orchestrator.DEFAULT_BACKEND
+
+    def test_ensure_returns_an_existing_agent_untouched(self, tmp_path: Path) -> None:
+        """An existing agent keeps its backend and its session, not a new one."""
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "echo")
+        orch.talk("a", "hi")
+        agent, created = orch.ensure("a", "codex")
+        assert created is False
+        assert agent.backend.name == "echo"
+        assert agent.session_id == "echo-sid"
+
+    def test_ensure_takes_an_exclusive_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The lookup and the create are one critical section, not two."""
+        seen: list[int] = []
+
+        def fake_flock(_fd: int, op: int) -> None:
+            seen.append(op)
+
+        monkeypatch.setattr(fcntl, "flock", fake_flock)
+        Orchestrator(state_file=tmp_path / "s.json").ensure("a", "echo")
+        assert fcntl.LOCK_EX in seen
+        assert fcntl.LOCK_UN in seen
+
     def test_talk_unknown_raises(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         with pytest.raises(KeyError, match="no agent named"):
@@ -911,6 +950,40 @@ class TestCLI:
         assert "session=echo-sid" in out
         assert "echo:hello there" in out
 
+    def test_cmd_talk_creates_a_missing_agent(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Talking to a name that does not exist spawns it and runs the turn."""
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        cmd_talk(orch, ["fresh", "hello"])
+        captured = capsys.readouterr()
+        assert captured.err == "spawned agent 'fresh' backend=echo\n"
+        assert "echo:hello" in captured.out
+        assert Orchestrator(state_file=state_file).list_agents() == ["fresh"]
+
+    def test_cmd_talk_says_nothing_extra_for_an_existing_agent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo")
+        cmd_talk(orch, ["a", "hello"])
+        assert capsys.readouterr().err == ""
+
+    def test_cmd_talk_empty_prompt_creates_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A rejected invocation must not leave an agent behind."""
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        with pytest.raises(SystemExit, match="2"):
+            cmd_talk(orch, ["fresh", "   "])
+        assert Orchestrator(state_file=state_file).list_agents() == []
+
     def test_cmd_talk_empty_prompt_exits_nonzero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -1078,19 +1151,19 @@ class TestCLI:
         main(["spawn", "a", "-b", "echo"])
         assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
 
-    def test_main_unknown_agent_is_one_line(
+    def test_main_talk_creates_a_missing_agent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """`talk <new-name>` is a spawn plus a turn, not an error."""
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
-        with pytest.raises(SystemExit, match="1"):
-            main(["talk", "nope", "hi"])
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        main(["talk", "nope", "hi"])
         captured = capsys.readouterr()
-        assert captured.err == "no agent named 'nope'\n"
-        assert captured.out == ""
-        assert "Traceback" not in captured.err
+        assert captured.err == "spawned agent 'nope' backend=echo\n"
+        assert "echo:hi" in captured.out
 
     def test_main_duplicate_spawn_is_one_line(
         self,
