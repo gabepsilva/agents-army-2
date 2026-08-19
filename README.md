@@ -51,6 +51,9 @@ uv run orchestrator --list skills
 
 # Delete an agent
 uv run orchestrator delete reviewer
+
+# Every form above, listed in one place
+uv run orchestrator --help
 ```
 
 ### Verbosity
@@ -179,7 +182,7 @@ backends/          # AgentBackend interface + implementations (claude, codex)
   codex.py         # CodexBackend (resumes via codex exec resume)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (spawn / talk / list / delete)
-skills/            # --skill name lookup under SKILLS/ + prompt composition
+  skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
 tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)
 ```

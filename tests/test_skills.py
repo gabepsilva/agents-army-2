@@ -19,7 +19,7 @@ from orchestrator import (
     cmd_talk,
     main,
 )
-from skills import (
+from orchestrator.skills import (
     PROMPT_HEADER,
     SkillError,
     compose_skill_prompt,
@@ -452,10 +452,13 @@ class TestCmdInvokeSkills:
         assert captured.err == "no agent named 'missing'\n"
         assert captured.out == ""
 
-    def test_empty_prompt_warns_like_talk(
+    def test_empty_prompt_exits_nonzero_like_talk(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cmd_invoke_skills(orch, ["--agent", "a", "--skill", "foo", "--prompt", "   "])
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(
+                orch, ["--agent", "a", "--skill", "foo", "--prompt", "   "]
+            )
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"

@@ -22,6 +22,12 @@ class ClaudeTurnError(RuntimeError):
 # Claude still exits 0 and the result JSON carries reason=sdk_opt_in_required.
 PERMISSION_MODE = "bypassPermissions"
 
+# The marker that opt-in carries when it did not happen. The CLI keeps exit 0
+# and is_error false, so a turn that ran with no tools at all is otherwise
+# indistinguishable from one that worked: if PERMISSION_MODE ever stops being
+# honoured, only this check turns the degraded reply into a failure.
+OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
+
 
 def _stdout_for_error(stdout: str) -> str:
     """Keep both ends of a long dump: the parse error is at char 0, the
@@ -130,8 +136,22 @@ class ClaudeBackend(AgentBackend):
 
         if payload.get("is_error"):
             raise ClaudeTurnError(f"claude reported an error: {payload.get('result')}")
+        if payload.get("reason") == OPT_IN_REQUIRED_REASON:
+            raise ClaudeTurnError(
+                f"claude ran without tools: reason={OPT_IN_REQUIRED_REASON}. "
+                f"--permission-mode {PERMISSION_MODE} did not take effect."
+            )
+        session_id = payload.get("session_id")
+        # No session id means the turn cannot be resumed. Returning None here
+        # would be written over the id already on file, so the next turn would
+        # start a new conversation instead of continuing this agent's.
+        if not isinstance(session_id, str) or not session_id:
+            raise ClaudeTurnError(
+                f"claude did not report a session_id\n"
+                f"stdout: {_stdout_for_error(proc.stdout)}"
+            )
         result = TurnResult(
-            session_id=payload.get("session_id"),
+            session_id=session_id,
             reply=payload.get("result", ""),
             raw=proc.stdout,
         )

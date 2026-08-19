@@ -17,7 +17,7 @@ mutants — they cannot change behavior, so no test can detect them:
     back to UTF-8 wherever this runs.
   * `default="claude"` -> `default="CLAUDE"` (Orchestrator.spawn,
     cmd_spawn's --backend flag): get_backend() lower()s the name.
-  * `catalog.get(name, [])` -> `catalog.get(name, None)` (skills.resolve_skills):
+  * `catalog.get(name, [])` -> `catalog.get(name, None)` (orchestrator.skills.resolve_skills):
     a missing name still hits `if not matches`.
   * `self.agents = {}` -> `None` in Orchestrator.__init__: `_reload()`
     replaces it immediately.

@@ -6,6 +6,11 @@ from backends.base import AgentBackend
 from backends.claude import ClaudeBackend
 from backends.codex import CodexBackend
 
+
+class UnknownBackendError(ValueError):
+    """Asked for a backend name that is not registered."""
+
+
 _BACKENDS: dict[str, type[AgentBackend]] = {
     "claude": ClaudeBackend,
     "codex": CodexBackend,
@@ -28,5 +33,7 @@ def get_backend(name: str) -> AgentBackend:
     backend_cls = _BACKENDS.get(normalized)
     if backend_cls is None:
         valid = ", ".join(list_backends())
-        raise ValueError(f"Unknown backend '{name}'. Available backends: {valid}")
+        raise UnknownBackendError(
+            f"Unknown backend '{name}'. Available backends: {valid}"
+        )
     return backend_cls()

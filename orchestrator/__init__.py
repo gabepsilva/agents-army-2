@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import sys
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 from backends import AgentBackend, TurnResult, get_backend, list_backends
 from backends.claude import ClaudeTurnError
 from backends.codex import CodexTurnError
-from skills import (
+from backends.registry import UnknownBackendError
+from orchestrator.skills import (
     SkillError,
     compose_skill_prompt,
     format_skill_listing,
@@ -51,8 +53,32 @@ log = logging.getLogger("orchestrator")
 TRACE = logging.DEBUG - 5
 logging.addLevelName(TRACE, "TRACE")
 
+
+class OrchestratorError(Exception):
+    """A failure the user can act on: one line on stderr, exit 1, no traceback.
+
+    Named types rather than bare KeyError/ValueError so the CLI can catch
+    exactly these. Catching the builtins around the whole dispatch swallowed
+    any incidental one raised inside a backend too, and printed it as a bare
+    one-word line with no traceback — turning a real bug into a mystery.
+    """
+
+
+class AgentNotFoundError(OrchestratorError, KeyError):
+    """No agent by that name. Still a KeyError: that is what callers catch."""
+
+
+class AgentExistsError(OrchestratorError, ValueError):
+    """Spawn was asked for a name that is already taken."""
+
+
+class StateError(OrchestratorError):
+    """The state file exists but does not hold the structure this code needs."""
+
+
 # User-facing failures that must print one line and exit 1, never a traceback.
-_CLI_ERRORS = (KeyError, ValueError, json.JSONDecodeError)
+# UnknownBackendError comes from the registry, which cannot import this module.
+_CLI_ERRORS = (OrchestratorError, UnknownBackendError)
 
 
 class Agent:
@@ -78,7 +104,11 @@ class Agent:
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
         log.log(TRACE, "agent '%s' reply out:\n%s", self.name, result.reply)
-        self.session_id = result.session_id
+        # A backend that reports no session id has not ended the conversation,
+        # it has failed to name it. Keeping the previous id lets the next turn
+        # resume the session instead of silently starting a fresh one.
+        if result.session_id is not None:
+            self.session_id = result.session_id
         return result
 
 
@@ -101,26 +131,29 @@ class Orchestrator:
         with self._exclusive():
             self._reload()
             if name in self.agents:
-                raise ValueError(f"agent '{name}' already exists")
+                raise AgentExistsError(f"agent '{name}' already exists")
             agent = Agent(name, get_backend(backend))
             self.agents[name] = agent
             self._persist()
             return agent
 
     def talk(self, name: str, prompt: str) -> TurnResult:
-        with self._exclusive():
-            self._reload()
-            agent = self.agents.get(name)
-            if agent is None:
-                raise KeyError(f"no agent named '{name}'")
-        result = agent.talk(prompt)
-        with self._exclusive():
-            self._reload()
-            if name not in self.agents:
-                raise KeyError(f"no agent named '{name}'")
-            self.agents[name].session_id = result.session_id
-            self._persist()
-        return result
+        with self._agent_lock(name):
+            with self._exclusive():
+                self._reload()
+                agent = self.agents.get(name)
+                if agent is None:
+                    raise AgentNotFoundError(f"no agent named '{name}'")
+            result = agent.talk(prompt)
+            with self._exclusive():
+                self._reload()
+                if name not in self.agents:
+                    raise AgentNotFoundError(f"no agent named '{name}'")
+                # agent.session_id, not result.session_id: the agent keeps the
+                # id it already had when a backend reports none.
+                self.agents[name].session_id = agent.session_id
+                self._persist()
+            return result
 
     def list_agents(self) -> list[str]:
         return sorted(self.agents)
@@ -130,16 +163,21 @@ class Orchestrator:
             self._reload()
             agent = self.agents.pop(name, None)
             if agent is None:
-                raise KeyError(f"no agent named '{name}'")
+                raise AgentNotFoundError(f"no agent named '{name}'")
             self._persist()
             return agent
 
     def _lock_path(self) -> Path:
         return self.state_file.with_name(self.state_file.name + ".lock")
 
+    def _agent_lock_path(self, name: str) -> Path:
+        # An agent name is free text and would not survive being used as a
+        # filename; the digest only has to be stable, not readable.
+        digest = hashlib.sha256(name.encode()).hexdigest()
+        return self.state_file.with_name(f"{self.state_file.name}.{digest}.lock")
+
     @contextmanager
-    def _exclusive(self) -> Iterator[None]:
-        path = self._lock_path()
+    def _locked(self, path: Path) -> Iterator[None]:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -148,17 +186,37 @@ class Orchestrator:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    def _exclusive(self) -> AbstractContextManager[None]:
+        """Serialize reads and writes of the state file."""
+        return self._locked(self._lock_path())
+
+    def _agent_lock(self, name: str) -> AbstractContextManager[None]:
+        """Serialize whole turns for one agent, leaving other agents free.
+
+        The state lock cannot do this: it covers a file write measured in
+        milliseconds, while the thing that must not overlap is the turn, which
+        runs for minutes. Two processes resuming the same session fork the
+        conversation, and whichever persists last drops the other's reply.
+        """
+        return self._locked(self._agent_lock_path(name))
+
     def _reload(self) -> None:
         self.agents = {}
         for name, entry in self._load_state().items():
-            agent = Agent(name, get_backend(entry["backend"]))
+            backend = entry.get("backend")
+            if backend is None:
+                raise StateError(f"{self.state_file}: agent '{name}' has no backend")
+            agent = Agent(name, get_backend(backend))
             agent.session_id = entry.get("session_id")
             self.agents[name] = agent
 
     def _load_state(self) -> dict[str, dict]:
-        if self.state_file.exists():
+        if not self.state_file.exists():
+            return {}
+        try:
             return json.loads(self.state_file.read_text(encoding="utf-8"))
-        return {}
+        except json.JSONDecodeError as exc:
+            raise StateError(f"{self.state_file} is not valid JSON: {exc}") from exc
 
     def _persist(self) -> None:
         state = {
@@ -196,8 +254,10 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     opts = parser.parse_args(args)
     prompt = " ".join(opts.prompt).strip()
     if not prompt:
+        # Exit 2 like argparse does for a bad invocation: a caller under
+        # `set -e` must not read "nothing ran" as a turn that succeeded.
         print("usage: talk <agent> <prompt>", file=sys.stderr)
-        return
+        raise SystemExit(2)
     try:
         result = orchestrator.talk(opts.name, prompt)
     except (ClaudeTurnError, CodexTurnError) as exc:
@@ -244,7 +304,7 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
             "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT",
             file=sys.stderr,
         )
-        return
+        raise SystemExit(2)
     try:
         names = parse_skill_names(opts.skill)
         resolved = resolve_skills(names, SKILLS_DIR)
@@ -313,9 +373,15 @@ USAGE = (
     "usage: orchestrator [-v|-vv] <command> [args...]\n"
     "       orchestrator [-v|-vv] --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"
     "       orchestrator [-v|-vv] --list {agents,skills}\n"
+    "  -h, --help      show this message\n"
     "  -v, --verbose   log each step and how long it took\n"
     "  -vv, --verbose2  also log full prompts and replies"
 )
+
+# Handled here rather than by a parser: every dash-led token that is not
+# --list belongs to the skill invocation, whose own parser knows nothing about
+# the commands, so -h there would advertise a third of the CLI.
+HELP_FLAGS = frozenset({"-h", "--help"})
 
 
 def _configure_logging(verbosity: int) -> None:
@@ -347,6 +413,11 @@ def main(argv: list[str] | None = None) -> None:
     _configure_logging(verbosity)
     # The prompt is one of these arguments, so log the shape and not the values.
     log.debug("cli: %d argument(s) after flag removal", len(argv))
+
+    if argv and argv[0] in HELP_FLAGS:
+        print(USAGE)
+        print(f"commands: {', '.join(COMMANDS)}")
+        return
 
     if not argv or (argv[0] not in COMMANDS and not argv[0].startswith("-")):
         print(USAGE, file=sys.stderr)
