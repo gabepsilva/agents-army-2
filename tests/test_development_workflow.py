@@ -205,9 +205,27 @@ def _workflow(
 def test_helpers_render_and_bound() -> None:
     assert gdw._bounded("short", 5) == "short"
     assert gdw._bounded("123456", 3) == "… output truncated …\n456"
-    rendered = gdw._render_comment("<!-- marker -->", "Title", {"b": 1, "a": 2})
+    rendered = gdw._render_comment(
+        "<!-- marker -->",
+        "Title",
+        {
+            "summary": "Supports **Markdown**.",
+            "open_questions": ["First?", "Second?"],
+            "findings": [{"severity": "high", "required_change": "Fix the parser."}],
+            "approved": True,
+            "optional": None,
+            "empty": [],
+        },
+    )
     assert rendered.startswith("<!-- marker -->\n## GDW — Title")
-    assert rendered.index('"a"') < rendered.index('"b"')
+    assert "### Summary\n\nSupports **Markdown**." in rendered
+    assert "- First?\n- Second?" in rendered
+    assert "#### Item 1" in rendered
+    assert "##### Required Change\n\nFix the parser." in rendered
+    assert "### Approved\n\nYes" in rendered
+    assert rendered.count("_None._") == 2
+    assert "```json" not in rendered
+    assert '{"' not in rendered
     assert gdw.CommandResult(0, "ok").succeeded is True
     assert gdw.CommandResult(1, "bad").succeeded is False
     assert gdw.CommandResult(1, "bad").as_json() == {
@@ -311,7 +329,7 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
         no_commits.commit("message", "abc")
 
 
-def test_github_owns_json_comments_and_pull_requests(tmp_path: Path) -> None:
+def test_github_owns_markdown_comments_and_pull_requests(tmp_path: Path) -> None:
     bodies: list[str] = []
 
     def run(args: list[str], **_kwargs):
@@ -351,6 +369,8 @@ def test_github_owns_json_comments_and_pull_requests(tmp_path: Path) -> None:
     github.comment_once(9, "new", "New", {"answer": 1})
     assert len(bodies) == 1
     assert "<!-- gdw:9:new -->" in bodies[0]
+    assert "### Answer\n\n1" in bodies[0]
+    assert "```json" not in bodies[0]
     assert (
         github.create_pr(
             base="trunk", branch="feature", title="Title", body="PR body", draft=True
@@ -570,7 +590,11 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     ]
     assert repository.pushes == ["feature"]
     assert github.pr_calls[0]["draft"] is True
-    assert "Closes #42" in github.pr_calls[0]["body"]
+    pr_body = github.pr_calls[0]["body"]
+    assert "Closes #42" in pr_body
+    assert "### Problem Statement\n\nproblem" in pr_body
+    assert "### Specification\n\n#### Verdict\n\napprove" in pr_body
+    assert "```json" not in pr_body
     assert len(agents.calls) == 6
     assert workflow.run() == "https://example.test/pr/1"
     assert len(agents.calls) == 6

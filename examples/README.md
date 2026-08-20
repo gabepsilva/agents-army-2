@@ -13,9 +13,10 @@ orchestrator's Python API. It turns a raw GitHub issue into a draft pull request
 8. The driver commits, pushes, and opens the pull request.
 
 Every agent response is constrained by one of the strict JSON Schemas in
-`validations/`. Prompt text lives in `prompts/`. The driver posts each validated
-response to the issue as JSON, with an idempotency marker that prevents duplicate
-comments when a run resumes.
+`validations/`. Prompt text lives in `prompts/`. JSON remains the internal
+validation and checkpoint format, while the driver renders every validated
+response as readable Markdown before posting it to GitHub. An idempotency marker
+prevents duplicate comments when a run resumes.
 
 ## GitHub boundary
 
