@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import logging
 import re
@@ -2045,12 +2046,117 @@ class TestCLI:
             "              [--validate-schema PATH [--validation-retries N]] "
             "--prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
+            "       orchestrator [-v|-vv] --version\n"
             "  -h, --help      show this message\n"
+            "  --version       show the installed version\n"
             "  -v, --verbose   log each step and how long it took\n"
             "  -vv, --verbose2  also log full prompts and replies\n"
             "commands: spawn, talk, list, delete\n"
         )
         assert captured.out == ""
+
+    @pytest.mark.parametrize(
+        "flags", [[], ["-v"], ["--verbose"], ["-vv"], ["--verbose2"]]
+    )
+    def test_main_version_is_clean_and_early(
+        self,
+        flags: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def fail_orchestrator() -> None:
+            raise AssertionError("version must not construct Orchestrator")
+
+        monkeypatch.setattr(orchestrator, "Orchestrator", fail_orchestrator)
+        main([*flags, "--version", "ignored"])
+        captured = capsys.readouterr()
+        assert captured.out == "0.1.0\n"
+        assert captured.err == ""
+
+    def test_main_version_prefers_checkout_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator.importlib.metadata,
+            "version",
+            lambda _: "installed-version",
+        )
+        main(["--version"])
+        assert capsys.readouterr().out == "0.1.0\n"
+
+    def test_main_version_uses_installed_metadata_as_fallback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+        monkeypatch.setattr(
+            orchestrator.importlib.metadata,
+            "version",
+            lambda _: "installed-version",
+        )
+        main(["--version"])
+        assert capsys.readouterr().out == "installed-version\n"
+
+    def test_main_version_rejects_missing_installed_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+        monkeypatch.setattr(orchestrator.importlib.metadata, "version", lambda _: None)
+        with pytest.raises(SystemExit, match="1"):
+            main(["--version"])
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "unable to determine agents-army version\n"
+
+    def test_project_version_ignores_unreadable_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def unreadable(*args: object, **kwargs: object) -> object:
+            raise OSError("metadata unavailable")
+
+        monkeypatch.setattr(Path, "open", unreadable)
+        assert orchestrator._project_version() is None
+
+    def test_main_version_falls_back_for_invalid_utf8_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def invalid_metadata(*_args: object, **_kwargs: object) -> io.BytesIO:
+            return io.BytesIO(b"\xff")
+
+        monkeypatch.setattr(Path, "open", invalid_metadata)
+        monkeypatch.setattr(
+            orchestrator.importlib.metadata,
+            "version",
+            lambda _: "installed-version",
+        )
+        main(["--version"])
+        assert capsys.readouterr().out == "installed-version\n"
+
+    def test_main_version_reports_unavailable_without_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+
+        def missing(_: str) -> str:
+            raise orchestrator.importlib.metadata.PackageNotFoundError
+
+        monkeypatch.setattr(orchestrator.importlib.metadata, "version", missing)
+        with pytest.raises(SystemExit, match="1"):
+            main(["--version"])
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "unable to determine agents-army version\n"
+        assert "Traceback" not in captured.err
+
+    def test_main_version_after_command_remains_prompt_data(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        main(["talk", "agent", "a", "--version"])
+        assert capsys.readouterr().out.endswith("echo:a --version\n")
 
     def test_main_reads_sys_argv_when_none_given(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

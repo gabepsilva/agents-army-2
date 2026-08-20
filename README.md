@@ -61,6 +61,9 @@ uv run orchestrator delete reviewer
 
 # Every form above, listed in one place
 uv run orchestrator --help
+
+# Show the project or installed package version
+uv run orchestrator --version
 ```
 
 ### Structured replies: `--validate-schema`
