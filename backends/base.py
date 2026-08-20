@@ -7,6 +7,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+# One turn's wall-clock ceiling, shared by every backend and by the
+# orchestrator that budgets a retry loop against it. A per-backend literal
+# would let one CLI drift away from the number the orchestrator plans with.
+DEFAULT_TURN_TIMEOUT = 1800
+
 
 class TurnError(RuntimeError):
     """A CLI turn returned something the orchestrator cannot use.
@@ -86,6 +91,20 @@ def reply_text(payload: dict, key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+@dataclass(frozen=True)
+class OutputSchema:
+    """A JSON Schema for a turn's reply, in both forms the CLIs want.
+
+    claude and grok take the document inline as a `--json-schema` argument;
+    codex takes a `--output-schema` path and reads the file itself. Carrying
+    both spellings of one schema keeps the choice inside each adapter, where
+    the rest of that CLI's dialect already lives.
+    """
+
+    text: str
+    path: Path
+
+
 @dataclass
 class TurnResult:
     """Outcome of one non-interactive turn against a CLI session."""
@@ -93,6 +112,36 @@ class TurnResult:
     session_id: str | None
     reply: str
     raw: str
+    # None whenever no schema was asked for, and also when a schema was asked
+    # for and the reply was not a JSON object: that is a reply that failed the
+    # contract, which the validator retries rather than a parse the adapter
+    # should raise on.
+    structured: dict | None = None
+
+
+def structured_reply(
+    schema: OutputSchema | None, reply: str, pre_parsed: object = None
+) -> dict | None:
+    """The reply as the JSON object a schema asked for, or None.
+
+    `pre_parsed` is the CLI's own parse of that object where it publishes one
+    (claude's `structured_output`, grok's `structuredOutput`); codex has no
+    such field and passes nothing, so its reply text is parsed here instead.
+
+    Everything that is not an object — a reply the model wrapped in prose, a
+    bare string, a turn that asked for no schema at all — comes back as None
+    rather than raising. Whether that breaks the contract is the validator's
+    call, and a raise here would deny it the retry it is entitled to.
+    """
+    if schema is None:
+        return None
+    if isinstance(pre_parsed, dict):
+        return pre_parsed
+    try:
+        value = json.loads(reply)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 class AgentBackend(ABC):
@@ -110,8 +159,23 @@ class AgentBackend(ABC):
         ...
 
     @abstractmethod
-    def run_turn(self, prompt: str, session_id: str | None, cwd: Path) -> TurnResult:
+    def run_turn(
+        self,
+        prompt: str,
+        session_id: str | None,
+        cwd: Path,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+        schema: OutputSchema | None = None,
+    ) -> TurnResult:
         """Start (session_id=None) or resume (session_id set) a CLI session with
         `prompt` in directory `cwd` and return the model's text reply along with
-        the session id to use for the next turn."""
+        the session id to use for the next turn.
+
+        `timeout` and `schema` are declared here rather than left to each
+        subclass: a parameter that exists only as a subclass default is one a
+        fourth backend can silently drop, and a type checker cannot see the
+        omission because Liskov is only checked against a declared base
+        signature. When `schema` is set the reply must be a JSON object
+        satisfying it, and `TurnResult.structured` carries that object.
+        """
         ...

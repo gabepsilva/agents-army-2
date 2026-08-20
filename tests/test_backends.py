@@ -7,20 +7,23 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 import orchestrator
 from backends.base import (
+    DEFAULT_TURN_TIMEOUT,
     AgentBackend,
+    OutputSchema,
     TurnError,
     TurnResult,
     describe_command,
     json_objects,
     reply_text,
     stdout_for_error,
+    structured_reply,
 )
 from backends.claude import (
     OPT_IN_REQUIRED_REASON,
@@ -29,6 +32,8 @@ from backends.claude import (
     ClaudeTurnError,
     parse_claude_stdout,
 )
+from backends.claude import SCHEMA_FLAG as CLAUDE_SCHEMA_FLAG
+from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
 from backends.codex import CodexBackend, CodexTurnError
 from backends.grok import (
     ALWAYS_APPROVE_FLAG,
@@ -37,6 +42,7 @@ from backends.grok import (
     GrokTurnError,
     parse_grok_stdout,
 )
+from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
 from backends.registry import (
     UnknownBackendError,
     get_backend,
@@ -93,7 +99,14 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(self, prompt: str, session_id: str | None, cwd: Path) -> TurnResult:
+    def run_turn(
+        self,
+        prompt: str,
+        session_id: str | None,
+        cwd: Path,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+        schema: OutputSchema | None = None,
+    ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
 
@@ -115,6 +128,31 @@ def _assert_subprocess_kwargs(kwargs: dict, cwd: Path) -> None:
     assert kwargs["text"] is True
     assert kwargs["check"] is False
     assert kwargs["timeout"] == 1800
+    # Not a detail: a CLI whose stdin is an inherited pipe rather than a tty
+    # blocks until it is killed. `codex exec "reply ok" --json` under a pipe
+    # returns nothing after 25s and exits 124, and claude and grok are given
+    # no chance to do the same. Asserted for every backend, in the one helper
+    # every backend test already calls, so a new backend cannot skip it.
+    assert kwargs["stdin"] == subprocess.DEVNULL
+
+
+def _completed(returncode: int, stdout: str, stderr: str = "") -> Callable:
+    """A `subprocess.run` stand-in for a test that only cares what came back."""
+
+    def run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, returncode, stdout=stdout, stderr=stderr
+        )
+
+    return run
+
+
+# A schema as the adapters receive it: already loaded, in both spellings. The
+# text is what claude and grok take inline; the path is what codex is handed.
+SCHEMA = OutputSchema(
+    text='{"type":"object","additionalProperties":false,"properties":{}}',
+    path=Path("/schemas/reply.json"),
+)
 
 
 class TestAgentBackendInterface:
@@ -145,7 +183,12 @@ class TestAgentBackendInterface:
                 return "custom"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 return TurnResult(session_id="custom-sid", reply=prompt, raw="")
 
@@ -428,6 +471,75 @@ class TestClaudeRunTurn:
         with pytest.raises(ClaudeTurnError, match="did not report a session_id"):
             backend.run_turn("x", None, tmp_path)
 
+    def test_schema_is_passed_inline_and_parsed_from_its_own_field(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ClaudeBackend()
+        # The reply text is deliberately not the object: claude's own parse is
+        # preferred, and parsing `result` is only the fallback below.
+        payload = json.dumps(
+            {
+                "session_id": "s1",
+                "result": "see structured_output",
+                "structured_output": {"verdict": "pass"},
+            }
+        )
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "claude",
+                "--print",
+                "--output-format",
+                "json",
+                "--permission-mode",
+                PERMISSION_MODE,
+                CLAUDE_SCHEMA_FLAG,
+                SCHEMA.text,
+                "-p",
+                "hello",
+            ]
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert result.structured == {"verdict": "pass"}
+        assert result.reply == "see structured_output"
+
+    def test_structured_falls_back_to_parsing_the_result_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CLI that stops publishing its own parse still has the reply."""
+        backend = ClaudeBackend()
+        payload = json.dumps({"session_id": "s1", "result": '{"verdict":"pass"}'})
+        monkeypatch.setattr(subprocess, "run", _completed(0, payload, ""))
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert result.structured == {"verdict": "pass"}
+
+    def test_a_reply_that_is_not_an_object_is_not_a_failed_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The validator retries that; raising here would deny it the chance."""
+        backend = ClaudeBackend()
+        payload = json.dumps({"session_id": "s1", "result": "here you go:"})
+        monkeypatch.setattr(subprocess, "run", _completed(0, payload, ""))
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert result.structured is None
+        assert result.reply == "here you go:"
+
+    def test_no_schema_leaves_structured_unset_even_for_a_json_reply(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ClaudeBackend()
+        payload = json.dumps({"session_id": "s1", "result": '{"verdict":"pass"}'})
+
+        def fake_run(args, **kwargs):
+            assert CLAUDE_SCHEMA_FLAG not in args
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("hello", None, tmp_path).structured is None
+
 
 class TestParseClaudeStdout:
     def test_plain_object(self) -> None:
@@ -623,6 +735,143 @@ class TestCodexRunTurn:
         assert result.session_id == "t1"
         assert result.reply == "hi\nthere"
         assert result.raw == stdout
+
+    def test_schema_is_passed_as_a_file_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """codex reads the schema itself, so it gets the path, not the text."""
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"{\\"verdict\\":\\"pass\\"}"}}\n'
+        )
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "codex",
+                "exec",
+                "hello",
+                "--json",
+                "--skip-git-repo-check",
+                CODEX_SCHEMA_FLAG,
+                str(SCHEMA.path),
+            ]
+            assert SCHEMA.text not in args
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        # No pre-parsed field anywhere in the stream: the object is the text.
+        assert result.structured == {"verdict": "pass"}
+
+    def test_prose_around_the_object_leaves_structured_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"Sure! {\\"verdict\\":\\"pass\\"}"}}\n'
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout, ""))
+        assert backend.run_turn("hi", None, tmp_path, schema=SCHEMA).structured is None
+
+    def test_no_schema_omits_the_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend()
+        stdout = '{"type":"thread.started","thread_id":"t1"}\n'
+
+        def fake_run(args, **kwargs):
+            assert CODEX_SCHEMA_FLAG not in args
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("hi", None, tmp_path).structured is None
+
+    def test_nonzero_exit_reports_the_api_message_not_the_stderr_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rejected schema is the case: the API says which part it refused,
+        while stderr holds only the CLI's stdin notice."""
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"error","message":"Invalid schema for response_format: '
+            "In context=('properties', 'detail'), 'additionalProperties' is "
+            'required to be supplied and to be false."}\n'
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _completed(1, stdout, "Reading additional input from stdin..."),
+        )
+        with pytest.raises(CodexTurnError) as excinfo:
+            backend.run_turn("hi", None, tmp_path, schema=SCHEMA)
+        assert "In context=('properties', 'detail')" in str(excinfo.value)
+        assert "stdin" not in str(excinfo.value)
+
+    def test_an_error_before_a_later_event_is_still_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure is not always the last line: codex keeps narrating."""
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"error","message":"the real failure"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":""}}\n'
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(1, stdout, "noise"))
+        with pytest.raises(CodexTurnError) as excinfo:
+            backend.run_turn("hi", None, tmp_path)
+        assert str(excinfo.value) == "codex reported an error: the real failure"
+
+    def test_nonzero_exit_reads_a_failed_turn_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend()
+        stdout = '{"type":"turn.failed","error":{"message":"usage limit reached"}}\n'
+        monkeypatch.setattr(subprocess, "run", _completed(1, stdout, "noise"))
+        with pytest.raises(
+            CodexTurnError, match="codex reported an error: usage limit"
+        ):
+            backend.run_turn("hi", None, tmp_path)
+
+    def test_nonzero_exit_without_a_message_keeps_the_exit_and_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every shape that carries no message to report: an error event with
+        no message, one with an empty message, and a failed turn whose error is
+        not an object. An empty message is not a message: reporting it would
+        print `codex reported an error: ` and nothing else."""
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"error"}\n'
+            '{"type":"error","message":""}\n'
+            '{"type":"turn.failed","error":"boom"}\n'
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(3, stdout, "segfault"))
+        with pytest.raises(CodexTurnError) as excinfo:
+            backend.run_turn("hi", None, tmp_path)
+        assert str(excinfo.value) == "codex exited 3\nstderr: segfault"
+
+    def test_the_last_error_reported_is_the_one_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An earlier event can be one the CLI recovered from; the last one is
+        what it gave up on."""
+        backend = CodexBackend()
+        stdout = (
+            '{"type":"error","message":"retrying after a stream hiccup"}\n'
+            '{"type":"error","message":"the real failure"}\n'
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(1, stdout, ""))
+        with pytest.raises(CodexTurnError) as excinfo:
+            backend.run_turn("hi", None, tmp_path)
+        assert str(excinfo.value) == "codex reported an error: the real failure"
 
 
 class TestGrokRunTurn:
@@ -953,6 +1202,61 @@ class TestGrokRunTurn:
         with pytest.raises(GrokTurnError, match="did not report a sessionId"):
             backend.run_turn("x", None, tmp_path)
 
+    def test_schema_is_passed_inline_as_its_own_argument(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Its own argument, not glued on like --single=: the value starts with
+        `{`, which no parser reads as a flag."""
+        backend = GrokBackend()
+        # As with claude: the text is not the object, so this can only pass by
+        # reading grok's own parse.
+        payload = json.dumps(
+            {
+                "sessionId": "s1",
+                "text": "see structuredOutput",
+                "structuredOutput": {"verdict": "pass"},
+            }
+        )
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "grok",
+                "--output-format",
+                "json",
+                ALWAYS_APPROVE_FLAG,
+                GROK_SCHEMA_FLAG,
+                SCHEMA.text,
+                "--single=hello",
+            ]
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert result.structured == {"verdict": "pass"}
+
+    def test_structured_falls_back_to_parsing_the_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": "s1", "text": '{"verdict":"pass"}'})
+        monkeypatch.setattr(subprocess, "run", _completed(0, payload, ""))
+        result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert result.structured == {"verdict": "pass"}
+
+    def test_no_schema_omits_the_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": "s1", "text": '{"verdict":"pass"}'})
+
+        def fake_run(args, **kwargs):
+            assert GROK_SCHEMA_FLAG not in args
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("hello", None, tmp_path).structured is None
+
 
 class TestParseGrokStdout:
     def test_plain_object(self) -> None:
@@ -1071,6 +1375,29 @@ class TestJsonObjects:
         assert json_objects('{{"ok": true}') == [{"ok": True}]
 
 
+class TestStructuredReply:
+    """The one place three CLIs' envelopes turn into one object."""
+
+    def test_no_schema_means_no_object_however_json_the_reply_is(self) -> None:
+        assert structured_reply(None, '{"a":1}', {"a": 1}) is None
+
+    def test_the_pre_parsed_field_wins(self) -> None:
+        assert structured_reply(SCHEMA, "ignored", {"a": 1}) == {"a": 1}
+
+    def test_falls_back_to_parsing_the_reply(self) -> None:
+        assert structured_reply(SCHEMA, '{"a":1}') == {"a": 1}
+
+    def test_a_non_dict_pre_parsed_field_is_not_trusted(self) -> None:
+        assert structured_reply(SCHEMA, '{"a":1}', "not an object") == {"a": 1}
+
+    def test_unparseable_reply_is_none_not_an_exception(self) -> None:
+        assert structured_reply(SCHEMA, "Sure! Here you go:") is None
+
+    def test_a_json_value_that_is_not_an_object_is_none(self) -> None:
+        """A schema's reply is one object; a bare list or number is not it."""
+        assert structured_reply(SCHEMA, "[1, 2]") is None
+
+
 class TestOrchestrator:
     def test_spawn_talk_persists_and_resumes(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
@@ -1093,7 +1420,12 @@ class TestOrchestrator:
                 return "recording"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 seen_session_ids.append(session_id)
                 return TurnResult(session_id="persist-me", reply="reply", raw="")
@@ -1255,7 +1587,12 @@ class TestOrchestrator:
                 return "rec"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 seen.append(session_id)
                 return TurnResult(session_id="sid", reply="r", raw="")
@@ -1292,7 +1629,12 @@ class TestOrchestrator:
                 return "midturn"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 Orchestrator(state_file=state_file).spawn("b", "echo")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -1318,7 +1660,12 @@ class TestOrchestrator:
                 return "probelock"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 probe = Orchestrator(state_file=state_file)
                 held.append(
@@ -1359,7 +1706,12 @@ class TestOrchestrator:
                 return "forgetful"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 return next(replies)
 
@@ -1402,7 +1754,12 @@ class TestOrchestrator:
                 return "delduring"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 Orchestrator(state_file=state_file).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -1529,7 +1886,12 @@ class TestCLI:
                 return "boom"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 
@@ -1551,7 +1913,12 @@ class TestCLI:
                 return "boomcodex"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise CodexTurnError("codex did not report a thread_id")
 
@@ -1573,7 +1940,12 @@ class TestCLI:
                 return "boomany"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise TurnError("cli failed")
 
@@ -1595,7 +1967,12 @@ class TestCLI:
                 return "boomgrok"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise GrokTurnError("grok did not report a sessionId")
 
@@ -1664,7 +2041,8 @@ class TestCLI:
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator [-v|-vv] <command> [args...]\n"
-            "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]] "
+            "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+            "              [--validate-schema PATH [--validation-retries N]] "
             "--prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
             "  -h, --help      show this message\n"
@@ -1787,7 +2165,12 @@ class TestCLI:
                 return "buggy"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise KeyError("some internal dict key")
 

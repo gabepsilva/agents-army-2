@@ -8,6 +8,7 @@ dependencies = [
     "PyYAML>=6",
     "PyJWT>=2",
     "cryptography>=42",
+    "jsonschema>=4",
 ]
 
 [project.scripts]
@@ -97,6 +98,7 @@ skip_empty = true
 [tool.mutmut]
 source_paths = [
     "orchestrator/__init__.py",
+    "orchestrator/schema.py",
     "orchestrator/skills.py",
     "backends/base.py",
     "backends/claude.py",
@@ -107,6 +109,7 @@ source_paths = [
 also_copy = ["backends/", "orchestrator/"]
 pytest_add_cli_args_test_selection = [
     "tests/test_backends.py",
+    "tests/test_schema.py",
     "tests/test_skills.py",
 ]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]

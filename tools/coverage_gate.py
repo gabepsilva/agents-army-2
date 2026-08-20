@@ -23,6 +23,7 @@ COVERAGE_PATH = Path("coverage.json")
 # is no legacy slack to grandfather in.
 FLOORS: dict[str, float] = {
     "orchestrator/__init__.py": 100.0,
+    "orchestrator/schema.py": 100.0,
     "orchestrator/skills.py": 100.0,
     "backends/base.py": 100.0,
     "backends/claude.py": 100.0,

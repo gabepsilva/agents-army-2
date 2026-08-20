@@ -9,8 +9,9 @@ report.
 
 Raise MUTATION_SCORE_FLOOR as survivors are killed. Never lower it.
 
-Recorded 2026-08-19 at 859/876 (98.1%). The survivors are equivalent
-mutants — they cannot change behavior, so no test can detect them:
+Recorded 2026-08-20 at 1461/1479 (98.8%), after --validate-schema landed. The
+survivors are equivalent mutants — they cannot change behavior, so no test can
+detect them — or boundary mutants whose difference is unobservable:
 
   * `encoding="utf-8"` -> `encoding="UTF-8"` / `None` (Orchestrator._load_state,
     Orchestrator._persist): codec names are case-insensitive; None falls
@@ -23,8 +24,15 @@ mutants — they cannot change behavior, so no test can detect them:
     replaces it immediately.
   * `str(exc)` -> `str(None)` in the empty-args branch of main(): every
     KeyError/ValueError/JSONDecodeError we raise has args.
+  * `encoding="utf-8"` -> `None` in orchestrator.schema._load_document: same
+    codec, same result.
+  * `deadline - time.monotonic() <= 0` -> `< 0` / `<= 1` in
+    Orchestrator._validated_turn: the difference is a budget of exactly zero,
+    or of under one second, at the instant it is read. A test can only reach
+    either by scripting the clock to a specific number of reads, which asserts
+    on how many times the loop looks at the time rather than on what it does.
 
-Do not chase this last 1.9%, and do not silence it with
+Do not chase this last 1.2%, and do not silence it with
 `# pragma: no mutate` either — an equivalent mutant is evidence the code is
 precise, not evidence a test is missing.
 """

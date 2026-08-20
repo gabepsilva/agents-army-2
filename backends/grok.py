@@ -8,13 +8,16 @@ import time
 from pathlib import Path
 
 from backends.base import (
+    DEFAULT_TURN_TIMEOUT,
     AgentBackend,
+    OutputSchema,
     TurnError,
     TurnResult,
     describe_command,
     json_objects,
     reply_text,
     stdout_for_error,
+    structured_reply,
 )
 
 log = logging.getLogger(__name__)
@@ -33,6 +36,15 @@ ALWAYS_APPROVE_FLAG = "--always-approve"
 # grok's parser reads a bare argument beginning with `-` as a flag, so a
 # prompt like "--fix the parser" fails the run before the model sees it.
 PROMPT_FLAG = "--single"
+
+# Takes the schema document inline, as its own argument. The --single= gluing
+# above is not needed here: the value starts with "{", which no argument
+# parser reads as a flag.
+SCHEMA_FLAG = "--json-schema"
+
+# Grok's own parse of a schema-constrained reply, alongside the same object as
+# a JSON string in `text`. camelCase, like the rest of this envelope.
+STRUCTURED_FIELD = "structuredOutput"
 
 
 def _pick_grok_object(candidates: list[dict]) -> dict:
@@ -100,11 +112,14 @@ class GrokBackend(AgentBackend):
         prompt: str,
         session_id: str | None,
         cwd: Path,
-        timeout: int = 1800,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+        schema: OutputSchema | None = None,
     ) -> TurnResult:
         # --session-id names a *new* session only and errors if that id
         # already exists. Resume is --resume.
         args = ["grok", "--output-format", "json", ALWAYS_APPROVE_FLAG]
+        if schema is not None:
+            args += [SCHEMA_FLAG, schema.text]
         if session_id:
             args += ["--resume", session_id]
         args.append(f"{PROMPT_FLAG}={prompt}")
@@ -125,6 +140,10 @@ class GrokBackend(AgentBackend):
             text=True,
             check=False,
             timeout=timeout,
+            # A CLI reading a non-tty stdin blocks until it is killed, so a run
+            # from cron, CI or any host script that is not a terminal would
+            # spend the whole timeout and return nothing.
+            stdin=subprocess.DEVNULL,
         )
         log.debug(
             "grok turn: exited %d after %.1fs with %d chars of stdout",
@@ -149,10 +168,12 @@ class GrokBackend(AgentBackend):
                 f"grok did not report a sessionId\n"
                 f"stdout: {stdout_for_error(proc.stdout)}"
             )
+        reply = reply_text(payload, "text")
         result = TurnResult(
             session_id=reported_session,
-            reply=reply_text(payload, "text"),
+            reply=reply,
             raw=proc.stdout,
+            structured=structured_reply(schema, reply, payload.get(STRUCTURED_FIELD)),
         )
         log.debug(
             "grok turn: parsed session=%s reply_chars=%d",
