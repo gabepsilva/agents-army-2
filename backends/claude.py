@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import time
 from pathlib import Path
 
-from backends.base import AgentBackend, TurnResult, describe_command
+from backends.base import (
+    AgentBackend,
+    TurnError,
+    TurnResult,
+    describe_command,
+    json_objects,
+    reply_text,
+    stdout_for_error,
+)
 
 log = logging.getLogger(__name__)
 
 
-class ClaudeTurnError(RuntimeError):
+class ClaudeTurnError(TurnError):
     """Raised when the Claude CLI returns something unusable."""
 
 
@@ -27,33 +34,6 @@ PERMISSION_MODE = "bypassPermissions"
 # indistinguishable from one that worked: if PERMISSION_MODE ever stops being
 # honoured, only this check turns the degraded reply into a failure.
 OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
-
-
-def _stdout_for_error(stdout: str) -> str:
-    """Keep both ends of a long dump: the parse error is at char 0, the
-    result envelope is usually at the tail."""
-    if len(stdout) <= 2000:
-        return stdout
-    return f"{stdout[:400]}\n…\n{stdout[-1600:]}"
-
-
-def _json_objects(text: str) -> list[dict]:
-    """Scan `text` for every top-level JSON object, in order of appearance."""
-    decoder = json.JSONDecoder()
-    found: list[dict] = []
-    idx = 0
-    while idx < len(text):
-        start = text.find("{", idx)
-        if start < 0:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            idx = start + 1
-            continue
-        found.append(obj)
-        idx = end
-    return found
 
 
 def _pick_result_object(candidates: list[dict]) -> dict:
@@ -73,10 +53,10 @@ def parse_claude_stdout(stdout: str) -> dict:
     stripped = stdout.strip()
     if not stripped:
         raise ClaudeTurnError("claude output was not JSON\nstdout: ")
-    candidates = _json_objects(stripped)
+    candidates = json_objects(stripped)
     if not candidates:
         raise ClaudeTurnError(
-            f"claude output was not JSON\nstdout: {_stdout_for_error(stdout)}"
+            f"claude output was not JSON\nstdout: {stdout_for_error(stdout)}"
         )
     return _pick_result_object(candidates)
 
@@ -148,11 +128,11 @@ class ClaudeBackend(AgentBackend):
         if not isinstance(session_id, str) or not session_id:
             raise ClaudeTurnError(
                 f"claude did not report a session_id\n"
-                f"stdout: {_stdout_for_error(proc.stdout)}"
+                f"stdout: {stdout_for_error(proc.stdout)}"
             )
         result = TurnResult(
             session_id=session_id,
-            reply=payload.get("result", ""),
+            reply=reply_text(payload, "result"),
             raw=proc.stdout,
         )
         log.debug(

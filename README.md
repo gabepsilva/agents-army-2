@@ -12,6 +12,7 @@ session every time.
 - At least one agent CLI installed and authenticated:
   - Claude Code: `claude`
   - Codex: `codex`
+  - Grok: `grok`
 
 ## Setup
 
@@ -34,6 +35,9 @@ uv run orchestrator spawn reviewer -b claude
 
 # Create an agent backed by a Codex session
 uv run orchestrator spawn dev -b codex
+
+# Create an agent backed by a Grok session
+uv run orchestrator spawn builder -b grok
 
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer "what did we decide about issue #23?"
@@ -106,45 +110,29 @@ uv run orchestrator talk reviewer "what did you just reply?"
 ### Backends
 
 Each agent is bound to one backend, chosen at `spawn` time with `-b`/`--backend`.
-Currently available: `claude`, `codex`.
+Currently available: `claude`, `codex`, `grok`.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
-the class in the `_BACKENDS` table in `backends/registry.py`.
-
-```python
-# backends/grok.py
-from pathlib import Path
-from backends.base import AgentBackend, TurnResult
-
-
-class GrokBackend(AgentBackend):
-    name = "grok"
-
-    def run_turn(self, prompt, session_id, cwd: Path) -> TurnResult:
-        # start a new session when session_id is None, otherwise resume it
-        ...
-```
-
-```python
-# backends/registry.py
-from backends.grok import GrokBackend
-
-_BACKENDS = {
-    "claude": ClaudeBackend,
-    "codex": CodexBackend,
-    "grok": GrokBackend,
-}
-```
-
-A backend only has to implement `name` and `run_turn(prompt, session_id, cwd)`.
-`run_turn` starts a fresh CLI session when `session_id` is `None` and resumes it
+the class in the `_BACKENDS` table in `backends/registry.py`. A backend only
+has to implement `name` and `run_turn(prompt, session_id, cwd)`. `run_turn`
+starts a fresh CLI session when `session_id` is `None` and resumes it
 otherwise, returning a `TurnResult` with the reply and the session id for the
-next turn.
+next turn. Failures raise a `TurnError` subclass so `talk` can print the
+message without knowing which CLI ran.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
 with `sdk_opt_in_required` and can still exit 0 — the orchestrator would get a
 half-written JSON dump instead of a reply.
+
+The Grok backend runs `grok --output-format json --always-approve
+--single=<prompt>`. `--always-approve` is Grok's non-interactive opt-in (the
+same effect as `--permission-mode bypassPermissions`). The prompt is attached
+to `--single` rather than passed as its own argument, because Grok's parser
+reads a bare argument starting with `-` as a flag and rejects the run. Resume
+uses `--resume`; Grok's `--session-id` only names a **new** session and errors
+if that id already exists. The JSON envelope is camelCase (`sessionId`,
+`text`), not Claude's `session_id` / `result`.
 
 ### State
 
@@ -176,10 +164,11 @@ To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
 ## Project layout
 
 ```
-backends/          # AgentBackend interface + implementations (claude, codex)
-  base.py          # abstract AgentBackend + TurnResult
+backends/          # AgentBackend interface + implementations (claude, codex, grok)
+  base.py          # abstract AgentBackend + TurnResult + TurnError
   claude.py        # ClaudeBackend (resumes via --resume)
   codex.py         # CodexBackend (resumes via codex exec resume)
+  grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (spawn / talk / list / delete)
   skills.py        # --skill name lookup under SKILLS/ + prompt composition

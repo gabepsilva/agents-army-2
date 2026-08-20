@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Long-lived orchestrator holding an array of agents.
 
-Each agent owns a persistent Claude Code or Codex CLI session. Every time you
-talk to an agent it resumes that session with your prompt and returns the reply,
-so each agent keeps its own conversation history across messages.
+Each agent owns a persistent Claude Code, Codex, or Grok CLI session. Every
+time you talk to an agent it resumes that session with your prompt and returns
+the reply, so each agent keeps its own conversation history across messages.
 """
 
 from __future__ import annotations
@@ -20,9 +20,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
-from backends import AgentBackend, TurnResult, get_backend, list_backends
-from backends.claude import ClaudeTurnError
-from backends.codex import CodexTurnError
+from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
 from backends.registry import UnknownBackendError
 from orchestrator.skills import (
     SkillError,
@@ -269,7 +267,10 @@ class Orchestrator:
 def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="spawn")
     parser.add_argument("name")
-    parser.add_argument("--backend", "-b", default="claude", choices=list_backends())
+    # No argparse default: leaving this None lets spawn() resolve
+    # DEFAULT_BACKEND, which is what that constant documents itself as. A
+    # literal here would pin spawn to claude however DEFAULT_BACKEND changed.
+    parser.add_argument("--backend", "-b", choices=list_backends())
     opts = parser.parse_args(args)
     agent = orchestrator.spawn(opts.name, opts.backend)
     print(f"spawned agent '{agent.name}' backend={agent.backend.name}")
@@ -304,7 +305,7 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     _ensure_agent(orchestrator, opts.name)
     try:
         result = orchestrator.talk(opts.name, prompt)
-    except (ClaudeTurnError, CodexTurnError) as exc:
+    except TurnError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
     print(f"[{opts.name} session={result.session_id}]")
@@ -366,7 +367,7 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     _ensure_agent(orchestrator, opts.agent)
     try:
         result = orchestrator.talk(opts.agent, composed)
-    except (ClaudeTurnError, CodexTurnError) as exc:
+    except TurnError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
     print(f"[{opts.agent} session={result.session_id}]")

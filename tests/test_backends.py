@@ -13,16 +13,30 @@ from pathlib import Path
 import pytest
 
 import orchestrator
-from backends.base import AgentBackend, TurnResult, describe_command
+from backends.base import (
+    AgentBackend,
+    TurnError,
+    TurnResult,
+    describe_command,
+    json_objects,
+    reply_text,
+    stdout_for_error,
+)
 from backends.claude import (
     OPT_IN_REQUIRED_REASON,
     PERMISSION_MODE,
     ClaudeBackend,
     ClaudeTurnError,
-    _stdout_for_error,
     parse_claude_stdout,
 )
 from backends.codex import CodexBackend, CodexTurnError
+from backends.grok import (
+    ALWAYS_APPROVE_FLAG,
+    PROMPT_FLAG,
+    GrokBackend,
+    GrokTurnError,
+    parse_grok_stdout,
+)
 from backends.registry import (
     UnknownBackendError,
     get_backend,
@@ -110,6 +124,20 @@ class TestAgentBackendInterface:
     def test_codex_name(self) -> None:
         assert CodexBackend().name == "codex"
 
+    def test_grok_name(self) -> None:
+        assert GrokBackend().name == "grok"
+
+    def test_backend_turn_errors_share_the_orchestrator_type(self) -> None:
+        """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
+        assert issubclass(ClaudeTurnError, TurnError)
+        assert issubclass(CodexTurnError, TurnError)
+        assert issubclass(GrokTurnError, TurnError)
+
+    def test_get_backend_resolves_grok(self) -> None:
+        backend = get_backend("grok")
+        assert isinstance(backend, GrokBackend)
+        assert backend.name == "grok"
+
     def test_custom_backend_registration(self, tmp_path: Path) -> None:
         class CustomBackend(AgentBackend):
             @property
@@ -140,6 +168,21 @@ class TestAgentBackendInterface:
 class TestClaudeRunTurn:
     def test_permission_mode_is_the_noninteractive_opt_in(self) -> None:
         assert PERMISSION_MODE == "bypassPermissions"
+
+    def test_null_result_is_an_empty_reply_not_a_crash(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """An explicit null must not reach len() in the debug log."""
+        backend = ClaudeBackend()
+        payload = json.dumps({"type": "result", "session_id": "s1", "result": None})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.reply == ""
+        assert result.session_id == "s1"
 
     def test_new_turn_parses_session_and_result(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -423,13 +466,18 @@ class TestParseClaudeStdout:
     def test_last_object_when_none_look_like_a_result(self) -> None:
         assert parse_claude_stdout('{"a": 1}{"b": 2}{"c": 3}') == {"c": 3}
 
-    def test_error_snippet_keeps_exactly_2000_chars(self) -> None:
-        text = "x" * 2000
-        assert _stdout_for_error(text) == text
 
-    def test_error_snippet_splits_a_2001_char_dump(self) -> None:
+class TestStdoutForError:
+    def test_keeps_a_short_dump(self) -> None:
+        assert stdout_for_error("short") == "short"
+
+    def test_keeps_exactly_2000_chars(self) -> None:
+        text = "x" * 2000
+        assert stdout_for_error(text) == text
+
+    def test_splits_a_2001_char_dump(self) -> None:
         text = ("H" * 400) + "M" + ("T" * 1600)
-        assert _stdout_for_error(text) == f"{'H' * 400}\n…\n{'T' * 1600}"
+        assert stdout_for_error(text) == f"{'H' * 400}\n…\n{'T' * 1600}"
 
 
 class TestCodexRunTurn:
@@ -577,6 +625,452 @@ class TestCodexRunTurn:
         assert result.raw == stdout
 
 
+class TestGrokRunTurn:
+    def test_new_turn_parses_session_and_text(
+        self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps(
+            {"sessionId": "s1", "text": "hi", "stopReason": "end_turn"}
+        )
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "grok",
+                "--output-format",
+                "json",
+                "--always-approve",
+                "--single=hello",
+            ]
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("DEBUG"):
+            result = backend.run_turn("hello", None, tmp_path)
+        assert result.session_id == "s1"
+        assert result.reply == "hi"
+        assert result.raw == payload
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"grok turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
+        )
+        assert messages[1] == (
+            "grok turn: invoking "
+            "grok --output-format json --always-approve --single=<prompt:5chars>"
+        )
+        assert (
+            _reported_seconds(
+                messages[2],
+                rf"grok turn: exited 0 after (\d+\.\d)s with {len(payload)} "
+                rf"chars of stdout",
+            )
+            < 60
+        )
+        assert messages[3] == "grok turn: parsed session=s1 reply_chars=2"
+
+    def test_resume_uses_resume_flag_not_session_id(
+        self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """`--session-id` names a new session and errors if that id exists."""
+        backend = GrokBackend()
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "grok",
+                "--output-format",
+                "json",
+                "--always-approve",
+                "--resume",
+                "s1",
+                "--single=again",
+            ]
+            assert "--session-id" not in args
+            assert "-s" not in args
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            payload = json.dumps({"sessionId": "s1", "text": "still here"})
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("DEBUG"):
+            result = backend.run_turn("again", "s1", tmp_path)
+        assert result.session_id == "s1"
+        assert result.reply == "still here"
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"grok turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
+        )
+        assert messages[1] == (
+            "grok turn: invoking "
+            "grok --output-format json --always-approve --resume s1 "
+            "--single=<prompt:5chars>"
+        )
+        assert messages[3] == "grok turn: parsed session=s1 reply_chars=10"
+
+    def test_always_approve_is_the_noninteractive_opt_in(self) -> None:
+        assert ALWAYS_APPROVE_FLAG == "--always-approve"
+
+    def test_prompt_flag_is_the_attached_form(self) -> None:
+        assert PROMPT_FLAG == "--single"
+
+    def test_hyphen_leading_prompt_is_attached_to_its_flag(
+        self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A bare `--fix ...` argument is read by grok's parser as a flag.
+
+        `talk` builds the prompt from argparse.REMAINDER, so a prompt opening
+        with a dash reaches the CLI verbatim and the run dies at argv parsing
+        with a usage dump instead of answering.
+        """
+        backend = GrokBackend()
+        prompt = "--fix the parser"
+
+        def fake_run(args, **kwargs):
+            assert prompt not in args
+            assert args[-1] == f"--single={prompt}"
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            payload = json.dumps({"sessionId": "s1", "text": "ok"})
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("DEBUG"):
+            result = backend.run_turn(prompt, None, tmp_path)
+        assert result.reply == "ok"
+        # The flag stays readable; only the prompt is collapsed.
+        assert _messages(caplog)[1] == (
+            "grok turn: invoking "
+            "grok --output-format json --always-approve --single=<prompt:16chars>"
+        )
+
+    def test_null_text_is_an_empty_reply_not_a_crash(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """An explicit null must not reach len() in the debug log."""
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": "s1", "text": None})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.reply == ""
+        assert result.session_id == "s1"
+
+    def test_reply_comes_from_text_not_result(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Claude's field names must not be read as Grok's envelope."""
+        backend = GrokBackend()
+        payload = json.dumps(
+            {
+                "sessionId": "s1",
+                "text": "grok-reply",
+                "result": "claude-field",
+                "session_id": "wrong",
+            }
+        )
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.session_id == "s1"
+        assert result.reply == "grok-reply"
+
+    def test_claude_shaped_envelope_is_not_a_session(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"session_id": "s1", "result": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"grok did not report a sessionId\nstdout: {payload}"
+        )
+
+    def test_error_envelope_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = GrokBackend()
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            payload = json.dumps(
+                {"type": "error", "message": "boom", "sessionId": "s1"}
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "grok reported an error: boom"
+
+    def test_nonzero_exit_prefers_the_json_error_message(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"type": "error", "message": "auth failed"})
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(
+                args, 1, stdout=payload, stderr="ignored"
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "grok reported an error: auth failed"
+
+    def test_nonzero_exit_without_error_object_uses_stderr(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        stderr = "s" * 500 + "M" + "e" * 1999  # 2500 chars total
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr=stderr)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == f"grok exited 1\nstderr: {stderr[-2000:]}"
+
+    def test_nonzero_exit_with_a_success_envelope_still_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Exit 0 is part of success; a payload is not enough on its own."""
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": "s1", "text": "hi"})
+        stderr = "e" * 2500
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 2, stdout=payload, stderr=stderr)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == f"grok exited 2\nstderr: {stderr[-2000:]}"
+
+    def test_text_defaults_to_empty_reply(self, tmp_path: Path, monkeypatch) -> None:
+        backend = GrokBackend()
+
+        def fake_run(args, **kwargs):
+            payload = json.dumps({"sessionId": "s1"})
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.reply == ""
+
+    def test_malformed_json_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = GrokBackend()
+        stdout = "s" * 500 + "M" + "e" * 1999  # 2500 chars total, not valid JSON
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"grok output was not JSON\nstdout: {stdout[:400]}\n…\n{stdout[-1600:]}"
+        )
+        assert stdout[:400] in str(excinfo.value)
+        assert stdout[-1600:] in str(excinfo.value)
+
+    def test_text_prefix_then_json_envelope_is_parsed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        envelope = {"sessionId": "s1", "text": "I've read both skills"}
+        stdout = "I've read both skills\n" + json.dumps(envelope)
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("x", None, tmp_path)
+        assert result.session_id == "s1"
+        assert result.reply == "I've read both skills"
+
+    def test_another_type_is_still_a_normal_reply(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps(
+            {"type": "end", "sessionId": "s1", "text": "done", "stopReason": "end_turn"}
+        )
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("x", None, tmp_path).reply == "done"
+
+    def test_missing_session_id_raises_rather_than_returning_none(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"text": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"grok did not report a sessionId\nstdout: {payload}"
+        )
+
+    def test_blank_session_id_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": "", "text": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError, match="did not report a sessionId"):
+            backend.run_turn("x", None, tmp_path)
+
+    def test_non_string_session_id_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = GrokBackend()
+        payload = json.dumps({"sessionId": 17, "text": "hi"})
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GrokTurnError, match="did not report a sessionId"):
+            backend.run_turn("x", None, tmp_path)
+
+
+class TestParseGrokStdout:
+    def test_plain_object(self) -> None:
+        payload = {"sessionId": "s1", "text": "hi"}
+        assert parse_grok_stdout(json.dumps(payload)) == payload
+
+    def test_empty_is_an_error(self) -> None:
+        with pytest.raises(GrokTurnError) as excinfo:
+            parse_grok_stdout("   ")
+        assert str(excinfo.value) == "grok output was not JSON\nstdout: "
+
+    def test_picks_the_session_envelope(self) -> None:
+        noise = json.dumps({"progress": 1})
+        envelope = json.dumps({"sessionId": "keep", "text": "done"})
+        parsed = parse_grok_stdout(f"{noise}\n{envelope}")
+        assert parsed["sessionId"] == "keep"
+        assert parsed["text"] == "done"
+
+    def test_picks_the_session_envelope_ahead_of_later_noise(self) -> None:
+        """Last-object fallback would take the trailing progress event."""
+        envelope = json.dumps({"sessionId": "keep", "text": "done"})
+        later = json.dumps({"progress": 1})
+        parsed = parse_grok_stdout(f"{envelope}\n{later}")
+        assert parsed["sessionId"] == "keep"
+
+    def test_picks_an_error_object(self) -> None:
+        noise = json.dumps({"progress": 1})
+        error = json.dumps({"type": "error", "message": "nope"})
+        parsed = parse_grok_stdout(f"{noise}\n{error}")
+        assert parsed == {"type": "error", "message": "nope"}
+
+    def test_picks_an_error_object_ahead_of_later_noise(self) -> None:
+        error = json.dumps({"type": "error", "message": "nope"})
+        later = json.dumps({"progress": 1})
+        parsed = parse_grok_stdout(f"{error}\n{later}")
+        assert parsed == {"type": "error", "message": "nope"}
+
+    def test_picks_a_text_only_object_ahead_of_later_noise(self) -> None:
+        envelope = json.dumps({"text": "done"})
+        later = json.dumps({"progress": 1})
+        parsed = parse_grok_stdout(f"{envelope}\n{later}")
+        assert parsed == {"text": "done"}
+
+    def test_picks_a_session_id_only_object_ahead_of_later_noise(self) -> None:
+        """A success envelope can omit text; sessionId alone must still win."""
+        envelope = json.dumps({"sessionId": "keep"})
+        later = json.dumps({"progress": 1})
+        parsed = parse_grok_stdout(f"{envelope}\n{later}")
+        assert parsed == {"sessionId": "keep"}
+
+    def test_a_trailing_tip_does_not_outrank_the_real_envelope(self) -> None:
+        """`text` alone is a weak marker: tips and warnings carry one too."""
+        envelope = json.dumps({"sessionId": "keep", "text": "done"})
+        tip = json.dumps({"type": "tip", "text": "try --help"})
+        assert parse_grok_stdout(f"{envelope}\n{tip}") == {
+            "sessionId": "keep",
+            "text": "done",
+        }
+
+    def test_a_trailing_tip_does_not_outrank_an_error_envelope(self) -> None:
+        error = json.dumps({"type": "error", "message": "nope"})
+        tip = json.dumps({"type": "tip", "text": "try --help"})
+        assert parse_grok_stdout(f"{error}\n{tip}") == {
+            "type": "error",
+            "message": "nope",
+        }
+
+    def test_falls_back_to_the_last_object(self) -> None:
+        parsed = parse_grok_stdout('noise {"other": 1} then {"later": 2}')
+        assert parsed == {"later": 2}
+
+    def test_short_garbage_keeps_the_whole_dump(self) -> None:
+        with pytest.raises(GrokTurnError) as excinfo:
+            parse_grok_stdout("not json")
+        assert str(excinfo.value) == "grok output was not JSON\nstdout: not json"
+
+    def test_objects_inside_a_json_array_are_still_found(self) -> None:
+        parsed = parse_grok_stdout('[{"a": 1}, {"sessionId": "s", "text": "hi"}]')
+        assert parsed == {"sessionId": "s", "text": "hi"}
+
+    def test_skips_a_broken_brace_and_keeps_the_next_object(self) -> None:
+        parsed = parse_grok_stdout('{{"sessionId": "s"}')
+        assert parsed == {"sessionId": "s"}
+
+
+class TestReplyText:
+    def test_returns_the_string(self) -> None:
+        assert reply_text({"text": "hi"}, "text") == "hi"
+
+    def test_missing_key_is_empty(self) -> None:
+        assert reply_text({"sessionId": "s1"}, "text") == ""
+
+    def test_explicit_null_is_empty(self) -> None:
+        """`.get(key, "")` would hand None straight to len()."""
+        assert reply_text({"text": None}, "text") == ""
+
+    def test_non_string_is_empty(self) -> None:
+        assert reply_text({"text": ["block"]}, "text") == ""
+
+    def test_empty_string_is_kept(self) -> None:
+        assert reply_text({"text": ""}, "text") == ""
+
+    def test_reads_the_key_it_was_given(self) -> None:
+        payload = {"text": "grok", "result": "claude"}
+        assert reply_text(payload, "result") == "claude"
+
+
+class TestJsonObjects:
+    def test_finds_each_object_in_order(self) -> None:
+        assert json_objects('{"a": 1} noise {"b": 2}') == [{"a": 1}, {"b": 2}]
+
+    def test_empty_when_there_is_no_object(self) -> None:
+        assert json_objects("not json") == []
+
+    def test_skips_a_broken_brace(self) -> None:
+        assert json_objects('{{"ok": true}') == [{"ok": True}]
+
+
 class TestOrchestrator:
     def test_spawn_talk_persists_and_resumes(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
@@ -650,6 +1144,15 @@ class TestOrchestrator:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         agent = orch.spawn("a1")
         assert agent.backend.name == "claude"
+
+    def test_spawn_persists_a_grok_agent(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        agent = orch.spawn("g", "grok")
+        assert agent.backend.name == "grok"
+        loaded = Orchestrator(state_file=state_file)
+        assert loaded.agents["g"].backend.name == "grok"
+        assert loaded.agents["g"].session_id is None
 
     def test_spawn_duplicate_raises(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
@@ -927,6 +1430,19 @@ class TestCLI:
         cmd_spawn(orch, ["a"])
         assert orch.agents["a"].backend.name == "claude"
 
+    def test_cmd_spawn_follows_default_backend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEFAULT_BACKEND documents itself as the one `spawn` uses.
+
+        An argparse default of its own would leave `spawn` on claude however
+        that constant changed, so the two would silently disagree.
+        """
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "codex")
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_spawn(orch, ["a"])
+        assert orch.agents["a"].backend.name == "codex"
+
     def test_cmd_spawn_rejects_unknown_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         with pytest.raises(SystemExit, match="2"):
@@ -1045,6 +1561,58 @@ class TestCLI:
         with pytest.raises(SystemExit, match="1"):
             cmd_talk(orch, ["c", "hi"])
         assert capsys.readouterr().err == "codex did not report a thread_id\n"
+
+    def test_cmd_talk_prints_any_turn_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The CLI catches TurnError, so a new backend does not need a new except."""
+
+        class BoomAny(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "boomany"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise TurnError("cli failed")
+
+        register_backend("boomany", BoomAny)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("d", "boomany")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_talk(orch, ["d", "hi"])
+        captured = capsys.readouterr()
+        assert captured.err == "cli failed\n"
+        assert captured.out == ""
+
+    def test_cmd_talk_prints_grok_backend_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class BoomGrok(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "boomgrok"
+
+            def run_turn(
+                self, prompt: str, session_id: str | None, cwd: Path
+            ) -> TurnResult:
+                raise GrokTurnError("grok did not report a sessionId")
+
+        register_backend("boomgrok", BoomGrok)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("g", "boomgrok")
+        with pytest.raises(SystemExit, match="1"):
+            cmd_talk(orch, ["g", "hi"])
+        assert capsys.readouterr().err == "grok did not report a sessionId\n"
+
+    def test_cmd_spawn_accepts_grok(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_spawn(orch, ["a", "-b", "grok"])
+        assert "spawned agent 'a' backend=grok" in capsys.readouterr().out
+        assert orch.agents["a"].backend.name == "grok"
 
     def test_cmd_list_empty(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1273,6 +1841,35 @@ class TestDescribeCommand:
         assert describe_command(args, "resume") == (
             "codex exec resume t1 <prompt:6chars> --json"
         )
+
+    def test_prompt_attached_to_its_flag_is_replaced(self) -> None:
+        """Grok takes `--single=<prompt>`; the flag must stay readable."""
+        args = ["grok", "--always-approve", "--single=hello"]
+        assert describe_command(args, "hello") == (
+            "grok --always-approve --single=<prompt:5chars>"
+        )
+
+    def test_attached_prompt_does_not_grow_the_line(self) -> None:
+        short = describe_command(["grok", "--single=x"], "x")
+        long = describe_command(["grok", f"--single={'x' * 10_000}"], "x" * 10_000)
+        assert len(long) - len(short) == len("10000") - len("1")
+
+    def test_attached_form_keeps_a_hyphen_leading_prompt_out_of_the_log(
+        self,
+    ) -> None:
+        args = ["grok", "--single=--fix the parser"]
+        assert describe_command(args, "--fix the parser") == (
+            "grok --single=<prompt:16chars>"
+        )
+
+    def test_a_standalone_prompt_wins_over_an_earlier_attached_one(self) -> None:
+        args = ["grok", "--single=hi", "hi"]
+        assert describe_command(args, "hi") == "grok --single=hi <prompt:2chars>"
+
+    def test_an_empty_prompt_matches_no_attached_flag(self) -> None:
+        """Every argument ends with "=" + "", so the attached form must not
+        fire and swallow the flag it is glued to."""
+        assert describe_command(["grok", "--single="], "") == "grok --single="
 
     def test_unmatched_prompt_leaves_args_unchanged(self) -> None:
         assert describe_command(["claude", "-p", "hello"], "other") == "claude -p hello"
