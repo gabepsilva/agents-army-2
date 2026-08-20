@@ -340,28 +340,30 @@ def cmd_delete(orchestrator: Orchestrator, args: list[str]) -> None:
 def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--agent", required=True)
-    parser.add_argument("--skill", required=True)
+    parser.add_argument("--skill")
     parser.add_argument("--prompt", required=True)
     opts = parser.parse_args(args)
     prompt = opts.prompt.strip()
     if not prompt:
         print(
-            "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT",
+            "usage: orchestrator --agent NAME [--skill NAME[,NAME...]] --prompt TEXT",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    try:
-        names = parse_skill_names(opts.skill)
-        resolved = resolve_skills(names, SKILLS_DIR)
-    except SkillError as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1) from None
-    composed = compose_skill_prompt(resolved, prompt)
-    log.info(
-        "agent '%s': attaching skill(s) %s",
-        opts.agent,
-        ", ".join(name for name, _path in resolved),
-    )
+    composed = prompt
+    if opts.skill is not None:
+        try:
+            names = parse_skill_names(opts.skill)
+            resolved = resolve_skills(names, SKILLS_DIR)
+        except SkillError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from None
+        composed = compose_skill_prompt(resolved, prompt)
+        log.info(
+            "agent '%s': attaching skill(s) %s",
+            opts.agent,
+            ", ".join(name for name, _path in resolved),
+        )
     # After the skills resolve, so a bad --skill exits without having left a
     # new agent behind for a turn that never ran.
     _ensure_agent(orchestrator, opts.agent)
@@ -416,7 +418,7 @@ OWN_LOGGERS = ("orchestrator", "backends")
 
 USAGE = (
     "usage: orchestrator [-v|-vv] <command> [args...]\n"
-    "       orchestrator [-v|-vv] --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"
+    "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]] --prompt TEXT\n"
     "       orchestrator [-v|-vv] --list {agents,skills}\n"
     "  -h, --help      show this message\n"
     "  -v, --verbose   log each step and how long it took\n"

@@ -1664,7 +1664,7 @@ class TestCLI:
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator [-v|-vv] <command> [args...]\n"
-            "       orchestrator [-v|-vv] --agent NAME --skill NAME[,NAME...] "
+            "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]] "
             "--prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
             "  -h, --help      show this message\n"
