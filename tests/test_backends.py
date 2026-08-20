@@ -127,7 +127,7 @@ def _assert_subprocess_kwargs(kwargs: dict, cwd: Path) -> None:
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
     assert kwargs["check"] is False
-    assert kwargs["timeout"] == 1800
+    assert kwargs["timeout"] == 3600
     # Not a detail: a CLI whose stdin is an inherited pipe rather than a tty
     # blocks until it is killed. `codex exec "reply ok" --json` under a pipe
     # returns nothing after 25s and exits 124, and claude and grok are given
@@ -255,7 +255,7 @@ class TestClaudeRunTurn:
         assert result.raw == payload
         messages = _messages(caplog)
         assert messages[0] == (
-            f"claude turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
+            f"claude turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=3600s"
         )
         assert messages[1] == (
             "claude turn: invoking "
@@ -303,7 +303,7 @@ class TestClaudeRunTurn:
         assert result.reply == "still here"
         messages = _messages(caplog)
         assert messages[0] == (
-            f"claude turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
+            f"claude turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
         )
         # The resumed session id stays readable; only the prompt is summarised.
         assert messages[1] == (
@@ -614,7 +614,7 @@ class TestCodexRunTurn:
         assert result.reply == "yo"
         messages = _messages(caplog)
         assert messages[0] == (
-            f"codex turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
+            f"codex turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=3600s"
         )
         # The prompt sits mid-argv for codex, so the summary must find it there.
         assert messages[1] == (
@@ -659,7 +659,7 @@ class TestCodexRunTurn:
         assert result.reply == "back"
         messages = _messages(caplog)
         assert messages[0] == (
-            f"codex turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
+            f"codex turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
         )
         assert messages[1] == (
             "codex turn: invoking "
@@ -902,7 +902,7 @@ class TestGrokRunTurn:
         assert result.raw == payload
         messages = _messages(caplog)
         assert messages[0] == (
-            f"grok turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=1800s"
+            f"grok turn: cwd={tmp_path} resume=False prompt_chars=5 timeout=3600s"
         )
         assert messages[1] == (
             "grok turn: invoking "
@@ -947,7 +947,7 @@ class TestGrokRunTurn:
         assert result.reply == "still here"
         messages = _messages(caplog)
         assert messages[0] == (
-            f"grok turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=1800s"
+            f"grok turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
         )
         assert messages[1] == (
             "grok turn: invoking "
