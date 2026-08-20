@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import logging
 import math
 import os
 import sys
 import time
+import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
@@ -578,7 +580,9 @@ USAGE = (
     "usage: orchestrator [-v|-vv] <command> [args...]\n"
     f"       {SKILL_INVOCATION_FORM}\n"
     "       orchestrator [-v|-vv] --list {agents,skills}\n"
+    "       orchestrator [-v|-vv] --version\n"
     "  -h, --help      show this message\n"
+    "  --version       show the installed version\n"
     "  -v, --verbose   log each step and how long it took\n"
     "  -vv, --verbose2  also log full prompts and replies"
 )
@@ -610,11 +614,48 @@ def _take_verbosity(argv: list[str]) -> tuple[int, list[str]]:
     return verbosity, argv[consumed:]
 
 
+def _project_version() -> str | None:
+    """Read the version from the checkout containing this package, if valid."""
+    project_file = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        with project_file.open("rb") as stream:
+            version = tomllib.load(stream).get("project", {}).get("version")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    return version if isinstance(version, str) and version else None
+
+
+def _resolve_version() -> str:
+    """Resolve the distribution version without touching CLI runtime state."""
+    version = _project_version()
+    if version is not None:
+        return version
+    try:
+        installed_version = importlib.metadata.version("agents-army")
+    except (importlib.metadata.PackageNotFoundError, ValueError, TypeError):
+        raise ValueError from None
+    if not isinstance(installed_version, str) or not installed_version:
+        raise ValueError
+    return installed_version
+
+
+def _print_version() -> None:
+    try:
+        version = _resolve_version()
+    except (ValueError, TypeError):
+        print("unable to determine agents-army version", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(version)
+
+
 def main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
 
     verbosity, argv = _take_verbosity(argv)
+    if argv and argv[0] == "--version":
+        _print_version()
+        return
     _configure_logging(verbosity)
     # The prompt is one of these arguments, so log the shape and not the values.
     log.debug("cli: %d argument(s) after flag removal", len(argv))
