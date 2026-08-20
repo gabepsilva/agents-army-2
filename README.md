@@ -253,6 +253,15 @@ tests/             # pytest suite
 tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)
 ```
 
+## End-to-end workflow example
+
+[`examples/gabriel_development_workflow.py`](examples/gabriel_development_workflow.py)
+shows how to compose persistent agents, prompts, and strict structured replies
+into a resumable raw-issue-to-PR workflow. The Python driver owns `gh`, full CI, git
+publication, and control flow; agents focus on repository reasoning and code.
+Its prompts, response schemas, security boundary, and invocation are documented
+in [`examples/README.md`](examples/README.md).
+
 ## Quality gates
 
 This project is developed mainly by AI agents, so its checks are

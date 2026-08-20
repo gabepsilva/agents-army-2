@@ -1,0 +1,829 @@
+#!/usr/bin/env python3
+"""Drive a raw GitHub issue through implementation and into a draft PR.
+
+Agents receive repository context and strict output contracts. This process owns
+GitHub, full CI, commits, pushes, workflow state, and all stage transitions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol, cast
+
+from orchestrator import Orchestrator
+from orchestrator.schema import load_schema
+
+GITHUB_TOKEN_NAMES = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+CI_EVIDENCE_CHARS = 20_000
+DEFAULT_AGENT_TIMEOUT = 3_600
+DEFAULT_CI_TIMEOUT = 7_200
+
+
+class WorkflowError(RuntimeError):
+    """A workflow failure with a concise user-facing message."""
+
+
+class WorkflowStopped(WorkflowError):
+    """A deliberate terminal outcome rather than an infrastructure failure."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """The bounded evidence retained from a subprocess."""
+
+    returncode: int
+    output: str
+
+    @property
+    def succeeded(self) -> bool:
+        return self.returncode == 0
+
+    def as_json(self) -> dict:
+        return {"returncode": self.returncode, "output": self.output}
+
+
+class BackendHandle(Protocol):
+    name: str
+
+
+class AgentHandle(Protocol):
+    name: str
+    backend: BackendHandle
+
+
+class TurnHandle(Protocol):
+    structured: dict | None
+
+
+class OrchestratorHandle(Protocol):
+    def ensure(self, name: str, backend: str) -> tuple[AgentHandle, bool]: ...
+
+    def talk(self, name: str, prompt: str, **kwargs: object) -> TurnHandle: ...
+
+
+class GitHubService(Protocol):
+    def issue(self, number: int) -> dict: ...
+
+    def comment_once(
+        self, number: int, key: str, title: str, payload: object
+    ) -> None: ...
+
+    def create_pr(
+        self,
+        *,
+        base: str,
+        branch: str,
+        title: str,
+        body: str,
+        draft: bool,
+    ) -> str: ...
+
+
+class RepositoryService(Protocol):
+    def run_ci(self) -> CommandResult: ...
+
+    def commit(self, message: str, base_sha: str) -> None: ...
+
+    def push(self, branch: str) -> None: ...
+
+
+class AgentService(Protocol):
+    def ask(
+        self,
+        *,
+        role: str,
+        prompt_name: str,
+        schema_name: str,
+        values: Mapping[str, str],
+        timeout: int = DEFAULT_AGENT_TIMEOUT,
+    ) -> dict: ...
+
+
+@dataclass(frozen=True)
+class WorkflowOptions:
+    issue_number: int
+    base_branch: str
+    branch: str
+    clarification_rounds: int
+    repair_rounds: int
+    review_rounds: int
+    draft: bool
+
+
+@dataclass(frozen=True)
+class WorkflowServices:
+    store: ArtifactStore
+    github: GitHubService
+    repository: RepositoryService
+    agents: AgentService
+
+
+@dataclass(frozen=True)
+class Stage:
+    key: str
+    title: str
+    role: str
+    prompt: str
+    schema: str
+    values: Mapping[str, str]
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
+def _bounded(text: str, limit: int = CI_EVIDENCE_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return f"… output truncated …\n{text[-limit:]}"
+
+
+def _markdown_label(value: object) -> str:
+    return str(value).replace("_", " ").strip().title()
+
+
+def _markdown_scalar(value: object) -> str:
+    if value is None:
+        return "_None._"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    rendered = str(value)
+    return rendered if rendered.strip() else "_None._"
+
+
+def _markdown(value: object, heading_level: int = 3) -> str:
+    if isinstance(value, Mapping):
+        sections = []
+        for key, item in value.items():
+            heading = "#" * min(heading_level, 6)
+            sections.append(
+                f"{heading} {_markdown_label(key)}\n\n"
+                f"{_markdown(item, heading_level + 1)}"
+            )
+        return "\n\n".join(sections) if sections else "_None._"
+    if isinstance(value, list):
+        if not value:
+            return "_None._"
+        if all(not isinstance(item, (Mapping, list)) for item in value):
+            return "\n".join(
+                f"- {_markdown_scalar(item).replace(chr(10), chr(10) + '  ')}"
+                for item in value
+            )
+        sections = []
+        for index, item in enumerate(value, start=1):
+            heading = "#" * min(heading_level, 6)
+            sections.append(
+                f"{heading} Item {index}\n\n{_markdown(item, heading_level + 1)}"
+            )
+        return "\n\n".join(sections)
+    return _markdown_scalar(value)
+
+
+def _render_comment(marker: str, title: str, payload: object) -> str:
+    return f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
+
+
+class ArtifactStore:
+    """Durable, atomic checkpoints kept under .git so they are never committed."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.artifacts = root / "artifacts"
+        self.metadata_path = root / "workflow.json"
+
+    @property
+    def initialized(self) -> bool:
+        return self.metadata_path.exists()
+
+    def initialize(self, issue: int, branch: str, base_sha: str) -> None:
+        if self.initialized:
+            metadata = self._read(self.metadata_path)
+            expected = {"issue": issue, "branch": branch}
+            actual = {name: metadata.get(name) for name in expected}
+            if actual != expected:
+                raise WorkflowError(
+                    f"workflow state belongs to {actual}, not {expected}"
+                )
+            return
+        self._write(
+            self.metadata_path,
+            {"issue": issue, "branch": branch, "base_sha": base_sha, "pr_url": None},
+        )
+
+    @property
+    def metadata(self) -> dict:
+        if not self.initialized:
+            raise WorkflowError("workflow state has not been initialized")
+        return self._read(self.metadata_path)
+
+    def has(self, name: str) -> bool:
+        return self._artifact_path(name).exists()
+
+    def load(self, name: str) -> dict:
+        return self._read(self._artifact_path(name))
+
+    def save(self, name: str, payload: dict) -> None:
+        self._write(self._artifact_path(name), payload)
+
+    def record_pr(self, url: str) -> None:
+        metadata = self.metadata
+        metadata["pr_url"] = url
+        self._write(self.metadata_path, metadata)
+
+    def _artifact_path(self, name: str) -> Path:
+        return self.artifacts / f"{name}.json"
+
+    @staticmethod
+    def _read(path: Path) -> dict:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowError(f"cannot read workflow state {path}: {exc}") from exc
+        if not isinstance(value, dict):
+            raise WorkflowError(f"workflow state {path} is not a JSON object")
+        return value
+
+    @staticmethod
+    def _write(path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(_json(payload) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+
+class GitRepository:
+    """Deterministic git and CI operations that do not require model judgment."""
+
+    def __init__(
+        self,
+        root: Path,
+        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        self.root = root
+        self._run_process = run
+
+    def prepare(self, base_branch: str, resuming: bool) -> tuple[str, str]:
+        branch = self._call("branch", "--show-current").strip()
+        if not branch:
+            raise WorkflowError("the workflow requires a named git branch")
+        if branch == base_branch:
+            raise WorkflowError(
+                f"refusing to develop directly on protected base branch '{branch}'"
+            )
+        if not resuming and self._call("status", "--porcelain").strip():
+            raise WorkflowError("start the workflow from a clean worktree")
+        return branch, self._call("rev-parse", "HEAD").strip()
+
+    def run_ci(self, timeout: int = DEFAULT_CI_TIMEOUT) -> CommandResult:
+        proc = self._run_process(
+            ["make", "ci"],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        combined = f"{proc.stdout}\n{proc.stderr}".strip()
+        return CommandResult(proc.returncode, _bounded(combined))
+
+    def commit(self, message: str, base_sha: str) -> None:
+        tracked = self._call("diff", "--no-renames", "--name-only", "-z", "HEAD").split(
+            "\0"
+        )
+        untracked = self._call(
+            "ls-files", "--others", "--exclude-standard", "-z"
+        ).split("\0")
+        changed_paths = [path for path in (*tracked, *untracked) if path]
+        if changed_paths:
+            self._call("add", "--", *changed_paths)
+            self._call("commit", "-m", message)
+        if self._call("rev-list", "--count", f"{base_sha}..HEAD").strip() == "0":
+            raise WorkflowStopped("implementation produced no commits")
+
+    def push(self, branch: str) -> None:
+        self._call("push", "--set-upstream", "origin", branch)
+
+    def _call(self, *args: str) -> str:
+        proc = self._run_process(
+            ["git", *args],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode != 0:
+            command = " ".join(("git", *args))
+            raise WorkflowError(f"{command} failed: {proc.stderr.strip()}")
+        return proc.stdout
+
+
+class GitHub:
+    """The only component allowed to possess GitHub credentials or call gh."""
+
+    def __init__(
+        self,
+        root: Path,
+        repository: str | None = None,
+        executable: Path | None = None,
+        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        discovered = shutil.which("gh") if executable is None else str(executable)
+        if discovered is None:
+            raise WorkflowError("gh is not installed or is not on PATH")
+        self.executable = str(Path(discovered).resolve())
+        self.root = root
+        self.repository = repository
+        self._run_process = run
+        self._environment = dict(os.environ if environment is None else environment)
+        self._markers: set[str] = set()
+
+    def default_branch(self) -> str:
+        payload = self._json_call("repo", "view", "--json", "defaultBranchRef")
+        branch = payload.get("defaultBranchRef")
+        if not isinstance(branch, dict) or not isinstance(branch.get("name"), str):
+            raise WorkflowError("gh repo view did not report a default branch")
+        return branch["name"]
+
+    def issue(self, number: int) -> dict:
+        payload = self._json_call(
+            "issue",
+            "view",
+            str(number),
+            "--json",
+            "number,title,body,comments,url,labels,state",
+        )
+        comments = payload.get("comments", [])
+        if isinstance(comments, list):
+            self._markers = {
+                line
+                for comment in comments
+                if isinstance(comment, dict)
+                for line in str(comment.get("body", "")).splitlines()
+                if line.startswith("<!-- gdw:")
+            }
+        return payload
+
+    def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
+        marker = f"<!-- gdw:{number}:{key} -->"
+        if marker in self._markers:
+            return
+        self._body_call(
+            _render_comment(marker, title, payload),
+            "issue",
+            "comment",
+            str(number),
+            "--body-file",
+        )
+        self._markers.add(marker)
+
+    def create_pr(
+        self,
+        *,
+        base: str,
+        branch: str,
+        title: str,
+        body: str,
+        draft: bool,
+    ) -> str:
+        args = ["pr", "create", "--base", base, "--head", branch, "--title", title]
+        if draft:
+            args.append("--draft")
+        return self._body_call(body, *args, "--body-file").strip()
+
+    def _repo_args(self) -> list[str]:
+        return [] if self.repository is None else ["--repo", self.repository]
+
+    def _json_call(self, *args: str) -> dict:
+        raw = self._call(*args)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError(f"gh returned invalid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise WorkflowError("gh returned JSON that was not an object")
+        return payload
+
+    def _body_call(self, body: str, *args: str) -> str:
+        with tempfile.TemporaryDirectory(prefix="gdw-gh-") as directory:
+            body_file = Path(directory) / "body.md"
+            body_file.write_text(body, encoding="utf-8")
+            return self._call(*args, str(body_file))
+
+    def _call(self, *args: str) -> str:
+        proc = self._run_process(
+            [self.executable, *args, *self._repo_args()],
+            cwd=str(self.root),
+            env=self._environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if proc.returncode != 0:
+            raise WorkflowError(f"gh {' '.join(args)} failed: {proc.stderr.strip()}")
+        return proc.stdout
+
+
+class AgentGateway:
+    """Structured agent turns with GitHub credentials removed from the process."""
+
+    def __init__(
+        self,
+        *,
+        backend: str,
+        issue: int,
+        state_file: Path,
+        example_root: Path,
+        orchestrator_factory: Callable[[Path], object] = Orchestrator,
+    ) -> None:
+        self.backend = backend
+        self.issue = issue
+        self.state_file = state_file
+        self.prompts = example_root / "prompts"
+        self.validations = example_root / "validations"
+        self._orchestrator_factory = orchestrator_factory
+
+    def ask(
+        self,
+        *,
+        role: str,
+        prompt_name: str,
+        schema_name: str,
+        values: Mapping[str, str],
+        timeout: int = DEFAULT_AGENT_TIMEOUT,
+    ) -> dict:
+        prompt = self._prompt(prompt_name, values)
+        schema = load_schema(self.validations / f"{schema_name}.json")
+        with self._without_github_access():
+            orchestrator = cast(
+                OrchestratorHandle, self._orchestrator_factory(self.state_file)
+            )
+            agent, _created = orchestrator.ensure(
+                f"gdw-{self.issue}-{role}", self.backend
+            )
+            if agent.backend.name != self.backend:
+                raise WorkflowError(
+                    f"agent '{agent.name}' already uses backend {agent.backend.name}"
+                )
+            result = orchestrator.talk(
+                agent.name, prompt, schema=schema, timeout=timeout
+            )
+        if result.structured is None:
+            raise WorkflowError(f"agent '{role}' returned no structured response")
+        return result.structured
+
+    def _prompt(self, name: str, values: Mapping[str, str]) -> str:
+        path = self.prompts / f"{name}.md"
+        try:
+            prompt = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise WorkflowError(f"cannot read prompt {path}: {exc}") from exc
+        for key, value in values.items():
+            prompt = prompt.replace(f"{{{{{key}}}}}", value)
+        if "{{" in prompt or "}}" in prompt:
+            raise WorkflowError(f"prompt {path} has unresolved placeholders")
+        return prompt
+
+    @contextmanager
+    def _without_github_access(self) -> Iterator[None]:
+        original = dict(os.environ)
+        with tempfile.TemporaryDirectory(prefix="gdw-agent-") as directory:
+            isolation = Path(directory)
+            blocker = isolation / "gh"
+            blocker.write_text(
+                "#!/bin/sh\necho 'gh is owned by the GDW driver' >&2\nexit 126\n",
+                encoding="utf-8",
+            )
+            blocker.chmod(0o700)
+            sanitized = dict(original)
+            sanitized["PATH"] = f"{isolation}{os.pathsep}{original.get('PATH', '')}"
+            sanitized["GH_CONFIG_DIR"] = str(isolation / "empty-gh-config")
+            for name in GITHUB_TOKEN_NAMES:
+                sanitized.pop(name, None)
+            os.environ.clear()
+            os.environ.update(sanitized)
+            try:
+                yield
+            finally:
+                os.environ.clear()
+                os.environ.update(original)
+
+
+class DevelopmentWorkflow:
+    """The explicit state machine from issue expansion to pull request."""
+
+    def __init__(
+        self,
+        options: WorkflowOptions,
+        services: WorkflowServices,
+    ) -> None:
+        self.issue_number = options.issue_number
+        self.base_branch = options.base_branch
+        self.branch = options.branch
+        self.store = services.store
+        self.github = services.github
+        self.repository = services.repository
+        self.agents = services.agents
+        self.clarification_rounds = options.clarification_rounds
+        self.repair_rounds = options.repair_rounds
+        self.review_rounds = options.review_rounds
+        self.draft = options.draft
+
+    def run(self) -> str:
+        existing_url = self.store.metadata.get("pr_url")
+        if isinstance(existing_url, str) and existing_url:
+            return existing_url
+        issue = self.github.issue(self.issue_number)
+        issue_json = _json(issue)
+        expansion = self._reach_agreement(issue_json)
+        specification = self._stage(
+            Stage(
+                "specification",
+                "Specification",
+                "specifier",
+                "specify",
+                "specification",
+                {"ISSUE_JSON": issue_json, "EXPANSION_JSON": _json(expansion)},
+            )
+        )
+        implementation = self._stage(
+            Stage(
+                "implementation",
+                "Implementation report",
+                "implementer",
+                "implement",
+                "implementation",
+                {"SPECIFICATION_JSON": _json(specification)},
+            )
+        )
+        self._require_complete(implementation, "implementation")
+        ci_summary = self._ci_until_green("implementation", specification)
+        final_reviews = self._review_until_approved(specification, ci_summary)
+        base_sha = str(self.store.metadata["base_sha"])
+        commit_title = str(specification["title"]).replace("\n", " ")[:72]
+        self.repository.commit(
+            f"Implement #{self.issue_number}: {commit_title}", base_sha
+        )
+        self.repository.push(self.branch)
+        body = self._pr_body(specification, final_reviews)
+        url = self.github.create_pr(
+            base=self.base_branch,
+            branch=self.branch,
+            title=commit_title,
+            body=body,
+            draft=self.draft,
+        )
+        if not url:
+            raise WorkflowError("gh pr create returned an empty URL")
+        self.store.record_pr(url)
+        self.github.comment_once(
+            self.issue_number,
+            "pull-request",
+            "Pull request created",
+            {"url": url, "draft": self.draft},
+        )
+        return url
+
+    def _reach_agreement(self, issue_json: str) -> dict:
+        expansion: dict | None = None
+        grill: dict | None = None
+        for round_number in range(1, self.clarification_rounds + 1):
+            if expansion is None:
+                prompt = "expand"
+                values = {"ISSUE_JSON": issue_json}
+            else:
+                prompt = "revise"
+                values = {
+                    "ISSUE_JSON": issue_json,
+                    "EXPANSION_JSON": _json(expansion),
+                    "GRILL_JSON": _json(grill),
+                }
+            expansion = self._stage(
+                Stage(
+                    f"expansion-{round_number}",
+                    f"Expansion round {round_number}",
+                    "expander",
+                    prompt,
+                    "expansion",
+                    values,
+                )
+            )
+            if expansion["decision"] == "stop":
+                raise WorkflowStopped(str(expansion["summary"]))
+            grill = self._stage(
+                Stage(
+                    f"grill-{round_number}",
+                    f"Ambiguity review round {round_number}",
+                    "griller",
+                    "grill",
+                    "grill",
+                    {
+                        "ISSUE_JSON": issue_json,
+                        "EXPANSION_JSON": _json(expansion),
+                    },
+                )
+            )
+            if grill["verdict"] == "ready":
+                return expansion
+            if grill["verdict"] == "reject":
+                raise WorkflowStopped(str(grill["summary"]))
+        raise WorkflowStopped("clarification rounds exhausted before agreement")
+
+    def _ci_until_green(self, prefix: str, specification: dict) -> dict:
+        for attempt in range(1, self.repair_rounds + 2):
+            key = f"ci-{prefix}-{attempt}"
+            ci = self.repository.run_ci()
+            result = ci.as_json()
+            self.store.save(key, result)
+            self.github.comment_once(
+                self.issue_number,
+                key,
+                f"CI result for {prefix}, attempt {attempt}",
+                result,
+            )
+            if result["returncode"] == 0:
+                return result
+            if attempt <= self.repair_rounds:
+                repair = self._stage(
+                    Stage(
+                        f"repair-{prefix}-{attempt}",
+                        f"Repair report for {prefix}, attempt {attempt}",
+                        "implementer",
+                        "repair",
+                        "implementation",
+                        {
+                            "SPECIFICATION_JSON": _json(specification),
+                            "FAILURE_EVIDENCE": _json(result),
+                        },
+                    )
+                )
+                self._require_complete(repair, "CI repair")
+        raise WorkflowStopped(
+            f"CI did not pass after {self.repair_rounds + 1} attempts"
+        )
+
+    def _review_until_approved(
+        self, specification: dict, ci_summary: dict
+    ) -> dict[str, dict]:
+        final: dict[str, dict] = {}
+        for round_number in range(1, self.review_rounds + 1):
+            final = {}
+            for kind in ("specification", "quality"):
+                final[kind] = self._stage(
+                    Stage(
+                        f"review-{round_number}-{kind}",
+                        f"{kind.title()} review round {round_number}",
+                        f"reviewer-{kind}",
+                        "review",
+                        "review",
+                        {
+                            "REVIEW_KIND": kind,
+                            "SPECIFICATION_JSON": _json(specification),
+                            "CI_SUMMARY": _json(ci_summary),
+                        },
+                    )
+                )
+            if all(review["verdict"] == "approve" for review in final.values()):
+                return final
+            if round_number < self.review_rounds:
+                repair = self._stage(
+                    Stage(
+                        f"review-repair-{round_number}",
+                        f"Review repair round {round_number}",
+                        "implementer",
+                        "repair",
+                        "implementation",
+                        {
+                            "SPECIFICATION_JSON": _json(specification),
+                            "FAILURE_EVIDENCE": _json(final),
+                        },
+                    )
+                )
+                self._require_complete(repair, "review repair")
+                ci_summary = self._ci_until_green(
+                    f"review-{round_number}", specification
+                )
+        raise WorkflowStopped("review rounds exhausted with open findings")
+
+    def _stage(self, stage: Stage) -> dict:
+        if self.store.has(stage.key):
+            return self.store.load(stage.key)
+        print(f"[{stage.key}] asking {stage.role}", file=sys.stderr)
+        result = self.agents.ask(
+            role=stage.role,
+            prompt_name=stage.prompt,
+            schema_name=stage.schema,
+            values=stage.values,
+        )
+        self.store.save(stage.key, result)
+        self.github.comment_once(self.issue_number, stage.key, stage.title, result)
+        return result
+
+    @staticmethod
+    def _require_complete(result: dict, stage: str) -> None:
+        if result["status"] != "complete":
+            blockers = "; ".join(str(item) for item in result["blockers"])
+            raise WorkflowStopped(f"{stage} blocked: {blockers}")
+
+    def _pr_body(self, specification: dict, reviews: dict[str, dict]) -> str:
+        return (
+            f"Closes #{self.issue_number}\n\n"
+            "## Validated specification\n\n"
+            f"{_markdown(specification)}\n\n"
+            "## Final independent reviews\n\n"
+            f"{_markdown(reviews)}\n\n"
+            "Generated by Gabriel's development workflow. Agents could inspect "
+            "and edit the repository; the driver owned GitHub, CI, commits, and push.\n"
+        )
+
+
+def _positive(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected 1 or more, got {value}")
+    return value
+
+
+def _nonnegative(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected 0 or more, got {value}")
+    return value
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Expand a GitHub issue, implement it, and open a draft PR."
+    )
+    parser.add_argument("issue", type=_positive)
+    parser.add_argument("--repo", help="GitHub OWNER/REPO; defaults to this checkout")
+    parser.add_argument(
+        "--backend", default="claude", choices=("claude", "codex", "grok")
+    )
+    parser.add_argument("--base", help="PR base branch; defaults to repository default")
+    parser.add_argument("--clarification-rounds", type=_positive, default=3)
+    parser.add_argument("--repair-rounds", type=_nonnegative, default=2)
+    parser.add_argument("--review-rounds", type=_positive, default=2)
+    parser.add_argument(
+        "--ready", action="store_true", help="open a ready PR instead of a draft"
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    opts = _parser().parse_args(argv)
+    root = Path.cwd().resolve()
+    example_root = Path(__file__).resolve().parent
+    github = GitHub(root, opts.repo)
+    base_branch = opts.base or github.default_branch()
+    store = ArtifactStore(root / ".git" / "gdw" / f"issue-{opts.issue}")
+    repository = GitRepository(root)
+    branch, base_sha = repository.prepare(base_branch, store.initialized)
+    store.initialize(opts.issue, branch, base_sha)
+    agents = AgentGateway(
+        backend=opts.backend,
+        issue=opts.issue,
+        state_file=store.root / "agents.json",
+        example_root=example_root,
+    )
+    workflow = DevelopmentWorkflow(
+        WorkflowOptions(
+            opts.issue,
+            base_branch,
+            branch,
+            opts.clarification_rounds,
+            opts.repair_rounds,
+            opts.review_rounds,
+            not opts.ready,
+        ),
+        WorkflowServices(store, github, repository, agents),
+    )
+    try:
+        url = workflow.run()
+    except WorkflowError as exc:
+        print(f"workflow stopped: {exc}", file=sys.stderr)
+        return 1
+    print(url)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through main()
+    raise SystemExit(main())

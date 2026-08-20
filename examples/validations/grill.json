@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "questions", "required_changes"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["ready", "revise", "reject"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "questions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "required_changes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}
