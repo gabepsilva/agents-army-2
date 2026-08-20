@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "summary",
+    "current_state",
+    "proposed_changes",
+    "out_of_scope",
+    "risks",
+    "open_questions"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["proceed", "stop"]
+    },
+    "summary": {"type": "string", "minLength": 1},
+    "current_state": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "proposed_changes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "out_of_scope": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "risks": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

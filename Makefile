@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := ci
 
 SEMGREP_IMAGE := semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
-PYTHON_SOURCES := orchestrator backends tools
+PYTHON_SOURCES := orchestrator backends tools examples
 
 # Parallelize independent gate recipes by default. Set `JOBS=N` (`JOBS=1` for
 # serial logs) to override consistently across the older GNU Make shipped by

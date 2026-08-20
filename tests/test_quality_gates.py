@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -610,3 +611,39 @@ class TestSemgrepRules:
         ids = {result["check_id"] for result in payload.get("results", [])}
         assert "no-shell-true-subprocess" in ids
         assert "no-bare-except" in ids
+
+
+class TestBanditScope:
+    def test_planted_violation_under_examples_is_rejected(self, tmp_path: Path) -> None:
+        makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+        match = re.search(r"^PYTHON_SOURCES := (.+)$", makefile, flags=re.MULTILINE)
+        assert match is not None
+        sources = match.group(1).split()
+        assert "examples" in sources
+        for source in sources:
+            (tmp_path / source).mkdir()
+        (tmp_path / "examples" / "planted.py").write_text(
+            "import pickle\ndata = b'x'\npickle.loads(data)\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "bandit",
+                "--recursive",
+                "--configfile",
+                str(REPO / "pyproject.toml"),
+                "--severity-level",
+                "medium",
+                "--confidence-level",
+                "medium",
+                *sources,
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 1
+        assert "B301:blacklist" in proc.stdout
