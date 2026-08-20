@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -21,7 +22,16 @@ from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
+from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
 from backends.registry import UnknownBackendError
+from orchestrator.schema import (
+    ReplyValidationError,
+    SchemaLoadError,
+    compose_schema_prompt,
+    load_schema,
+    repair_prompt,
+    validate_reply,
+)
 from orchestrator.skills import (
     SkillError,
     compose_skill_prompt,
@@ -42,6 +52,11 @@ SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", HOME / "SKILLS"))
 # The backend an agent gets when none is named: by `spawn`, and by the agent a
 # talk creates for a name that does not exist yet.
 DEFAULT_BACKEND = "claude"
+
+# How many extra turns a reply that misses the schema is worth. Two, because
+# the measured conformance rate makes even the first retry nearly dead code:
+# this is the fallback, not the mechanism that gets a conforming reply.
+DEFAULT_VALIDATION_RETRIES = 2
 
 # Named explicitly rather than via __name__: this module runs both as a script
 # (__main__) and as the `orchestrator` console script, and _configure_logging
@@ -90,7 +105,12 @@ class Agent:
         self.backend = backend
         self.session_id: str | None = None
 
-    def talk(self, prompt: str) -> TurnResult:
+    def talk(
+        self,
+        prompt: str,
+        schema: OutputSchema | None = None,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+    ) -> TurnResult:
         log.info(
             "agent '%s' (%s): starting turn, resume=%s",
             self.name,
@@ -101,10 +121,19 @@ class Agent:
         # whichever CLI runs it, so every backend gets this for free.
         log.log(TRACE, "agent '%s' prompt in:\n%s", self.name, prompt)
         started = time.monotonic()
-        result = self.backend.run_turn(prompt, self.session_id, WORKDIR)
+        result = self.backend.run_turn(
+            prompt, self.session_id, WORKDIR, timeout, schema
+        )
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
         log.log(TRACE, "agent '%s' reply out:\n%s", self.name, result.reply)
+        if result.structured is not None:
+            log.log(
+                TRACE,
+                "agent '%s' structured out:\n%s",
+                self.name,
+                json.dumps(result.structured, indent=2, sort_keys=True),
+            )
         # A backend that reports no session id has not ended the conversation,
         # it has failed to name it. Keeping the previous id lets the next turn
         # resume the session instead of silently starting a fresh one.
@@ -163,23 +192,111 @@ class Orchestrator:
         self._persist()
         return agent
 
-    def talk(self, name: str, prompt: str) -> TurnResult:
+    def talk(
+        self,
+        name: str,
+        prompt: str,
+        schema: OutputSchema | None = None,
+        retries: int = DEFAULT_VALIDATION_RETRIES,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+    ) -> TurnResult:
+        """Run one turn against `name`, or, with a schema, as many as it takes.
+
+        The whole thing happens under one agent lock: a retry has to land on
+        the same session as the attempt it is correcting, and another process
+        talking to this agent in between would fork the conversation.
+        """
         with self._agent_lock(name):
             with self._exclusive():
                 self._reload()
                 agent = self.agents.get(name)
                 if agent is None:
                     raise AgentNotFoundError(f"no agent named '{name}'")
-            result = agent.talk(prompt)
-            with self._exclusive():
-                self._reload()
-                if name not in self.agents:
-                    raise AgentNotFoundError(f"no agent named '{name}'")
-                # agent.session_id, not result.session_id: the agent keeps the
-                # id it already had when a backend reports none.
-                self.agents[name].session_id = agent.session_id
-                self._persist()
-            return result
+            if schema is None:
+                return self._turn(agent, prompt, None, timeout)
+            return self._validated_turn(agent, prompt, schema, retries, timeout)
+
+    def _turn(
+        self,
+        agent: Agent,
+        prompt: str,
+        schema: OutputSchema | None,
+        timeout: int,
+    ) -> TurnResult:
+        """One turn, with its session id persisted before anything else runs.
+
+        Persisting per attempt rather than per call is what lets a run that
+        exhausts its retries still leave the session where the agent actually
+        is: it moved the conversation forward whether or not the last reply
+        was usable, and resuming from a stale id would replay it.
+        """
+        result = agent.talk(prompt, schema, timeout)
+        with self._exclusive():
+            self._reload()
+            if agent.name not in self.agents:
+                raise AgentNotFoundError(f"no agent named '{agent.name}'")
+            # agent.session_id, not result.session_id: the agent keeps the
+            # id it already had when a backend reports none.
+            self.agents[agent.name].session_id = agent.session_id
+            self._persist()
+        return result
+
+    def _validated_turn(
+        self,
+        agent: Agent,
+        prompt: str,
+        schema: OutputSchema,
+        retries: int,
+        timeout: int,
+    ) -> TurnResult:
+        """Talk until the reply satisfies `schema`, the retries run out, or the
+        clock does.
+
+        `timeout` is the budget for the whole loop, not for each attempt: a
+        validated call must not be able to cost three times what a plain turn
+        can, holding this agent's lock for an hour and a half to do it. Each
+        attempt gets whatever is left.
+        """
+        deadline = time.monotonic() + timeout
+        attempt_prompt = compose_schema_prompt(prompt)
+        attempt = 0
+        while True:
+            attempt += 1
+            remaining = deadline - time.monotonic()
+            result = self._turn(
+                agent, attempt_prompt, schema, max(1, math.ceil(remaining))
+            )
+            try:
+                result.structured = validate_reply(
+                    result.reply, result.structured, schema
+                )
+            except ReplyValidationError as exc:
+                log.warning(
+                    "agent '%s': attempt %d did not satisfy the schema: %s",
+                    agent.name,
+                    attempt,
+                    exc,
+                )
+                if attempt > retries:
+                    log.warning(
+                        "agent '%s': %d validation retries exhausted",
+                        agent.name,
+                        retries,
+                    )
+                    raise
+                if deadline - time.monotonic() <= 0:
+                    log.warning(
+                        "agent '%s': the %ds budget is spent; not retrying",
+                        agent.name,
+                        timeout,
+                    )
+                    raise
+                attempt_prompt = repair_prompt(exc)
+            else:
+                # `else`, not a fall-through after the except: a `return` at
+                # this indentation would hand back the attempt that just
+                # failed validation.
+                return result
 
     def list_agents(self) -> list[str]:
         return sorted(self.agents)
@@ -337,18 +454,31 @@ def cmd_delete(orchestrator: Orchestrator, args: list[str]) -> None:
     print(f"deleted agent '{agent.name}' backend={agent.backend.name}")
 
 
+def _retry_count(raw: str) -> int:
+    """--validation-retries as a count, rejecting a negative one.
+
+    argparse turns the raised error into its own exit 2. Without this, -1
+    would mean "no attempts at all", which is not a thing this command can do.
+    """
+    count = int(raw)
+    if count < 0:
+        raise argparse.ArgumentTypeError(f"expected 0 or more, got {count}")
+    return count
+
+
 def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--agent", required=True)
     parser.add_argument("--skill")
+    parser.add_argument("--validate-schema")
+    parser.add_argument(
+        "--validation-retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
+    )
     parser.add_argument("--prompt", required=True)
     opts = parser.parse_args(args)
     prompt = opts.prompt.strip()
     if not prompt:
-        print(
-            "usage: orchestrator --agent NAME [--skill NAME[,NAME...]] --prompt TEXT",
-            file=sys.stderr,
-        )
+        print(USAGE_SKILL_INVOCATION, file=sys.stderr)
         raise SystemExit(2)
     composed = prompt
     if opts.skill is not None:
@@ -364,16 +494,34 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
             opts.agent,
             ", ".join(name for name, _path in resolved),
         )
-    # After the skills resolve, so a bad --skill exits without having left a
-    # new agent behind for a turn that never ran.
+    schema = None
+    if opts.validate_schema is not None:
+        try:
+            schema = load_schema(Path(opts.validate_schema))
+        except SchemaLoadError as exc:
+            # Exit 2, not 1: the schema file is a bad argument, the same class
+            # of mistake argparse exits 2 for. A caller can tell "fix your
+            # schema" from "the agent failed" without reading the message.
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from None
+        log.info("agent '%s': validating the reply against %s", opts.agent, schema.path)
+    # After the skills and the schema resolve, so a bad argument exits without
+    # having left a new agent behind for a turn that never ran.
     _ensure_agent(orchestrator, opts.agent)
     try:
-        result = orchestrator.talk(opts.agent, composed)
-    except TurnError as exc:
+        result = orchestrator.talk(
+            opts.agent, composed, schema=schema, retries=opts.validation_retries
+        )
+    except (TurnError, ReplyValidationError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
     print(f"[{opts.agent} session={result.session_id}]")
-    print(result.reply)
+    if schema is None:
+        print(result.reply)
+        return
+    # The validated object rather than the reply text: same content, but
+    # parsed once here so a caller piping this gets one canonical spelling.
+    print(json.dumps(result.structured, indent=2, sort_keys=True))
 
 
 def cmd_flag_list(orchestrator: Orchestrator, args: list[str]) -> None:
@@ -416,9 +564,19 @@ VERBOSITY_LEVELS = (logging.WARNING, logging.DEBUG, TRACE)
 # noise.
 OWN_LOGGERS = ("orchestrator", "backends")
 
+# One spelling of the flag form, so the -h screen and the error a missing
+# prompt prints cannot drift apart. Its second line is indented past both
+# margins — "usage: " and the USAGE block's — so it reads as a continuation
+# of the form above it rather than as a third one.
+SKILL_INVOCATION_FORM = (
+    "orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+    "              [--validate-schema PATH [--validation-retries N]] --prompt TEXT"
+)
+USAGE_SKILL_INVOCATION = f"usage: {SKILL_INVOCATION_FORM}"
+
 USAGE = (
     "usage: orchestrator [-v|-vv] <command> [args...]\n"
-    "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]] --prompt TEXT\n"
+    f"       {SKILL_INVOCATION_FORM}\n"
     "       orchestrator [-v|-vv] --list {agents,skills}\n"
     "  -h, --help      show this message\n"
     "  -v, --verbose   log each step and how long it took\n"

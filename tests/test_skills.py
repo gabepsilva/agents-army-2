@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 import orchestrator
-from backends.base import AgentBackend, TurnResult
+from backends.base import (
+    DEFAULT_TURN_TIMEOUT,
+    AgentBackend,
+    OutputSchema,
+    TurnResult,
+)
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
 from orchestrator import (
@@ -37,7 +42,14 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(self, prompt: str, session_id: str | None, cwd: Path) -> TurnResult:
+    def run_turn(
+        self,
+        prompt: str,
+        session_id: str | None,
+        cwd: Path,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+        schema: OutputSchema | None = None,
+    ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
 
@@ -471,7 +483,9 @@ class TestCmdInvokeSkills:
             )
         captured = capsys.readouterr()
         assert captured.err == (
-            "usage: orchestrator --agent NAME [--skill NAME[,NAME...]] --prompt TEXT\n"
+            "usage: orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+            "              [--validate-schema PATH [--validation-retries N]] "
+            "--prompt TEXT\n"
         )
         assert captured.out == ""
 
@@ -521,7 +535,12 @@ class TestCmdInvokeSkills:
                 return "boom"
 
             def run_turn(
-                self, prompt: str, session_id: str | None, cwd: Path
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

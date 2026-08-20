@@ -46,6 +46,9 @@ uv run orchestrator talk reviewer "what did we decide about issue #23?"
 # under SKILLS/ (any subfolder) and that path is prepended to the prompt
 uv run orchestrator --agent reviewer --skill tdd,code-review --prompt "add a test for X"
 
+# Require the reply to be JSON matching a schema, and print the object
+uv run orchestrator --agent reviewer --validate-schema verdict.json --prompt "is it ready?"
+
 # List all agents and their session ids
 uv run orchestrator list
 
@@ -59,6 +62,71 @@ uv run orchestrator delete reviewer
 # Every form above, listed in one place
 uv run orchestrator --help
 ```
+
+### Structured replies: `--validate-schema`
+
+`--validate-schema PATH` constrains a turn's reply to a JSON Schema and prints
+the validated object instead of the raw text. It composes with `--skill`, and
+it works the same way on all three backends:
+
+```sh
+cat > verdict.json <<'JSON'
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["stage", "verdict", "reason"],
+  "properties": {
+    "stage":   { "type": "string" },
+    "verdict": { "type": "string", "enum": ["pass", "fail"] },
+    "reason":  { "type": "string" }
+  }
+}
+JSON
+
+uv run orchestrator --agent reviewer --validate-schema verdict.json \
+  --prompt "did the build pass? stage is 'build'"
+# [reviewer session=22f8bfee-...]
+# {
+#   "reason": "all gates green",
+#   "stage": "build",
+#   "verdict": "pass"
+# }
+```
+
+Underneath, each CLI gets the flag it understands — `--json-schema` inline for
+`claude` and `grok`, `--output-schema <file>` for `codex` — and the same one
+extra prompt line on every backend. The three CLIs constrain the reply
+themselves; the line and the retries below are the fallback, not the mechanism.
+
+**Schemas must be strict.** `codex` rejects a lax schema with an HTTP 400
+before the turn runs, while `claude` and `grok` accept one, so the orchestrator
+enforces the strict subset itself and reports the offending path in the same
+wording whatever the backend. Every object — nested ones, and array `items`
+too — needs `"additionalProperties": false` and a `"required"` listing every
+one of its properties, and `oneOf`, `allOf` and `not` are refused. `anyOf`,
+`$ref` and `$defs` are fine: those were measured working on all three.
+
+```sh
+uv run orchestrator --agent reviewer --validate-schema lax.json --prompt "..."
+# /abs/lax.json: $.properties.detail must set "additionalProperties": false
+# (codex rejects it; one schema has to mean the same thing on every backend)
+# exit 2 — nothing ran, and no agent was created
+```
+
+**A reply that misses the schema is retried**, on the same session, with the
+validation error appended so the agent can correct itself.
+`--validation-retries N` sets how many corrections are allowed (default 2); a
+reply that is not JSON at all counts as a miss and is retried too. The whole
+loop is bounded by one turn's wall-clock budget, so a validated call can never
+cost more time than a plain turn.
+
+The two failures exit differently, so a script can tell them apart without
+parsing the message:
+
+| exit | meaning |
+|---|---|
+| **2** | the schema file is missing, malformed, or not strict — nothing ran |
+| **1** | the agent ran and never produced a conforming reply, or the turn failed |
 
 ### Verbosity
 
@@ -114,11 +182,19 @@ Currently available: `claude`, `codex`, `grok`.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
 the class in the `_BACKENDS` table in `backends/registry.py`. A backend only
-has to implement `name` and `run_turn(prompt, session_id, cwd)`. `run_turn`
-starts a fresh CLI session when `session_id` is `None` and resumes it
-otherwise, returning a `TurnResult` with the reply and the session id for the
-next turn. Failures raise a `TurnError` subclass so `talk` can print the
-message without knowing which CLI ran.
+has to implement `name` and
+`run_turn(prompt, session_id, cwd, timeout, schema)`. `run_turn` starts a
+fresh CLI session when `session_id` is `None` and resumes it otherwise,
+returning a `TurnResult` with the reply and the session id for the next turn.
+`schema` is `None` unless `--validate-schema` was used; when it is set the
+backend passes it to its CLI in whichever form that CLI wants and fills
+`TurnResult.structured`. Failures raise a `TurnError` subclass so `talk` can
+print the message without knowing which CLI ran.
+
+Every backend runs its CLI with `stdin=DEVNULL`. A CLI whose stdin is an
+inherited pipe rather than a terminal blocks until it is killed, so without it
+a turn from cron, CI, or any host script burns its whole timeout and returns
+nothing.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
@@ -171,6 +247,7 @@ backends/          # AgentBackend interface + implementations (claude, codex, gr
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (spawn / talk / list / delete)
+  schema.py        # --validate-schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
 tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)

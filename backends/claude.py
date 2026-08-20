@@ -8,13 +8,16 @@ import time
 from pathlib import Path
 
 from backends.base import (
+    DEFAULT_TURN_TIMEOUT,
     AgentBackend,
+    OutputSchema,
     TurnError,
     TurnResult,
     describe_command,
     json_objects,
     reply_text,
     stdout_for_error,
+    structured_reply,
 )
 
 log = logging.getLogger(__name__)
@@ -34,6 +37,16 @@ PERMISSION_MODE = "bypassPermissions"
 # indistinguishable from one that worked: if PERMISSION_MODE ever stops being
 # honoured, only this check turns the degraded reply into a failure.
 OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
+
+# Takes the schema document inline, as one argument. It is passed on its own
+# rather than glued to the flag (grok's --single= lesson does not apply): the
+# value starts with "{", which no argument parser reads as a flag.
+SCHEMA_FLAG = "--json-schema"
+
+# Claude's own parse of a schema-constrained reply. `result` carries the same
+# object as a JSON *string*, so this field only saves a parse — it is not a
+# second source of truth.
+STRUCTURED_FIELD = "structured_output"
 
 
 def _pick_result_object(candidates: list[dict]) -> dict:
@@ -71,7 +84,8 @@ class ClaudeBackend(AgentBackend):
         prompt: str,
         session_id: str | None,
         cwd: Path,
-        timeout: int = 1800,
+        timeout: int = DEFAULT_TURN_TIMEOUT,
+        schema: OutputSchema | None = None,
     ) -> TurnResult:
         args = [
             "claude",
@@ -81,6 +95,8 @@ class ClaudeBackend(AgentBackend):
             "--permission-mode",
             PERMISSION_MODE,
         ]
+        if schema is not None:
+            args += [SCHEMA_FLAG, schema.text]
         if session_id:
             args += ["--resume", session_id]
         args += ["-p", prompt]
@@ -101,6 +117,10 @@ class ClaudeBackend(AgentBackend):
             text=True,
             check=False,
             timeout=timeout,
+            # A CLI reading a non-tty stdin blocks until it is killed, so a run
+            # from cron, CI or any host script that is not a terminal would
+            # spend the whole timeout and return nothing.
+            stdin=subprocess.DEVNULL,
         )
         log.debug(
             "claude turn: exited %d after %.1fs with %d chars of stdout",
@@ -130,10 +150,12 @@ class ClaudeBackend(AgentBackend):
                 f"claude did not report a session_id\n"
                 f"stdout: {stdout_for_error(proc.stdout)}"
             )
+        reply = reply_text(payload, "result")
         result = TurnResult(
             session_id=session_id,
-            reply=reply_text(payload, "result"),
+            reply=reply,
             raw=proc.stdout,
+            structured=structured_reply(schema, reply, payload.get(STRUCTURED_FIELD)),
         )
         log.debug(
             "claude turn: parsed session=%s reply_chars=%d",
