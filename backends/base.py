@@ -10,7 +10,16 @@ from pathlib import Path
 # One turn's wall-clock ceiling, shared by every backend and by the
 # orchestrator that budgets a retry loop against it. A per-backend literal
 # would let one CLI drift away from the number the orchestrator plans with.
-DEFAULT_TURN_TIMEOUT = 1800
+#
+# TODO(pipeline): one number for every stage is the wrong shape. A grill round
+# answers in a minute; an `implement` turn against a real spec can run for
+# most of an hour, and when it overruns the reply is lost even though the
+# session survives. 3600 is the interim ceiling picked for the longest stage,
+# which means every short stage now waits an hour before it gives up. Replace
+# it with a per-turn budget the caller sets -- a `--timeout` flag on the CLI,
+# and a per-stage value in the workflow driver -- rather than raising this
+# again.
+DEFAULT_TURN_TIMEOUT = 3600
 
 
 class TurnError(RuntimeError):
