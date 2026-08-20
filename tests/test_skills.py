@@ -471,7 +471,7 @@ class TestCmdInvokeSkills:
             )
         captured = capsys.readouterr()
         assert captured.err == (
-            "usage: orchestrator --agent NAME --skill NAME[,NAME...] --prompt TEXT\n"
+            "usage: orchestrator --agent NAME [--skill NAME[,NAME...]] --prompt TEXT\n"
         )
         assert captured.out == ""
 
@@ -493,14 +493,14 @@ class TestCmdInvokeSkills:
         assert "usage: orchestrator" in err
         assert "--agent" in err
 
-    def test_missing_skill_flag_is_argparse_exit_2(
+    def test_missing_skill_flag_talks_without_attaching_any_skill(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(orch, ["--agent", "a", "--prompt", "x"])
-        err = capsys.readouterr().err
-        assert "usage: orchestrator" in err
-        assert "--skill" in err
+        cmd_invoke_skills(orch, ["--agent", "a", "--prompt", "x"])
+        out = capsys.readouterr().out
+        assert "session=echo-sid" in out
+        assert out.strip().endswith("x")
+        assert "- foo:" not in out
 
     def test_duplicate_skill_flag_value_exits(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
