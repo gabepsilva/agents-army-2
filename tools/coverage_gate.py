@@ -27,6 +27,7 @@ FLOORS: dict[str, float] = {
     "backends/base.py": 100.0,
     "backends/claude.py": 100.0,
     "backends/codex.py": 100.0,
+    "backends/grok.py": 100.0,
     "backends/registry.py": 100.0,
     "tools/coverage_gate.py": 100.0,
     "tools/mutation_gate.py": 100.0,

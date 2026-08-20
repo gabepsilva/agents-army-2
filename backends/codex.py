@@ -8,12 +8,12 @@ import subprocess
 import time
 from pathlib import Path
 
-from backends.base import AgentBackend, TurnResult, describe_command
+from backends.base import AgentBackend, TurnError, TurnResult, describe_command
 
 log = logging.getLogger(__name__)
 
 
-class CodexTurnError(RuntimeError):
+class CodexTurnError(TurnError):
     """Raised when the Codex CLI returns something unusable."""
 
 

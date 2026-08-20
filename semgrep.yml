@@ -5,8 +5,8 @@ rules:
     message: >-
       subprocess call uses shell=True. Every backend here builds a CLI
       command from a user-supplied prompt (see backends/claude.py,
-      backends/codex.py); shell=True on that path is command injection.
-      Pass args as a list instead.
+      backends/codex.py, backends/grok.py); shell=True on that path is
+      command injection. Pass args as a list instead.
     patterns:
       - pattern-either:
           - pattern: subprocess.run(..., shell=True, ...)

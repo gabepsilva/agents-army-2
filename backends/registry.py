@@ -5,6 +5,7 @@ from __future__ import annotations
 from backends.base import AgentBackend
 from backends.claude import ClaudeBackend
 from backends.codex import CodexBackend
+from backends.grok import GrokBackend
 
 
 class UnknownBackendError(ValueError):
@@ -14,6 +15,7 @@ class UnknownBackendError(ValueError):
 _BACKENDS: dict[str, type[AgentBackend]] = {
     "claude": ClaudeBackend,
     "codex": CodexBackend,
+    "grok": GrokBackend,
 }
 
 
