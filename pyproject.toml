@@ -9,6 +9,7 @@ dependencies = [
     "PyJWT>=2",
     "cryptography>=42",
     "jsonschema>=4",
+    "pygithub>=2.9,<3",
 ]
 
 [project.scripts]

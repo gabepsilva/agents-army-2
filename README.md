@@ -39,6 +39,10 @@ uv run orchestrator spawn dev -b codex
 # Create an agent backed by a Grok session
 uv run orchestrator spawn builder -b grok
 
+# Idempotently create or verify an agent with an exact configuration
+uv run orchestrator ensure reviewer -b codex --model gpt-5 \
+  --reasoning-effort high
+
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer "what did we decide about issue #23?"
 
@@ -48,6 +52,9 @@ uv run orchestrator --agent reviewer --skill tdd,code-review --prompt "add a tes
 
 # Require the reply to be JSON matching a schema, and print the object
 uv run orchestrator --agent reviewer --validate-schema verdict.json --prompt "is it ready?"
+
+# Set the wall-clock turn limit for a flag-style invocation
+uv run orchestrator --agent reviewer --timeout 900 --prompt "review the change"
 
 # List all agents and their session ids
 uv run orchestrator list
@@ -180,7 +187,10 @@ uv run orchestrator talk reviewer "what did you just reply?"
 
 ### Backends
 
-Each agent is bound to one backend, chosen at `spawn` time with `-b`/`--backend`.
+Each agent is bound to one backend, chosen at `spawn` or `ensure` time with
+`-b`/`--backend`. Both commands also accept `--model` and
+`--reasoning-effort`. `ensure` creates a missing agent and otherwise verifies
+that the existing agent has exactly the requested backend/model/effort.
 Currently available: `claude`, `codex`, `grok`.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
@@ -234,6 +244,9 @@ state never leaks into the venv. To relocate it, set `AGENTS_ARMY_HOME`:
 ```sh
 AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator spawn dev -b claude
 ```
+
+To relocate only the registry file while leaving the backend working directory
+and skill catalog unchanged, set `AGENTS_ARMY_STATE_FILE` to an explicit path.
 
 Skill files are read from `SKILLS/` next to that same home. `--skill tdd`
 walks the whole tree and attaches the matching markdown path to the prompt.

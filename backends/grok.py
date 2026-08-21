@@ -118,6 +118,10 @@ class GrokBackend(AgentBackend):
         # --session-id names a *new* session only and errors if that id
         # already exists. Resume is --resume.
         args = ["grok", "--output-format", "json", ALWAYS_APPROVE_FLAG]
+        if self.model is not None:
+            args += ["--model", self.model]
+        if self.reasoning_effort is not None:
+            args += ["--reasoning-effort", self.reasoning_effort]
         if schema is not None:
             args += [SCHEMA_FLAG, schema.text]
         if session_id:

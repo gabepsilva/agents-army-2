@@ -53,6 +53,7 @@ from backends.registry import (
 from orchestrator import (
     Orchestrator,
     cmd_delete,
+    cmd_ensure,
     cmd_list,
     cmd_spawn,
     cmd_talk,
@@ -173,9 +174,11 @@ class TestAgentBackendInterface:
         assert issubclass(GrokTurnError, TurnError)
 
     def test_get_backend_resolves_grok(self) -> None:
-        backend = get_backend("grok")
+        backend = get_backend("grok", model="grok-test", reasoning_effort="high")
         assert isinstance(backend, GrokBackend)
         assert backend.name == "grok"
+        assert backend.model == "grok-test"
+        assert backend.reasoning_effort == "high"
 
     def test_custom_backend_registration(self, tmp_path: Path) -> None:
         class CustomBackend(AgentBackend):
@@ -227,6 +230,32 @@ class TestClaudeRunTurn:
         result = backend.run_turn("x", None, tmp_path)
         assert result.reply == ""
         assert result.session_id == "s1"
+
+    def test_model_and_effort_are_forwarded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ClaudeBackend(model="sonnet", reasoning_effort="high")
+        payload = json.dumps({"session_id": "s1", "result": "done"})
+
+        def fake_run(args, **_kwargs):
+            assert args == [
+                "claude",
+                "--print",
+                "--output-format",
+                "json",
+                "--permission-mode",
+                PERMISSION_MODE,
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "-p",
+                "work",
+            ]
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("work", None, tmp_path).reply == "done"
 
     def test_new_turn_parses_session_and_result(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -594,6 +623,33 @@ class TestStdoutForError:
 
 
 class TestCodexRunTurn:
+    def test_model_and_effort_are_forwarded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend(model="gpt-test", reasoning_effort="xhigh")
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"item.completed","item":'
+            '{"type":"agent_message","text":"done"}}\n'
+        )
+
+        def fake_run(args, **_kwargs):
+            assert args == [
+                "codex",
+                "exec",
+                "--model",
+                "gpt-test",
+                "--config",
+                'model_reasoning_effort="xhigh"',
+                "work",
+                "--json",
+                "--skip-git-repo-check",
+            ]
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("work", None, tmp_path).reply == "done"
+
     def test_new_turn_parses_thread_and_reply(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -876,6 +932,29 @@ class TestCodexRunTurn:
 
 
 class TestGrokRunTurn:
+    def test_model_and_effort_are_forwarded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = GrokBackend(model="grok-test", reasoning_effort="high")
+        payload = json.dumps({"sessionId": "s1", "text": "done"})
+
+        def fake_run(args, **_kwargs):
+            assert args == [
+                "grok",
+                "--output-format",
+                "json",
+                "--always-approve",
+                "--model",
+                "grok-test",
+                "--reasoning-effort",
+                "high",
+                "--single=work",
+            ]
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert backend.run_turn("work", None, tmp_path).reply == "done"
+
     def test_new_turn_parses_session_and_text(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1487,6 +1566,23 @@ class TestOrchestrator:
         assert loaded.agents["g"].backend.name == "grok"
         assert loaded.agents["g"].session_id is None
 
+    def test_spawn_persists_model_and_reasoning_effort(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
+        agent = orch.spawn(
+            "configured",
+            "codex",
+            model="gpt-test",
+            reasoning_effort="high",
+        )
+        assert agent.backend.model == "gpt-test"
+        assert agent.backend.reasoning_effort == "high"
+
+        loaded = Orchestrator(state_file=state_file).agents["configured"].backend
+        assert loaded.name == "codex"
+        assert loaded.model == "gpt-test"
+        assert loaded.reasoning_effort == "high"
+
     def test_spawn_duplicate_raises(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a1", "claude")
@@ -1780,8 +1876,64 @@ class TestCLI:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_spawn(orch, ["a", "-b", "echo"])
+        cmd_spawn(
+            orch,
+            [
+                "a",
+                "-b",
+                "echo",
+                "--model",
+                "test-model",
+                "--reasoning-effort",
+                "high",
+            ],
+        )
         assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+        assert orch.agents["a"].backend.model == "test-model"
+        assert orch.agents["a"].backend.reasoning_effort == "high"
+
+    def test_cmd_ensure_creates_and_reuses_the_same_configuration(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        args = ["a", "-b", "echo", "--model", "m", "--reasoning-effort", "high"]
+        cmd_ensure(orch, args)
+        cmd_ensure(orch, args)
+        assert capsys.readouterr().out.splitlines() == [
+            "created agent 'a' backend=echo",
+            "reused agent 'a' backend=echo",
+        ]
+        assert orch.agents["a"].backend.model == "m"
+        assert orch.agents["a"].backend.reasoning_effort == "high"
+
+    def test_cmd_ensure_rejects_an_existing_configuration_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_ensure(orch, ["a", "-b", "echo", "--model", "first"])
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match="already uses backend/model/effort",
+        ):
+            cmd_ensure(orch, ["a", "-b", "echo", "--model", "second"])
+
+    def test_cmd_ensure_uses_the_default_backend(self, tmp_path: Path) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_ensure(orch, ["a"])
+        assert orch.agents["a"].backend.name == "claude"
+
+    def test_cmd_ensure_rejects_unknown_backend(self, tmp_path: Path) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="2"):
+            cmd_ensure(orch, ["a", "-b", "not-a-backend"])
+
+    def test_cmd_ensure_missing_name_reports_its_own_prog(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="2"):
+            cmd_ensure(orch, [])
+        assert capsys.readouterr().err.startswith("usage: ensure ")
 
     def test_cmd_spawn_defaults_to_claude_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
@@ -2043,15 +2195,15 @@ class TestCLI:
         assert captured.err == (
             "usage: orchestrator [-v|-vv] <command> [args...]\n"
             "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
-            "              [--validate-schema PATH [--validation-retries N]] "
-            "--prompt TEXT\n"
+            "              [--validate-schema PATH [--validation-retries N]]\n"
+            "              [--timeout SECONDS] --prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
             "       orchestrator [-v|-vv] --version\n"
             "  -h, --help      show this message\n"
             "  --version       show the installed version\n"
             "  -v, --verbose   log each step and how long it took\n"
             "  -vv, --verbose2  also log full prompts and replies\n"
-            "commands: spawn, talk, list, delete\n"
+            "commands: spawn, ensure, talk, list, delete\n"
         )
         assert captured.out == ""
 
@@ -2252,7 +2404,7 @@ class TestCLI:
         captured = capsys.readouterr()
         assert (
             captured.out
-            == f"{orchestrator.USAGE}\ncommands: spawn, talk, list, delete\n"
+            == f"{orchestrator.USAGE}\ncommands: spawn, ensure, talk, list, delete\n"
         )
         assert "--skill" in captured.out
         assert captured.err == ""

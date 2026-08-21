@@ -95,6 +95,10 @@ class ClaudeBackend(AgentBackend):
             "--permission-mode",
             PERMISSION_MODE,
         ]
+        if self.model is not None:
+            args += ["--model", self.model]
+        if self.reasoning_effort is not None:
+            args += ["--effort", self.reasoning_effort]
         if schema is not None:
             args += [SCHEMA_FLAG, schema.text]
         if session_id:

@@ -484,8 +484,8 @@ class TestCmdInvokeSkills:
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
-            "              [--validate-schema PATH [--validation-retries N]] "
-            "--prompt TEXT\n"
+            "              [--validate-schema PATH [--validation-retries N]]\n"
+            "              [--timeout SECONDS] --prompt TEXT\n"
         )
         assert captured.out == ""
 

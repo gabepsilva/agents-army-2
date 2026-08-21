@@ -4,6 +4,8 @@
   "additionalProperties": false,
   "required": [
     "decision",
+    "needs_another_round",
+    "reason",
     "summary",
     "current_state",
     "proposed_changes",
@@ -16,6 +18,8 @@
       "type": "string",
       "enum": ["proceed", "stop"]
     },
+    "needs_another_round": {"type": "boolean"},
+    "reason": {"type": "string", "minLength": 1},
     "summary": {"type": "string", "minLength": 1},
     "current_state": {
       "type": "array",
