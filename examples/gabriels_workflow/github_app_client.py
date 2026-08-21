@@ -107,6 +107,8 @@ class GitHubAppClient:
         key: str,
         title: str,
         payload: object,
+        *,
+        attribution: str = "",
     ) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
         if marker in self.markers:
@@ -115,7 +117,7 @@ class GitHubAppClient:
         from examples.gabriels_workflow.development_workflow import _render_comment
 
         LOGGER.info("github-app: commenting '%s' on #%s", key, number)
-        self.comment(number, _render_comment(marker, title, payload))
+        self.comment(number, _render_comment(marker, title, payload, attribution))
         self.markers.add(marker)
 
     def create_pr(

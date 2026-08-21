@@ -318,7 +318,23 @@ class TestIntegrityGate:
 
 
 def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    # `git commit -a` builds a temporary index and names it to its hooks in
+    # GIT_INDEX_FILE. Inherited here, every git call below would try to use
+    # this repository's index for the throwaway one under test and die with
+    # "unable to map index file", failing the gate over how the commit was
+    # made rather than over what was committed. No ambient git state belongs
+    # in a repository the test built itself.
+    isolated = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=isolated,
+    )
 
 
 def _commit_gates(root: Path, *, message: str = "init") -> None:
@@ -361,6 +377,27 @@ def _minimal_gate_tree(root: Path) -> None:
 
 
 class TestRatchetGate:
+    def test_an_inherited_git_index_never_reaches_the_repository_under_test(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """`git commit -a` runs this gate with GIT_INDEX_FILE naming its own index.
+
+        Honoring it would stage this test's throwaway repository into the
+        index of whatever repository is being committed, so the gate would
+        fail — or corrupt that index — over how the commit was made.
+        """
+
+        inherited = tmp_path / "outer.index"
+        monkeypatch.setenv("GIT_INDEX_FILE", str(inherited))
+        repository = tmp_path / "repository"
+        _minimal_gate_tree(repository)
+        _commit_gates(repository)
+        monkeypatch.chdir(repository)
+
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+        assert "no threshold weakened" in capsys.readouterr().out
+        assert not inherited.exists()
+
     def test_missing_base_ref_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
