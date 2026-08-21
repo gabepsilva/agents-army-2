@@ -683,34 +683,49 @@ class TestMutationCache:
 
         # No digest recorded: the cache cannot be shown to match these tests,
         # so it is not trusted.
-        assert mutation_cache.main() == 0
+        assert mutation_cache.main([]) == 0
         assert not cache.exists()
         capsys.readouterr()
 
+        # Only a completed mutmut run may claim these tests were measured.
+        assert mutation_cache.main(["--record"]) == 0
+
         # Same tests as the recorded digest: the fast path survives.
         cache.mkdir()
-        assert mutation_cache.main() == 0
+        assert mutation_cache.main([]) == 0
         assert cache.exists()
         assert "reusing cached mutant results" in capsys.readouterr().out
 
         # A planted assertion change must invalidate the cached verdicts.
         (tmp_path / "test_a.py").write_text("assert False\n", encoding="utf-8")
-        assert mutation_cache.main() == 0
+        assert mutation_cache.main([]) == 0
         assert not cache.exists()
         assert "tests changed since the cached run" in capsys.readouterr().out
 
-    def test_a_first_run_with_no_cache_only_records_the_digest(
+    def test_a_check_never_records_that_the_tests_were_measured(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """A fresh checkout has nothing to invalidate: record and stay quiet."""
+        """Recording up front would mark a suite measured before anything
+        measured it, so the next run would trust an unvalidated cache."""
         (tmp_path / "test_a.py").write_text("assert True\n", encoding="utf-8")
         pyproject = self._project(tmp_path, [str(tmp_path / "test_a.py")])
         digest_path = self._wire(monkeypatch, tmp_path, pyproject)
 
-        assert mutation_cache.main() == 0
+        assert mutation_cache.main([]) == 0
         assert capsys.readouterr().out == ""
+        assert not digest_path.exists()
+
+        assert mutation_cache.main(["--record"]) == 0
         assert digest_path.read_text(encoding="utf-8").strip() == mutation_cache.digest(
             [tmp_path / "test_a.py"]
+        )
+
+    def test_the_makefile_records_only_after_mutmut_has_measured(self) -> None:
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert mutation.index("mutmut run") < mutation.index(
+            "mutation_cache.py --record"
         )
 
     def test_digest_covers_the_selection_not_only_its_contents(
@@ -741,7 +756,7 @@ class TestMutationCache:
         pyproject = self._project(tmp_path, [str(tmp_path / "absent.py")])
         self._wire(monkeypatch, tmp_path, pyproject)
 
-        assert mutation_cache.main() == 1
+        assert mutation_cache.main([]) == 1
         assert "cannot hash the mutmut test selection" in capsys.readouterr().out
 
     def test_the_real_makefile_clears_the_cache_before_measuring(self) -> None:

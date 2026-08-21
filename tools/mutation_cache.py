@@ -13,6 +13,12 @@ The selected tests are hashed and the digest kept beside the cache. A digest
 that no longer matches means the cached verdicts were reached by a different
 suite, so the cache is removed and mutmut measures again. An unchanged digest
 keeps the fast path.
+
+The digest is recorded only by `--record`, which the Makefile runs *after*
+mutmut has measured. Writing it up front would mark a suite as measured before
+anything measured it: any other invocation — a developer's, or an agent's
+mid-edit — would stamp the digest, and the next run would reuse a cache no
+mutmut pass had ever validated against those tests.
 """
 
 from __future__ import annotations
@@ -46,25 +52,32 @@ def digest(paths: list[Path]) -> str:
     return running.hexdigest()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    recording = list(sys.argv[1:] if argv is None else argv) == ["--record"]
     try:
         current = digest(selected_tests(PYPROJECT_PATH))
     except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
         print(f"error: cannot hash the mutmut test selection: {exc}")
         return 1
 
+    if recording:
+        DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DIGEST_PATH.write_text(current + "\n", encoding="utf-8")
+        return 0
+
     previous = None
     if DIGEST_PATH.exists():
         previous = DIGEST_PATH.read_text(encoding="utf-8").strip()
 
-    if previous != current and MUTANTS_DIR.exists():
+    if previous == current:
+        print("mutation cache: tests unchanged; reusing cached mutant results.")
+        return 0
+
+    # The digest is not rewritten here: only a completed run may claim these
+    # tests were measured.
+    if MUTANTS_DIR.exists():
         shutil.rmtree(MUTANTS_DIR)
         print("mutation cache: tests changed since the cached run; measuring again.")
-    elif previous == current:
-        print("mutation cache: tests unchanged; reusing cached mutant results.")
-
-    DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DIGEST_PATH.write_text(current + "\n", encoding="utf-8")
     return 0
 
 

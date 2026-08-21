@@ -88,6 +88,7 @@ mutation:
 	uv run mutmut run --max-children $(CI_JOBS)
 	uv run mutmut export-cicd-stats
 	uv run python tools/mutation_gate.py
+	uv run python tools/mutation_cache.py --record
 
 # --network none keeps this hermetic and deterministic: no registry rule
 # packs (p/python, p/security-audit) that could change or go unreachable

@@ -364,12 +364,19 @@ class FakeGitHub:
         self.comments: list[tuple] = []
         self.pr_calls: list[dict] = []
         self.pr_url = pr_url
+        self.markers: set[str] = set()
 
     def issue(self, number: int) -> dict:
         return {"number": number, "title": "Raw issue", "body": "Please build it"}
 
+    def adopt_markers(self, markers: set[str]) -> None:
+        self.markers |= markers
+
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
+        if key in self.markers:
+            return
         self.comments.append((number, key, title, payload))
+        self.markers.add(key)
 
     def create_pr(
         self,
@@ -1825,3 +1832,51 @@ def test_a_ci_failure_that_never_moves_is_reported_as_stalled(
         workflow.stabilize(_specification())
 
     assert len(agents.calls) == 2
+
+
+def test_every_role_learns_which_stages_were_already_commented(
+    tmp_path: Path,
+) -> None:
+    """Only the client that reads the issue sees its comments. Without sharing
+    them, each other role repeats every stage it owns on a resumed run —
+    issue #22 carried two 'specification' comments because of exactly this."""
+    reader = FakeGitHub()
+    specifier_app = FakeGitHub()
+    reader.markers = {"specification", "expansion-1"}
+    workflow, _github, _repository, _agents = _workflow(
+        tmp_path,
+        [_specification()],
+        {"github": reader},
+    )
+    # The reader is itself a role client: it must not be handed its own set.
+    workflow.role_github = {"specifier": specifier_app, "implementer": reader}
+
+    workflow.load_issue()
+    workflow._stage(
+        gdw.Stage("specification", "Specification", "specifier", "specify", "s", {})
+    )
+
+    assert specifier_app.markers == {"specification", "expansion-1"}
+    assert reader.markers == {"specification", "expansion-1"}
+    assert specifier_app.comments == [], (
+        "the specifier reposted a stage already on the issue"
+    )
+
+
+def test_both_github_clients_adopt_markers(tmp_path: Path) -> None:
+    """Each client keeps its own set, so a resumed run needs both to learn."""
+    gh_cli = gdw.GitHub(
+        tmp_path,
+        "owner/repo",
+        executable=tmp_path / "gh",
+        run=ScriptedRun([]),
+    )
+    gh_cli.markers = {"already"}
+    gh_cli.adopt_markers({"expansion-1"})
+
+    app = app_github.GitHubAppClient(cast(app_github.Repository, SimpleNamespace()))
+    app.adopt_markers({"grill-1"})
+    app.adopt_markers({"grill-2"})
+
+    assert gh_cli.markers == {"already", "expansion-1"}
+    assert app.markers == {"grill-1", "grill-2"}
