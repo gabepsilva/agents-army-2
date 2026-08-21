@@ -32,6 +32,10 @@ GITHUB_TOKEN_NAMES = (
     "GITHUB_APP_PRIVATE_KEY",
 )
 CI_EVIDENCE_CHARS = 20_000
+# `{{EXPANSION_JSON}}` in a prompt template. Deliberately narrow: a prompt
+# names its placeholders in upper case, so braces around anything else are
+# text — the kind of text an agent writes when it quotes code back.
+PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 # The braille block, which every spinner this project's gates print draws from.
 SPINNER_FRAME = re.compile(r"^[\u2800-\u28ff]+\s*")
 # `make: *** [Makefile:85: mutation] Error 1` — which gate failed, not where.
@@ -942,16 +946,32 @@ class AgentGateway:
         return result
 
     def _prompt(self, name: str, values: Mapping[str, str]) -> str:
+        """Fill one prompt template, judging completeness by the template alone.
+
+        Agent replies quote code, and code contains braces — a dict
+        comprehension closing with `}}` is not an unfilled placeholder. So the
+        placeholders are found in the template before anything is substituted,
+        and each one is replaced in a single pass, which also stops a value
+        that happens to spell `{{OTHER}}` from being expanded in turn.
+        """
+
         path = self.prompts / f"{name}.md"
         try:
-            prompt = path.read_text(encoding="utf-8")
+            template = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise WorkflowError(f"cannot read prompt {path}: {exc}") from exc
-        for key, value in values.items():
-            prompt = prompt.replace(f"{{{{{key}}}}}", value)
-        if "{{" in prompt or "}}" in prompt:
-            raise WorkflowError(f"prompt {path} has unresolved placeholders")
-        return prompt
+        unresolved = sorted(
+            {
+                match.group(1)
+                for match in PLACEHOLDER_PATTERN.finditer(template)
+                if match.group(1) not in values
+            }
+        )
+        if unresolved:
+            raise WorkflowError(
+                f"prompt {path} has unresolved placeholders: {', '.join(unresolved)}"
+            )
+        return PLACEHOLDER_PATTERN.sub(lambda match: values[match.group(1)], template)
 
     @contextmanager
     def _without_github_access(self) -> Iterator[dict[str, str]]:
