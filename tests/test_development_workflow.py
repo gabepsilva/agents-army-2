@@ -1069,6 +1069,84 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
         gateway.ask(role="role", prompt_name="ok", schema_name="expansion", values={})
 
 
+def test_agent_gateway_fills_prompts_with_brace_bearing_values(tmp_path: Path) -> None:
+    """Braces in a substituted value are text, not an unfilled placeholder."""
+
+    example_root = tmp_path / "example"
+    (example_root / "prompts").mkdir(parents=True)
+    (example_root / "validations").mkdir()
+    schema = Path(gdw.__file__).parent / "validations" / "expansion.json"
+    (example_root / "validations" / "expansion.json").write_text(
+        schema.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (example_root / "prompts" / "grill.md").write_text(
+        "review:\n{{EXPANSION_JSON}}\ncomments:\n{{LATEST_COMMENTS_JSON}}\n",
+        encoding="utf-8",
+    )
+    # What an agent actually wrote back on issue #28: a dict comprehension
+    # closing on `}}`, and prose naming another placeholder.
+    expansion = "{role: f'{role}-x' for role in ROLES}} and {{LATEST_COMMENTS_JSON}}"
+
+    sent: list[str] = []
+
+    def fake_run(args: list[str], **_kwargs):
+        if args[1] == "ensure":
+            return _completed(args, stdout="reused agent\n")
+        sent.append(args[-1])
+        return _completed(args, stdout='[gdw-28-role session=s1]\n{"ok": true}\n')
+
+    gateway = gdw.AgentGateway(
+        roles={
+            "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
+        },
+        issue=28,
+        state_file=tmp_path / "state.json",
+        example_root=example_root,
+        run=fake_run,
+    )
+
+    reply = gateway.ask(
+        role="role",
+        prompt_name="grill",
+        schema_name="expansion",
+        values={"EXPANSION_JSON": expansion, "LATEST_COMMENTS_JSON": "[]"},
+    )
+
+    assert reply == {"ok": True}
+    assert sent == [f"review:\n{expansion}\ncomments:\n[]\n"]
+
+
+def test_agent_gateway_names_the_placeholder_no_value_was_given_for(
+    tmp_path: Path,
+) -> None:
+    example_root = tmp_path / "example"
+    (example_root / "prompts").mkdir(parents=True)
+    (example_root / "validations").mkdir()
+    (example_root / "prompts" / "grill.md").write_text(
+        "{{EXPANSION_JSON}} {{GRILL_JSON}} {{EXPANSION_JSON}}", encoding="utf-8"
+    )
+
+    gateway = gdw.AgentGateway(
+        roles={
+            "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
+        },
+        issue=28,
+        state_file=tmp_path / "state.json",
+        example_root=example_root,
+        run=lambda args, **_kwargs: _completed(args),
+    )
+
+    with pytest.raises(
+        gdw.WorkflowError, match=r"unresolved placeholders: EXPANSION_JSON, GRILL_JSON$"
+    ):
+        gateway.ask(
+            role="role",
+            prompt_name="grill",
+            schema_name="expansion",
+            values={},
+        )
+
+
 @pytest.mark.parametrize(
     ("turn_stdout", "message"),
     [
