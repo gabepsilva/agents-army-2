@@ -29,7 +29,12 @@ def list_backends() -> list[str]:
     return sorted(_BACKENDS.keys())
 
 
-def get_backend(name: str) -> AgentBackend:
+def get_backend(
+    name: str,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> AgentBackend:
     """Instantiate and return the backend registered under `name`."""
     normalized = name.lower().strip()
     backend_cls = _BACKENDS.get(normalized)
@@ -38,4 +43,4 @@ def get_backend(name: str) -> AgentBackend:
         raise UnknownBackendError(
             f"Unknown backend '{name}'. Available backends: {valid}"
         )
-    return backend_cls()
+    return backend_cls(model=model, reasoning_effort=reasoning_effort)

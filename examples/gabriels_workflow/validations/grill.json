@@ -2,12 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "summary", "questions", "required_changes"],
+  "required": [
+    "verdict",
+    "needs_another_round",
+    "reason",
+    "summary",
+    "questions",
+    "required_changes"
+  ],
   "properties": {
     "verdict": {
       "type": "string",
       "enum": ["ready", "revise", "reject"]
     },
+    "needs_another_round": {"type": "boolean"},
+    "reason": {"type": "string", "minLength": 1},
     "summary": {"type": "string", "minLength": 1},
     "questions": {
       "type": "array",

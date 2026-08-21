@@ -46,7 +46,9 @@ from orchestrator.skills import (
 # State lives in the caller's working directory (override with AGENTS_ARMY_HOME)
 # rather than next to the installed package, so it doesn't leak into the venv.
 HOME = Path(os.environ.get("AGENTS_ARMY_HOME", Path.cwd()))
-STATE_FILE = HOME / "orchestrator_state.json"
+STATE_FILE = Path(
+    os.environ.get("AGENTS_ARMY_STATE_FILE", HOME / "orchestrator_state.json")
+)
 # Agents run their CLI sessions from a single shared working directory.
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
@@ -159,14 +161,28 @@ class Orchestrator:
             "state: loaded %d agent(s) from %s", len(self.agents), self.state_file
         )
 
-    def spawn(self, name: str, backend: str | None = None) -> Agent:
+    def spawn(
+        self,
+        name: str,
+        backend: str | None = None,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> Agent:
         with self._exclusive():
             self._reload()
             if name in self.agents:
                 raise AgentExistsError(f"agent '{name}' already exists")
-            return self._create(name, backend)
+            return self._create(name, backend, model, reasoning_effort)
 
-    def ensure(self, name: str, backend: str | None = None) -> tuple[Agent, bool]:
+    def ensure(
+        self,
+        name: str,
+        backend: str | None = None,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[Agent, bool]:
         """Return the named agent, creating it first if it does not exist.
 
         Reports whether it had to create one, so a caller can say so. The
@@ -179,16 +195,27 @@ class Orchestrator:
             existing = self.agents.get(name)
             if existing is not None:
                 return existing, False
-            return self._create(name, backend), True
+            return self._create(name, backend, model, reasoning_effort), True
 
-    def _create(self, name: str, backend: str | None) -> Agent:
+    def _create(
+        self,
+        name: str,
+        backend: str | None,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> Agent:
         """Register and persist a new agent. The caller holds `_exclusive()`.
 
         `None` means "whatever the default backend is now": resolving it here
         rather than in a default argument keeps DEFAULT_BACKEND a live lookup.
         """
         agent = Agent(
-            name, get_backend(DEFAULT_BACKEND if backend is None else backend)
+            name,
+            get_backend(
+                DEFAULT_BACKEND if backend is None else backend,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            ),
         )
         self.agents[name] = agent
         self._persist()
@@ -351,7 +378,14 @@ class Orchestrator:
             backend = entry.get("backend")
             if backend is None:
                 raise StateError(f"{self.state_file}: agent '{name}' has no backend")
-            agent = Agent(name, get_backend(backend))
+            agent = Agent(
+                name,
+                get_backend(
+                    backend,
+                    model=entry.get("model"),
+                    reasoning_effort=entry.get("reasoning_effort"),
+                ),
+            )
             agent.session_id = entry.get("session_id")
             self.agents[name] = agent
 
@@ -368,6 +402,12 @@ class Orchestrator:
             name: {
                 "backend": a.backend.name,
                 "session_id": a.session_id,
+                **({"model": a.backend.model} if a.backend.model is not None else {}),
+                **(
+                    {"reasoning_effort": a.backend.reasoning_effort}
+                    if a.backend.reasoning_effort is not None
+                    else {}
+                ),
             }
             for name, a in self.agents.items()
         }
@@ -383,16 +423,53 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 
 
-def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="spawn")
+def _agent_config_parser(prog: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name")
     # No argparse default: leaving this None lets spawn() resolve
     # DEFAULT_BACKEND, which is what that constant documents itself as. A
     # literal here would pin spawn to claude however DEFAULT_BACKEND changed.
     parser.add_argument("--backend", "-b", choices=list_backends())
+    parser.add_argument("--model")
+    parser.add_argument("--reasoning-effort")
+    return parser
+
+
+def _agent_config(agent: Agent) -> tuple[str, str | None, str | None]:
+    return agent.backend.name, agent.backend.model, agent.backend.reasoning_effort
+
+
+def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = _agent_config_parser("spawn")
     opts = parser.parse_args(args)
-    agent = orchestrator.spawn(opts.name, opts.backend)
+    agent = orchestrator.spawn(
+        opts.name,
+        opts.backend,
+        model=opts.model,
+        reasoning_effort=opts.reasoning_effort,
+    )
     print(f"spawned agent '{agent.name}' backend={agent.backend.name}")
+
+
+def cmd_ensure(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = _agent_config_parser("ensure")
+    opts = parser.parse_args(args)
+    backend = DEFAULT_BACKEND if opts.backend is None else opts.backend
+    expected = (backend, opts.model, opts.reasoning_effort)
+    agent, created = orchestrator.ensure(
+        opts.name,
+        opts.backend,
+        model=opts.model,
+        reasoning_effort=opts.reasoning_effort,
+    )
+    actual = _agent_config(agent)
+    if actual != expected:
+        raise OrchestratorError(
+            f"agent '{agent.name}' already uses backend/model/effort {actual!r}; "
+            f"configured {expected!r}"
+        )
+    action = "created" if created else "reused"
+    print(f"{action} agent '{agent.name}' backend={agent.backend.name}")
 
 
 def _ensure_agent(orchestrator: Orchestrator, name: str) -> None:
@@ -468,6 +545,13 @@ def _retry_count(raw: str) -> int:
     return count
 
 
+def _positive_seconds(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected 1 or more, got {value}")
+    return value
+
+
 def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--agent", required=True)
@@ -475,6 +559,9 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     parser.add_argument("--validate-schema")
     parser.add_argument(
         "--validation-retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
+    )
+    parser.add_argument(
+        "--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT
     )
     parser.add_argument("--prompt", required=True)
     opts = parser.parse_args(args)
@@ -512,7 +599,11 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     _ensure_agent(orchestrator, opts.agent)
     try:
         result = orchestrator.talk(
-            opts.agent, composed, schema=schema, retries=opts.validation_retries
+            opts.agent,
+            composed,
+            schema=schema,
+            retries=opts.validation_retries,
+            timeout=opts.timeout,
         )
     except (TurnError, ReplyValidationError) as exc:
         print(str(exc), file=sys.stderr)
@@ -548,6 +639,7 @@ def _is_list_invocation(argv: list[str]) -> bool:
 
 COMMANDS: dict[str, Callable[[Orchestrator, list[str]], None]] = {
     "spawn": cmd_spawn,
+    "ensure": cmd_ensure,
     "talk": cmd_talk,
     "list": cmd_list,
     "delete": cmd_delete,
@@ -572,7 +664,8 @@ OWN_LOGGERS = ("orchestrator", "backends")
 # of the form above it rather than as a third one.
 SKILL_INVOCATION_FORM = (
     "orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
-    "              [--validate-schema PATH [--validation-retries N]] --prompt TEXT"
+    "              [--validate-schema PATH [--validation-retries N]]\n"
+    "              [--timeout SECONDS] --prompt TEXT"
 )
 USAGE_SKILL_INVOCATION = f"usage: {SKILL_INVOCATION_FORM}"
 

@@ -901,6 +901,47 @@ class TestCmdInvokeSkillsSchema:
         assert json.loads(capsys.readouterr().out.split("\n", 1)[1]) == CONFORMING
         assert len(calls) == 1
 
+    def test_timeout_is_forwarded_to_the_backend(
+        self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = _scripted([json.dumps(CONFORMING)])
+        cmd_invoke_skills(
+            orch,
+            [
+                "--agent",
+                "a",
+                "--validate-schema",
+                str(_write(tmp_path, STRICT)),
+                "--timeout",
+                "17",
+                "--prompt",
+                "go",
+            ],
+        )
+        capsys.readouterr()
+        assert calls[0]["timeout"] == 17
+
+    def test_timeout_must_be_positive(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "a", "--timeout", "0", "--prompt", "go"],
+            )
+        assert "expected 1 or more, got 0" in capsys.readouterr().err
+
+    def test_one_second_is_a_valid_timeout(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = _scripted(["plain reply"])
+        cmd_invoke_skills(
+            orch,
+            ["--agent", "a", "--timeout", "1", "--prompt", "go"],
+        )
+        capsys.readouterr()
+        assert calls[0]["timeout"] == 1
+
     def test_a_negative_retry_count_is_argparse_exit_2(
         self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

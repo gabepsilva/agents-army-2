@@ -161,6 +161,15 @@ class AgentBackend(ABC):
     subclasses encapsulate these differences.
     """
 
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+
     @property
     @abstractmethod
     def name(self) -> str:

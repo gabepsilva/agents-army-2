@@ -18,20 +18,29 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
-
-from orchestrator import Orchestrator
-from orchestrator.schema import load_schema
+from typing import Protocol
 
 GITHUB_TOKEN_NAMES = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
 )
 CI_EVIDENCE_CHARS = 20_000
 DEFAULT_AGENT_TIMEOUT = 3_600
 DEFAULT_CI_TIMEOUT = 7_200
+AGENT_ROLES = frozenset(
+    {
+        "expander",
+        "griller",
+        "specifier",
+        "implementer",
+        "reviewer-specification",
+        "reviewer-quality",
+    }
+)
 
 
 class WorkflowError(RuntimeError):
@@ -55,25 +64,6 @@ class CommandResult:
 
     def as_json(self) -> dict:
         return {"returncode": self.returncode, "output": self.output}
-
-
-class BackendHandle(Protocol):
-    name: str
-
-
-class AgentHandle(Protocol):
-    name: str
-    backend: BackendHandle
-
-
-class TurnHandle(Protocol):
-    structured: dict | None
-
-
-class OrchestratorHandle(Protocol):
-    def ensure(self, name: str, backend: str) -> tuple[AgentHandle, bool]: ...
-
-    def talk(self, name: str, prompt: str, **kwargs: object) -> TurnHandle: ...
 
 
 class GitHubService(Protocol):
@@ -114,14 +104,29 @@ class AgentService(Protocol):
     ) -> dict: ...
 
 
+class RoleOptions(Protocol):
+    @property
+    def backend(self) -> str: ...
+
+    @property
+    def model(self) -> str | None: ...
+
+    @property
+    def reasoning_effort(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class _StaticRoleOptions:
+    backend: str
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
 @dataclass(frozen=True)
 class WorkflowOptions:
     issue_number: int
     base_branch: str
     branch: str
-    clarification_rounds: int
-    repair_rounds: int
-    review_rounds: int
     draft: bool
 
 
@@ -131,6 +136,7 @@ class WorkflowServices:
     github: GitHubService
     repository: RepositoryService
     agents: AgentService
+    role_github: Mapping[str, GitHubService] | None = None
 
 
 @dataclass(frozen=True)
@@ -443,23 +449,23 @@ class GitHub:
 
 
 class AgentGateway:
-    """Structured agent turns with GitHub credentials removed from the process."""
+    """Structured turns through the public orchestrator CLI."""
 
     def __init__(
         self,
         *,
-        backend: str,
+        roles: Mapping[str, RoleOptions],
         issue: int,
         state_file: Path,
         example_root: Path,
-        orchestrator_factory: Callable[[Path], object] = Orchestrator,
+        run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
-        self.backend = backend
+        self.roles = dict(roles)
         self.issue = issue
         self.state_file = state_file
         self.prompts = example_root / "prompts"
         self.validations = example_root / "validations"
-        self._orchestrator_factory = orchestrator_factory
+        self._run_process = run
 
     def ask(
         self,
@@ -471,24 +477,72 @@ class AgentGateway:
         timeout: int = DEFAULT_AGENT_TIMEOUT,
     ) -> dict:
         prompt = self._prompt(prompt_name, values)
-        schema = load_schema(self.validations / f"{schema_name}.json")
-        with self._without_github_access():
-            orchestrator = cast(
-                OrchestratorHandle, self._orchestrator_factory(self.state_file)
+        schema = self.validations / f"{schema_name}.json"
+        role_options = self.roles.get(role)
+        if role_options is None:
+            raise WorkflowError(f"agent role '{role}' is not configured")
+        backend = role_options.backend
+        model = role_options.model
+        reasoning_effort = role_options.reasoning_effort
+        agent_name = f"gdw-{self.issue}-{role}"
+        ensure_args = ["ensure", agent_name, "--backend", backend]
+        if model is not None:
+            ensure_args += ["--model", model]
+        if reasoning_effort is not None:
+            ensure_args += ["--reasoning-effort", reasoning_effort]
+        with self._without_github_access() as environment:
+            self._run_cli(ensure_args, environment, timeout=30)
+            turn = self._run_cli(
+                [
+                    "--agent",
+                    agent_name,
+                    "--validate-schema",
+                    str(schema),
+                    "--timeout",
+                    str(timeout),
+                    "--prompt",
+                    prompt,
+                ],
+                environment,
+                timeout=timeout + 5,
             )
-            agent, _created = orchestrator.ensure(
-                f"gdw-{self.issue}-{role}", self.backend
-            )
-            if agent.backend.name != self.backend:
-                raise WorkflowError(
-                    f"agent '{agent.name}' already uses backend {agent.backend.name}"
-                )
-            result = orchestrator.talk(
-                agent.name, prompt, schema=schema, timeout=timeout
-            )
-        if result.structured is None:
+        _header, separator, payload = turn.stdout.partition("\n")
+        if not separator:
             raise WorkflowError(f"agent '{role}' returned no structured response")
-        return result.structured
+        try:
+            structured = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise WorkflowError(
+                f"agent '{role}' returned invalid structured JSON: {exc}"
+            ) from exc
+        if not isinstance(structured, dict):
+            raise WorkflowError(f"agent '{role}' returned no structured response")
+        return structured
+
+    def _run_cli(
+        self,
+        args: list[str],
+        environment: Mapping[str, str],
+        *,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            result = self._run_process(
+                ["orchestrator", *args],
+                cwd=str(Path.cwd()),
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise WorkflowError(f"orchestrator CLI failed: {exc}") from exc
+        if result.returncode != 0:
+            message = result.stderr.strip() or f"exited {result.returncode}"
+            raise WorkflowError(f"orchestrator CLI failed: {message}")
+        return result
 
     def _prompt(self, name: str, values: Mapping[str, str]) -> str:
         path = self.prompts / f"{name}.md"
@@ -503,7 +557,7 @@ class AgentGateway:
         return prompt
 
     @contextmanager
-    def _without_github_access(self) -> Iterator[None]:
+    def _without_github_access(self) -> Iterator[dict[str, str]]:
         original = dict(os.environ)
         with tempfile.TemporaryDirectory(prefix="gdw-agent-") as directory:
             isolation = Path(directory)
@@ -516,15 +570,10 @@ class AgentGateway:
             sanitized = dict(original)
             sanitized["PATH"] = f"{isolation}{os.pathsep}{original.get('PATH', '')}"
             sanitized["GH_CONFIG_DIR"] = str(isolation / "empty-gh-config")
+            sanitized["AGENTS_ARMY_STATE_FILE"] = str(self.state_file)
             for name in GITHUB_TOKEN_NAMES:
                 sanitized.pop(name, None)
-            os.environ.clear()
-            os.environ.update(sanitized)
-            try:
-                yield
-            finally:
-                os.environ.clear()
-                os.environ.update(original)
+            yield sanitized
 
 
 class DevelopmentWorkflow:
@@ -542,28 +591,68 @@ class DevelopmentWorkflow:
         self.github = services.github
         self.repository = services.repository
         self.agents = services.agents
-        self.clarification_rounds = options.clarification_rounds
-        self.repair_rounds = options.repair_rounds
-        self.review_rounds = options.review_rounds
+        self.role_github = (
+            {} if services.role_github is None else dict(services.role_github)
+        )
         self.draft = options.draft
 
     def run(self) -> str:
+        existing_url = self.completed_url()
+        if existing_url is not None:
+            return existing_url
+        issue_context = self.load_issue()
+        expansion = self.clarify(issue_context)
+        specification = self.specify(issue_context, expansion)
+        self.implement(specification)
+        ci_summary = self.stabilize(specification)
+        final_reviews = self.review(specification, ci_summary)
+        return self.publish(specification, final_reviews)
+
+    def completed_url(self) -> str | None:
         existing_url = self.store.metadata.get("pr_url")
         if isinstance(existing_url, str) and existing_url:
             return existing_url
+        return None
+
+    def load_issue(self) -> dict:
         issue = self.github.issue(self.issue_number)
-        issue_json = _json(issue)
-        expansion = self._reach_agreement(issue_json)
-        specification = self._stage(
+        comments = issue.get("comments", [])
+        latest_comments = [
+            comment
+            for comment in comments
+            if isinstance(comment, Mapping)
+            and isinstance(comment.get("body"), str)
+            and "<!-- gdw:" not in comment["body"]
+        ][-5:]
+        return {
+            "initial": {
+                "number": issue.get("number"),
+                "title": issue.get("title"),
+                "body": issue.get("body"),
+                "latest_comments": latest_comments,
+            },
+            "latest_comments": latest_comments,
+        }
+
+    def clarify(self, issue_context: dict) -> dict:
+        return self._reach_agreement(issue_context)
+
+    def specify(self, issue_context: dict, expansion: dict) -> dict:
+        return self._stage(
             Stage(
                 "specification",
                 "Specification",
                 "specifier",
                 "specify",
                 "specification",
-                {"ISSUE_JSON": issue_json, "EXPANSION_JSON": _json(expansion)},
+                {
+                    "LATEST_COMMENTS_JSON": _json(issue_context["latest_comments"]),
+                    "EXPANSION_JSON": _json(expansion),
+                },
             )
         )
+
+    def implement(self, specification: dict) -> dict:
         implementation = self._stage(
             Stage(
                 "implementation",
@@ -575,8 +664,15 @@ class DevelopmentWorkflow:
             )
         )
         self._require_complete(implementation, "implementation")
-        ci_summary = self._ci_until_green("implementation", specification)
-        final_reviews = self._review_until_approved(specification, ci_summary)
+        return implementation
+
+    def stabilize(self, specification: dict) -> dict:
+        return self._ci_until_green("implementation", specification)
+
+    def review(self, specification: dict, ci_summary: dict) -> dict[str, dict]:
+        return self._review_until_approved(specification, ci_summary)
+
+    def publish(self, specification: dict, final_reviews: dict[str, dict]) -> str:
         base_sha = str(self.store.metadata["base_sha"])
         commit_title = str(specification["title"]).replace("\n", " ")[:72]
         self.repository.commit(
@@ -592,7 +688,7 @@ class DevelopmentWorkflow:
             draft=self.draft,
         )
         if not url:
-            raise WorkflowError("gh pr create returned an empty URL")
+            raise WorkflowError("GitHub returned an empty pull-request URL")
         self.store.record_pr(url)
         self.github.comment_once(
             self.issue_number,
@@ -602,17 +698,19 @@ class DevelopmentWorkflow:
         )
         return url
 
-    def _reach_agreement(self, issue_json: str) -> dict:
+    def _reach_agreement(self, issue_context: dict) -> dict:
         expansion: dict | None = None
         grill: dict | None = None
-        for round_number in range(1, self.clarification_rounds + 1):
+        previous_unresolved: str | None = None
+        round_number = 1
+        while True:
             if expansion is None:
                 prompt = "expand"
-                values = {"ISSUE_JSON": issue_json}
+                values = {"ISSUE_CONTEXT_JSON": _json(issue_context["initial"])}
             else:
                 prompt = "revise"
                 values = {
-                    "ISSUE_JSON": issue_json,
+                    "LATEST_COMMENTS_JSON": _json(issue_context["latest_comments"]),
                     "EXPANSION_JSON": _json(expansion),
                     "GRILL_JSON": _json(grill),
                 }
@@ -636,19 +734,36 @@ class DevelopmentWorkflow:
                     "grill",
                     "grill",
                     {
-                        "ISSUE_JSON": issue_json,
+                        "LATEST_COMMENTS_JSON": _json(issue_context["latest_comments"]),
                         "EXPANSION_JSON": _json(expansion),
                     },
                 )
             )
-            if grill["verdict"] == "ready":
-                return expansion
             if grill["verdict"] == "reject":
                 raise WorkflowStopped(str(grill["summary"]))
-        raise WorkflowStopped("clarification rounds exhausted before agreement")
+            if (
+                not expansion["needs_another_round"]
+                and not grill["needs_another_round"]
+                and grill["verdict"] == "ready"
+            ):
+                return expansion
+            unresolved = _json(
+                {
+                    "expander_needs_another_round": expansion["needs_another_round"],
+                    "open_questions": expansion["open_questions"],
+                    "griller_needs_another_round": grill["needs_another_round"],
+                    "questions": grill["questions"],
+                    "required_changes": grill["required_changes"],
+                }
+            )
+            self._require_progress(previous_unresolved, unresolved, "clarification")
+            previous_unresolved = unresolved
+            round_number += 1
 
     def _ci_until_green(self, prefix: str, specification: dict) -> dict:
-        for attempt in range(1, self.repair_rounds + 2):
+        previous_unresolved: str | None = None
+        attempt = 1
+        while True:
             key = f"ci-{prefix}-{attempt}"
             ci = self.repository.run_ci()
             result = ci.as_json()
@@ -661,30 +776,32 @@ class DevelopmentWorkflow:
             )
             if result["returncode"] == 0:
                 return result
-            if attempt <= self.repair_rounds:
-                repair = self._stage(
-                    Stage(
-                        f"repair-{prefix}-{attempt}",
-                        f"Repair report for {prefix}, attempt {attempt}",
-                        "implementer",
-                        "repair",
-                        "implementation",
-                        {
-                            "SPECIFICATION_JSON": _json(specification),
-                            "FAILURE_EVIDENCE": _json(result),
-                        },
-                    )
+            repair = self._stage(
+                Stage(
+                    f"repair-{prefix}-{attempt}",
+                    f"Repair report for {prefix}, attempt {attempt}",
+                    "implementer",
+                    "repair",
+                    "implementation",
+                    {
+                        "SPECIFICATION_JSON": _json(specification),
+                        "FAILURE_EVIDENCE": _json(result),
+                    },
                 )
-                self._require_complete(repair, "CI repair")
-        raise WorkflowStopped(
-            f"CI did not pass after {self.repair_rounds + 1} attempts"
-        )
+            )
+            self._require_complete(repair, "CI repair")
+            unresolved = _json({"ci": result, "repair": repair})
+            self._require_progress(previous_unresolved, unresolved, "CI repair")
+            previous_unresolved = unresolved
+            attempt += 1
 
     def _review_until_approved(
         self, specification: dict, ci_summary: dict
     ) -> dict[str, dict]:
         final: dict[str, dict] = {}
-        for round_number in range(1, self.review_rounds + 1):
+        previous_unresolved: str | None = None
+        round_number = 1
+        while True:
             final = {}
             for kind in ("specification", "quality"):
                 final[kind] = self._stage(
@@ -701,27 +818,39 @@ class DevelopmentWorkflow:
                         },
                     )
                 )
-            if all(review["verdict"] == "approve" for review in final.values()):
+            if all(
+                review["verdict"] == "approve" and not review["needs_another_round"]
+                for review in final.values()
+            ):
                 return final
-            if round_number < self.review_rounds:
-                repair = self._stage(
-                    Stage(
-                        f"review-repair-{round_number}",
-                        f"Review repair round {round_number}",
-                        "implementer",
-                        "repair",
-                        "implementation",
-                        {
-                            "SPECIFICATION_JSON": _json(specification),
-                            "FAILURE_EVIDENCE": _json(final),
-                        },
-                    )
+            unresolved = _json(
+                {
+                    kind: {
+                        "verdict": review["verdict"],
+                        "needs_another_round": review["needs_another_round"],
+                        "findings": review["findings"],
+                    }
+                    for kind, review in final.items()
+                }
+            )
+            self._require_progress(previous_unresolved, unresolved, "review")
+            previous_unresolved = unresolved
+            repair = self._stage(
+                Stage(
+                    f"review-repair-{round_number}",
+                    f"Review repair round {round_number}",
+                    "implementer",
+                    "repair",
+                    "implementation",
+                    {
+                        "SPECIFICATION_JSON": _json(specification),
+                        "FAILURE_EVIDENCE": _json(final),
+                    },
                 )
-                self._require_complete(repair, "review repair")
-                ci_summary = self._ci_until_green(
-                    f"review-{round_number}", specification
-                )
-        raise WorkflowStopped("review rounds exhausted with open findings")
+            )
+            self._require_complete(repair, "review repair")
+            ci_summary = self._ci_until_green(f"review-{round_number}", specification)
+            round_number += 1
 
     def _stage(self, stage: Stage) -> dict:
         if self.store.has(stage.key):
@@ -734,7 +863,8 @@ class DevelopmentWorkflow:
             values=stage.values,
         )
         self.store.save(stage.key, result)
-        self.github.comment_once(self.issue_number, stage.key, stage.title, result)
+        role_github = self.role_github.get(stage.role, self.github)
+        role_github.comment_once(self.issue_number, stage.key, stage.title, result)
         return result
 
     @staticmethod
@@ -742,6 +872,13 @@ class DevelopmentWorkflow:
         if result["status"] != "complete":
             blockers = "; ".join(str(item) for item in result["blockers"])
             raise WorkflowStopped(f"{stage} blocked: {blockers}")
+
+    @staticmethod
+    def _require_progress(
+        previous_unresolved: str | None, unresolved: str, process: str
+    ) -> None:
+        if unresolved == previous_unresolved:
+            raise WorkflowStopped(f"{process} stalled with the same unresolved state")
 
     def _pr_body(self, specification: dict, reviews: dict[str, dict]) -> str:
         return (
@@ -762,13 +899,6 @@ def _positive(raw: str) -> int:
     return value
 
 
-def _nonnegative(raw: str) -> int:
-    value = int(raw)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"expected 0 or more, got {value}")
-    return value
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Expand a GitHub issue, implement it, and open a draft PR."
@@ -779,9 +909,6 @@ def _parser() -> argparse.ArgumentParser:
         "--backend", default="claude", choices=("claude", "codex", "grok")
     )
     parser.add_argument("--base", help="PR base branch; defaults to repository default")
-    parser.add_argument("--clarification-rounds", type=_positive, default=3)
-    parser.add_argument("--repair-rounds", type=_nonnegative, default=2)
-    parser.add_argument("--review-rounds", type=_positive, default=2)
     parser.add_argument(
         "--ready", action="store_true", help="open a ready PR instead of a draft"
     )
@@ -799,7 +926,7 @@ def main(argv: list[str] | None = None) -> int:
     branch, base_sha = repository.prepare(base_branch, store.initialized)
     store.initialize(opts.issue, branch, base_sha)
     agents = AgentGateway(
-        backend=opts.backend,
+        roles={role: _StaticRoleOptions(opts.backend) for role in AGENT_ROLES},
         issue=opts.issue,
         state_file=store.root / "agents.json",
         example_root=example_root,
@@ -809,9 +936,6 @@ def main(argv: list[str] | None = None) -> int:
             opts.issue,
             base_branch,
             branch,
-            opts.clarification_rounds,
-            opts.repair_rounds,
-            opts.review_rounds,
             not opts.ready,
         ),
         WorkflowServices(store, github, repository, agents),

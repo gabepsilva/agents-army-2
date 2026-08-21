@@ -86,6 +86,10 @@ class CodexBackend(AgentBackend):
         schema: OutputSchema | None = None,
     ) -> TurnResult:
         args = ["codex", "exec"]
+        if self.model is not None:
+            args += ["--model", self.model]
+        if self.reasoning_effort is not None:
+            args += ["--config", f'model_reasoning_effort="{self.reasoning_effort}"']
         if session_id:
             args += ["resume", session_id]
         args += [prompt, "--json", "--skip-git-repo-check"]

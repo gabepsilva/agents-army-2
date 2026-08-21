@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
+import sys
 from collections import deque
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
-from examples import gabriel_development_workflow as gdw
+from examples.gabriels_workflow import config as workflow_config
+from examples.gabriels_workflow import development_workflow as gdw
+from examples.gabriels_workflow import github_app_client as app_github
+from examples.gabriels_workflow import setup as simple_setup
+from examples.gabriels_workflow import simple_development_workflow as simple_entrypoint
+from examples.gabriels_workflow.config import (
+    REQUIRED_ROLES,
+    RoleConfig,
+    WorkflowConfig,
+    load_config,
+)
 from orchestrator.schema import load_schema
 
 
@@ -33,9 +49,11 @@ class ScriptedRun:
         return _completed(args, reply.returncode, reply.stdout, reply.stderr)
 
 
-def _expansion(decision: str = "proceed") -> dict:
+def _expansion(decision: str = "proceed", needs_another_round: bool = False) -> dict:
     return {
         "decision": decision,
+        "needs_another_round": needs_another_round,
+        "reason": "proposal converged" if not needs_another_round else "needs review",
         "summary": "proposal",
         "current_state": ["current"],
         "proposed_changes": ["change"],
@@ -45,9 +63,13 @@ def _expansion(decision: str = "proceed") -> dict:
     }
 
 
-def _grill(verdict: str = "ready") -> dict:
+def _grill(verdict: str = "ready", needs_another_round: bool | None = None) -> dict:
+    if needs_another_round is None:
+        needs_another_round = verdict == "revise"
     return {
         "verdict": verdict,
+        "needs_another_round": needs_another_round,
+        "reason": "review converged" if not needs_another_round else "needs revision",
         "summary": "review",
         "questions": [] if verdict == "ready" else ["question"],
         "required_changes": [],
@@ -77,9 +99,240 @@ def _implementation(status: str = "complete") -> dict:
     }
 
 
-def _review(verdict: str = "approve") -> dict:
+def _workflow_config(**overrides: object) -> WorkflowConfig:
+    values: dict[str, object] = {
+        "repository": "owner/project",
+        "draft": False,
+        "roles": {
+            role: RoleConfig(
+                backend="codex",
+                model="gpt-test",
+                reasoning_effort="high",
+                github_app={"app_id": index, "private_key": f"key-{role}"},
+            )
+            for index, role in enumerate(sorted(REQUIRED_ROLES), start=1)
+        },
+    }
+    values.update(overrides)
+    return WorkflowConfig.model_validate(values)
+
+
+def test_workflow_yaml_loads_and_normalizes_role_settings(tmp_path: Path) -> None:
+    defaults = RoleConfig(
+        backend="claude",
+        model=None,
+        reasoning_effort=None,
+        github_app={"app_id": 9, "private_key": "key"},
+    )
+    assert defaults.model is None
+    assert defaults.reasoning_effort is None
+
+    path = tmp_path / "workflow.yaml"
+    roles = "\n".join(
+        f"  {role}:\n"
+        "    backend: ' Codex '\n"
+        "    model: ' test-model '\n"
+        "    reasoning_effort: ' high '\n"
+        "    github_app:\n"
+        "      app_id: 1\n"
+        "      private_key: test-private-key"
+        for role in sorted(REQUIRED_ROLES)
+    )
+    path.write_text(
+        f"repository: ' owner/project '\ndraft: false\nroles:\n{roles}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+    assert config.repository == "owner/project"
+    assert config.draft is False
+    assert config.roles["implementer"] == RoleConfig(
+        backend="codex",
+        model="test-model",
+        reasoning_effort="high",
+        github_app={"app_id": 1, "private_key": "test-private-key"},
+    )
+
+
+def test_workflow_yaml_loads_private_key_from_path(tmp_path: Path) -> None:
+    key_path = tmp_path / "bot.pem"
+    key_path.write_text("test-file-key\n", encoding="utf-8")
+    path = tmp_path / "workflow.yaml"
+    roles = "\n".join(
+        f"  {role}:\n"
+        "    backend: codex\n"
+        "    github_app:\n"
+        "      app_id: 1\n"
+        f"      private_key: {key_path if role == 'implementer' else 'bot.pem'}"
+        for role in sorted(REQUIRED_ROLES)
+    )
+    path.write_text(f"repository: owner/project\nroles:\n{roles}\n", encoding="utf-8")
+
+    config = load_config(path)
+
+    assert (
+        config.roles["implementer"].github_app.private_key.get_secret_value()
+        == "test-file-key\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"repository": "owner/project", "roles": []},
+        {
+            "repository": "owner/project",
+            "roles": {
+                "role": [],
+                "app": {"github_app": []},
+                "key": {"github_app": {"private_key": 1}},
+                "inline": {"github_app": {"private_key": "inline-key"}},
+            },
+        },
+    ],
+)
+def test_workflow_config_ignores_non_path_private_key_payloads(
+    tmp_path: Path, payload: object
+) -> None:
+    path = tmp_path / "workflow.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(gdw.WorkflowError, match="invalid workflow config"):
+        load_config(path)
+
+
+def test_workflow_config_reports_missing_private_key_file(tmp_path: Path) -> None:
+    path = tmp_path / "workflow.yaml"
+    roles = "\n".join(
+        f"  {role}:\n"
+        "    backend: codex\n"
+        "    github_app:\n"
+        "      app_id: 1\n"
+        "      private_key: missing.pem"
+        for role in sorted(REQUIRED_ROLES)
+    )
+    path.write_text(f"repository: owner/project\nroles:\n{roles}\n", encoding="utf-8")
+
+    with pytest.raises(gdw.WorkflowError, match="cannot read private key"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"repository": "project"}, "OWNER/REPO"),
+        (
+            {
+                "roles": {
+                    "expander": {
+                        "backend": "codex",
+                        "github_app": {"app_id": 1, "private_key": "key"},
+                    }
+                }
+            },
+            "missing roles",
+        ),
+        (
+            {
+                "roles": {
+                    **{
+                        role: {
+                            "backend": "codex",
+                            "github_app": {"app_id": 1, "private_key": "key"},
+                        }
+                        for role in REQUIRED_ROLES
+                    },
+                    "unknown": {
+                        "backend": "codex",
+                        "github_app": {"app_id": 1, "private_key": "key"},
+                    },
+                }
+            },
+            "unknown roles",
+        ),
+        (
+            {
+                "roles": {
+                    role: {
+                        "backend": "other",
+                        "github_app": {"app_id": 1, "private_key": "key"},
+                    }
+                    for role in REQUIRED_ROLES
+                }
+            },
+            "claude, codex, grok",
+        ),
+        (
+            {
+                "roles": {
+                    role: {
+                        "backend": "codex",
+                        "model": " ",
+                        "github_app": {"app_id": 1, "private_key": "key"},
+                    }
+                    for role in REQUIRED_ROLES
+                }
+            },
+            "must not be empty",
+        ),
+        (
+            {
+                "roles": {
+                    role: {
+                        "backend": "codex",
+                        "github_app": {"app_id": 0, "private_key": "key"},
+                    }
+                    for role in REQUIRED_ROLES
+                }
+            },
+            "greater than 0",
+        ),
+        (
+            {
+                "roles": {
+                    role: {
+                        "backend": "codex",
+                        "github_app": {"app_id": 1, "private_key": " "},
+                    }
+                    for role in REQUIRED_ROLES
+                }
+            },
+            "must not be empty",
+        ),
+        ({"clarification_rounds": 1}, "Extra inputs are not permitted"),
+        ({"unexpected": True}, "Extra inputs are not permitted"),
+    ],
+)
+def test_workflow_config_rejects_invalid_values(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    values = _workflow_config().model_dump(mode="json")
+    values.update(overrides)
+    path = tmp_path / "workflow.yaml"
+    path.write_text(yaml.safe_dump(values), encoding="utf-8")
+    with pytest.raises(gdw.WorkflowError, match=message):
+        load_config(path)
+
+
+def test_workflow_config_reports_missing_and_malformed_yaml(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.yaml"
+    with pytest.raises(gdw.WorkflowError, match="cannot read workflow config"):
+        load_config(missing)
+
+    malformed = tmp_path / "malformed.yaml"
+    malformed.write_text("roles: [", encoding="utf-8")
+    with pytest.raises(gdw.WorkflowError, match="invalid YAML"):
+        load_config(malformed)
+
+
+def _review(verdict: str = "approve", needs_another_round: bool | None = None) -> dict:
+    if needs_another_round is None:
+        needs_another_round = verdict == "changes_requested"
     return {
         "verdict": verdict,
+        "needs_another_round": needs_another_round,
+        "reason": "review converged" if not needs_another_round else "changes remain",
         "summary": "reviewed",
         "findings": []
         if verdict == "approve"
@@ -177,9 +430,6 @@ def _workflow(
     settings = {
         "github": None,
         "repository": None,
-        "clarification_rounds": 2,
-        "repair_rounds": 1,
-        "review_rounds": 2,
     }
     settings.update(overrides or {})
     store = gdw.ArtifactStore(tmp_path / "state")
@@ -192,9 +442,6 @@ def _workflow(
             42,
             "master",
             "feature",
-            settings["clarification_rounds"],
-            settings["repair_rounds"],
-            settings["review_rounds"],
             True,
         ),
         gdw.WorkflowServices(store, github, repository, agents),
@@ -440,53 +687,166 @@ def test_github_reports_missing_invalid_and_failed_cli(
         failed.issue(1)
 
 
+def test_github_app_client_owns_app_auth_comments_and_pull_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_at = datetime(2026, 8, 20, tzinfo=UTC)
+    comments = [
+        SimpleNamespace(
+            user=SimpleNamespace(login="alice"),
+            body="hello",
+            created_at=created_at,
+            html_url="https://example.test/comments/1",
+        ),
+        SimpleNamespace(
+            user=None,
+            body="<!-- gdw:9:existing -->\nalready posted",
+            created_at=created_at,
+            html_url="https://example.test/comments/2",
+        ),
+    ]
+    issue = SimpleNamespace(
+        number=9,
+        title="Issue",
+        body=None,
+        html_url="https://example.test/issues/9",
+        labels=[SimpleNamespace(name="bug")],
+        state="open",
+        get_comments=lambda: comments,
+        create_comment=MagicMock(),
+    )
+    pull = SimpleNamespace(html_url="https://example.test/pulls/9")
+    repository = SimpleNamespace(
+        default_branch="trunk",
+        get_issue=MagicMock(return_value=issue),
+        create_pull=MagicMock(return_value=pull),
+    )
+    github_session = SimpleNamespace(close=MagicMock())
+    integration_session = SimpleNamespace(close=MagicMock())
+    client = app_github.GitHubAppClient(
+        cast(app_github.Repository, repository),
+        cast(app_github.Github, github_session),
+        cast(app_github.GithubIntegration, integration_session),
+    )
+
+    assert client.default_branch == "trunk"
+    payload = client.issue(9)
+    assert payload["body"] == ""
+    assert payload["comments"][0]["author"] == "alice"
+    assert payload["comments"][1]["author"] is None
+    assert payload["labels"] == ["bug"]
+
+    client.comment_once(9, "existing", "Skipped", {})
+    issue.create_comment.assert_not_called()
+    client.comment_once(9, "new", "New", {"answer": 1})
+    client.comment_once(9, "new", "New", {"answer": 1})
+    posted = issue.create_comment.call_args.args[0]
+    assert "<!-- gdw:9:new -->" in posted
+    assert "### Answer\n\n1" in posted
+    assert issue.create_comment.call_count == 1
+
+    assert (
+        client.create_pr(
+            base="trunk", branch="feature", title="Title", body="Body", draft=True
+        )
+        == pull.html_url
+    )
+    repository.create_pull.assert_called_once_with(
+        base="trunk", head="feature", title="Title", body="Body", draft=True
+    )
+    client.close()
+    github_session.close.assert_called_once_with()
+    integration_session.close.assert_called_once_with()
+    app_github.GitHubAppClient(cast(app_github.Repository, repository)).close()
+
+    app_auth = MagicMock()
+    app_auth.get_installation_auth.return_value = "installation-auth"
+    app_auth_factory = MagicMock(return_value=app_auth)
+    integration = MagicMock()
+    integration.get_repo_installation.return_value.id = 77
+    integration_factory = MagicMock(return_value=integration)
+    github = MagicMock()
+    github.get_repo.return_value = repository
+    github_factory = MagicMock(return_value=github)
+    monkeypatch.setattr(app_github.Auth, "AppAuth", app_auth_factory)
+    monkeypatch.setattr(app_github, "GithubIntegration", integration_factory)
+    monkeypatch.setattr(app_github, "Github", github_factory)
+
+    connected = app_github.GitHubAppClient.connect(12, "private-key", "owner/repo")
+    assert connected.repository is repository
+    app_auth_factory.assert_called_once_with(12, "private-key")
+    integration.get_repo_installation.assert_called_once_with("owner", "repo")
+    app_auth.get_installation_auth.assert_called_once_with(77)
+    github_factory.assert_called_once_with(auth="installation-auth", per_page=100)
+
+
 def test_agent_gateway_validates_prompt_and_removes_github_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    observed: dict = {}
+    calls: list[tuple[list[str], dict]] = []
 
-    class FakeOrchestrator:
-        def __init__(self, state_file: Path) -> None:
-            observed["state_file"] = state_file
-            self.agent = SimpleNamespace(
-                name="gdw-3-expander", backend=SimpleNamespace(name="codex")
-            )
-
-        def ensure(self, name: str, backend: str):
-            observed["ensure"] = (name, backend)
-            return self.agent, True
-
-        def talk(self, name: str, prompt: str, **kwargs):
-            observed["talk"] = (name, prompt, kwargs)
-            observed["tokens"] = [os.environ.get(key) for key in gdw.GITHUB_TOKEN_NAMES]
-            observed["config"] = os.environ["GH_CONFIG_DIR"]
-            blocker = Path(os.environ["PATH"].split(os.pathsep)[0]) / "gh"
-            observed["blocker"] = blocker.read_text(encoding="utf-8")
-            return SimpleNamespace(structured=_expansion())
+    def fake_run(args: list[str], **kwargs):
+        calls.append((args, kwargs))
+        environment = kwargs["env"]
+        assert [environment.get(key) for key in gdw.GITHUB_TOKEN_NAMES] == [
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]
+        assert environment["GH_CONFIG_DIR"].endswith("empty-gh-config")
+        blocker = Path(environment["PATH"].split(os.pathsep)[0]) / "gh"
+        assert "owned by the GDW driver" in blocker.read_text(encoding="utf-8")
+        if args[1] == "ensure":
+            return _completed(args, stdout="created agent\n")
+        return _completed(
+            args,
+            stdout=f"[gdw-3-expander session=s1]\n{json.dumps(_expansion())}\n",
+        )
 
     monkeypatch.setenv("GH_TOKEN", "secret")
     original_path = os.environ["PATH"]
     root = Path(gdw.__file__).parent
     gateway = gdw.AgentGateway(
-        backend="codex",
+        roles={
+            "expander": SimpleNamespace(
+                backend="codex", model=None, reasoning_effort=None
+            )
+        },
         issue=3,
         state_file=tmp_path / "agents.json",
         example_root=root,
-        orchestrator_factory=FakeOrchestrator,
+        run=fake_run,
     )
     result = gateway.ask(
         role="expander",
         prompt_name="expand",
         schema_name="expansion",
-        values={"ISSUE_JSON": "{}"},
+        values={"ISSUE_CONTEXT_JSON": "{}"},
         timeout=17,
     )
     assert result == _expansion()
-    assert observed["ensure"] == ("gdw-3-expander", "codex")
-    assert observed["tokens"] == [None, None, None, None]
-    assert observed["config"].endswith("empty-gh-config")
-    assert "owned by the GDW driver" in observed["blocker"]
-    assert observed["talk"][2]["timeout"] == 17
+    assert calls[0][0] == [
+        "orchestrator",
+        "ensure",
+        "gdw-3-expander",
+        "--backend",
+        "codex",
+    ]
+    assert calls[1][0][:8] == [
+        "orchestrator",
+        "--agent",
+        "gdw-3-expander",
+        "--validate-schema",
+        str(root / "validations" / "expansion.json"),
+        "--timeout",
+        "17",
+        "--prompt",
+    ]
+    assert calls[0][1]["env"]["AGENTS_ARMY_STATE_FILE"] == str(tmp_path / "agents.json")
+    assert calls[1][1]["timeout"] == 22
     assert os.environ["GH_TOKEN"] == "secret"
     assert os.environ["PATH"] == original_path
 
@@ -500,24 +860,26 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
         schema.read_text(encoding="utf-8"), encoding="utf-8"
     )
 
-    class FakeOrchestrator:
-        def __init__(self, _state_file: Path) -> None:
-            self.agent = SimpleNamespace(
-                name="gdw-1-role", backend=SimpleNamespace(name="claude")
-            )
+    replies = deque(
+        [
+            _completed([], returncode=1, stderr="already uses backend/model/effort"),
+            _completed([], stdout="reused agent\n"),
+            _completed([], stdout="[gdw-1-role session=s1]\nnull\n"),
+        ]
+    )
 
-        def ensure(self, _name: str, _backend: str):
-            return self.agent, False
-
-        def talk(self, *_args, **_kwargs):
-            return SimpleNamespace(structured=None)
+    def fake_run(args: list[str], **_kwargs):
+        reply = replies.popleft()
+        return _completed(args, reply.returncode, reply.stdout, reply.stderr)
 
     gateway = gdw.AgentGateway(
-        backend="codex",
+        roles={
+            "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
+        },
         issue=1,
         state_file=tmp_path / "state.json",
         example_root=example_root,
-        orchestrator_factory=FakeOrchestrator,
+        run=fake_run,
     )
     with pytest.raises(gdw.WorkflowError, match="cannot read prompt"):
         gateway.ask(
@@ -530,11 +892,138 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
     with pytest.raises(gdw.WorkflowError, match="unresolved placeholders"):
         gateway.ask(role="role", prompt_name="bad", schema_name="expansion", values={})
     (example_root / "prompts" / "ok.md").write_text("ok", encoding="utf-8")
-    with pytest.raises(gdw.WorkflowError, match="already uses backend"):
+    with pytest.raises(gdw.WorkflowError, match="already uses backend/model/effort"):
         gateway.ask(role="role", prompt_name="ok", schema_name="expansion", values={})
-    gateway.backend = "claude"
+    gateway.roles["role"] = SimpleNamespace(
+        backend="claude", model=None, reasoning_effort=None
+    )
     with pytest.raises(gdw.WorkflowError, match="no structured response"):
         gateway.ask(role="role", prompt_name="ok", schema_name="expansion", values={})
+
+
+@pytest.mark.parametrize(
+    ("turn_stdout", "message"),
+    [
+        ("header only", "no structured response"),
+        ("[agent session=s1]\nnot-json\n", "invalid structured JSON"),
+    ],
+)
+def test_agent_gateway_rejects_malformed_cli_output(
+    tmp_path: Path, turn_stdout: str, message: str
+) -> None:
+    replies = deque(
+        [
+            _completed([], stdout="reused agent\n"),
+            _completed([], stdout=turn_stdout),
+        ]
+    )
+
+    def fake_run(args: list[str], **_kwargs):
+        reply = replies.popleft()
+        return _completed(args, reply.returncode, reply.stdout, reply.stderr)
+
+    gateway = gdw.AgentGateway(
+        roles={
+            "expander": SimpleNamespace(
+                backend="codex", model=None, reasoning_effort=None
+            )
+        },
+        issue=1,
+        state_file=tmp_path / "state.json",
+        example_root=Path(gdw.__file__).parent,
+        run=fake_run,
+    )
+    with pytest.raises(gdw.WorkflowError, match=message):
+        gateway.ask(
+            role="expander",
+            prompt_name="expand",
+            schema_name="expansion",
+            values={"ISSUE_CONTEXT_JSON": "{}"},
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("missing executable"), subprocess.TimeoutExpired("orchestrator", 3)],
+)
+def test_agent_gateway_reports_cli_launch_failures(
+    tmp_path: Path, failure: BaseException
+) -> None:
+    def failing_run(_args: list[str], **_kwargs):
+        raise failure
+
+    gateway = gdw.AgentGateway(
+        roles={},
+        issue=1,
+        state_file=tmp_path / "state.json",
+        example_root=Path(gdw.__file__).parent,
+        run=failing_run,
+    )
+    with pytest.raises(gdw.WorkflowError, match="orchestrator CLI failed"):
+        gateway._run_cli(["list"], {}, timeout=3)
+
+
+def test_agent_gateway_reports_cli_exit_without_stderr(tmp_path: Path) -> None:
+    gateway = gdw.AgentGateway(
+        roles={},
+        issue=1,
+        state_file=tmp_path / "state.json",
+        example_root=Path(gdw.__file__).parent,
+        run=lambda args, **_kwargs: _completed(args, returncode=9),
+    )
+    with pytest.raises(gdw.WorkflowError, match="exited 9"):
+        gateway._run_cli(["list"], {}, timeout=3)
+
+
+def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    configured = RoleConfig(
+        backend="grok",
+        model="grok-code-test",
+        reasoning_effort="xhigh",
+        github_app={"app_id": 1, "private_key": "key"},
+    )
+
+    def fake_run(args: list[str], **_kwargs):
+        calls.append(args)
+        if args[1] == "ensure":
+            return _completed(args, stdout="created agent\n")
+        return _completed(
+            args,
+            stdout=f"[gdw-5-expander session=s1]\n{json.dumps(_expansion())}\n",
+        )
+
+    gateway = gdw.AgentGateway(
+        roles={"expander": configured},
+        issue=5,
+        state_file=tmp_path / "agents.json",
+        example_root=Path(gdw.__file__).parent,
+        run=fake_run,
+    )
+    gateway.ask(
+        role="expander",
+        prompt_name="expand",
+        schema_name="expansion",
+        values={"ISSUE_CONTEXT_JSON": "{}"},
+    )
+    assert calls[0] == [
+        "orchestrator",
+        "ensure",
+        "gdw-5-expander",
+        "--backend",
+        "grok",
+        "--model",
+        "grok-code-test",
+        "--reasoning-effort",
+        "xhigh",
+    ]
+    with pytest.raises(gdw.WorkflowError, match="role 'missing' is not configured"):
+        gateway.ask(
+            role="missing",
+            prompt_name="expand",
+            schema_name="expansion",
+            values={"ISSUE_CONTEXT_JSON": "{}"},
+        )
 
 
 def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> None:
@@ -545,13 +1034,14 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         assert schema.path.is_absolute()
 
     gateway = gdw.AgentGateway(
-        backend="codex",
+        roles={},
         issue=1,
         state_file=tmp_path / "agents.json",
         example_root=example_root,
     )
     values = {
-        "ISSUE_JSON": "{}",
+        "ISSUE_CONTEXT_JSON": "{}",
+        "LATEST_COMMENTS_JSON": "[]",
         "EXPANSION_JSON": "{}",
         "GRILL_JSON": "{}",
         "SPECIFICATION_JSON": "{}",
@@ -571,7 +1061,9 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
     for name in prompt_names:
         prompt = gateway._prompt(name, values)
         assert "{{" not in prompt
-        assert "use `gh`" in prompt
+        assert "external" in prompt
+        assert "services" in prompt
+        assert "use `gh`" not in prompt
 
 
 def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
@@ -598,6 +1090,89 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     assert len(agents.calls) == 6
     assert workflow.run() == "https://example.test/pr/1"
     assert len(agents.calls) == 6
+
+
+def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> None:
+    replies = [
+        _expansion(),
+        _grill(),
+        _specification(),
+        _implementation(),
+        _review(),
+        _review(),
+    ]
+    workflow, driver_github, _repository, _agents = _workflow(tmp_path, replies)
+    role_github = {role: FakeGitHub() for role in REQUIRED_ROLES}
+    workflow.role_github = cast(dict[str, gdw.GitHubService], role_github)
+
+    workflow.run()
+
+    expected_keys = {
+        "expander": "expansion-1",
+        "griller": "grill-1",
+        "specifier": "specification",
+        "implementer": "implementation",
+        "reviewer-specification": "review-1-specification",
+        "reviewer-quality": "review-1-quality",
+    }
+    assert {
+        role: client.comments[0][1] for role, client in role_github.items()
+    } == expected_keys
+    assert all(len(client.comments) == 1 for client in role_github.values())
+    assert {comment[1] for comment in driver_github.comments} == {
+        "ci-implementation-1",
+        "pull-request",
+    }
+
+
+def test_workflow_sends_the_body_once_and_only_five_latest_comments(
+    tmp_path: Path,
+) -> None:
+    class ContextGitHub(FakeGitHub):
+        def issue(self, number: int) -> dict:
+            comments: list[object] = [
+                {"author": f"user-{index}", "body": f"comment-{index}"}
+                for index in range(7)
+            ]
+            comments.extend(
+                [
+                    "noise",
+                    {"body": 12},
+                    {"body": "<!-- gdw:42:old -->\nworkflow output"},
+                ]
+            )
+            return {
+                "number": number,
+                "title": "Raw issue",
+                "body": "Original issue body",
+                "comments": comments,
+                "url": "https://example.test/issues/42",
+                "state": "open",
+            }
+
+    github = ContextGitHub()
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path,
+        [_expansion(), _grill("revise"), _expansion(), _grill()],
+        {"github": github},
+    )
+    issue_context = workflow.load_issue()
+    workflow.clarify(issue_context)
+
+    assert [comment["body"] for comment in issue_context["latest_comments"]] == [
+        "comment-2",
+        "comment-3",
+        "comment-4",
+        "comment-5",
+        "comment-6",
+    ]
+    initial = agents.calls[0]["values"]
+    assert "Original issue body" in initial["ISSUE_CONTEXT_JSON"]
+    assert "comment-0" not in initial["ISSUE_CONTEXT_JSON"]
+    for call in agents.calls[1:]:
+        serialized_values = json.dumps(call["values"])
+        assert "Original issue body" not in serialized_values
+        assert "comment-2" in serialized_values
 
 
 def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
@@ -632,47 +1207,108 @@ def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
     assert prompts.count("review") == 4
 
 
+def test_clarification_continues_until_both_agents_report_convergence(
+    tmp_path: Path,
+) -> None:
+    first = _expansion(needs_another_round=True)
+    first["open_questions"] = ["first unresolved question"]
+    second = _expansion(needs_another_round=True)
+    second["open_questions"] = ["different unresolved question"]
+    final = _expansion()
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path,
+        [first, _grill(), second, _grill(), final, _grill()],
+    )
+
+    assert workflow.clarify({"initial": {}, "latest_comments": []}) == final
+    assert [call["prompt_name"] for call in agents.calls] == [
+        "expand",
+        "grill",
+        "revise",
+        "grill",
+        "revise",
+        "grill",
+    ]
+
+
+def test_review_continues_until_every_reviewer_reports_convergence(
+    tmp_path: Path,
+) -> None:
+    workflow, _github, repository, agents = _workflow(
+        tmp_path,
+        [
+            _review("approve", needs_another_round=True),
+            _review(),
+            _implementation(),
+            _review(),
+            _review(),
+        ],
+        {"repository": FakeRepository([gdw.CommandResult(0, "green")])},
+    )
+
+    result = workflow.review(_specification(), {"returncode": 0, "output": "green"})
+    assert all(not review["needs_another_round"] for review in result.values())
+    assert [call["prompt_name"] for call in agents.calls] == [
+        "review",
+        "review",
+        "repair",
+        "review",
+        "review",
+    ]
+    assert repository.ci == deque()
+
+
+def test_repeated_unresolved_states_stop_stalled_processes(tmp_path: Path) -> None:
+    clarification, *_ = _workflow(
+        tmp_path / "clarification",
+        [
+            _expansion(needs_another_round=True),
+            _grill("revise"),
+            _expansion(needs_another_round=True),
+            _grill("revise"),
+        ],
+    )
+    with pytest.raises(gdw.WorkflowStopped, match="clarification stalled"):
+        clarification.clarify({"initial": {}, "latest_comments": []})
+
+    ci, *_ = _workflow(
+        tmp_path / "ci",
+        [_implementation(), _implementation()],
+        {"repository": FakeRepository([gdw.CommandResult(1, "same failure")] * 2)},
+    )
+    with pytest.raises(gdw.WorkflowStopped, match="CI repair stalled"):
+        ci.stabilize(_specification())
+
+    review, *_ = _workflow(
+        tmp_path / "review",
+        [
+            _review("changes_requested"),
+            _review(),
+            _implementation(),
+            _review("changes_requested"),
+            _review(),
+        ],
+        {"repository": FakeRepository([gdw.CommandResult(0, "green")])},
+    )
+    with pytest.raises(gdw.WorkflowStopped, match="review stalled"):
+        review.review(_specification(), {"returncode": 0, "output": "green"})
+
+
 @pytest.mark.parametrize(
-    ("replies", "options", "message"),
+    ("replies", "message"),
     [
-        ([_expansion("stop")], {}, "proposal"),
-        ([_expansion(), _grill("reject")], {}, "review"),
-        (
-            [_expansion(), _grill("revise")],
-            {"clarification_rounds": 1},
-            "clarification",
-        ),
+        ([_expansion("stop")], "proposal"),
+        ([_expansion(), _grill("reject")], "review"),
         (
             [_expansion(), _grill(), _specification(), _implementation("blocked")],
-            {},
             "implementation blocked",
-        ),
-        (
-            [_expansion(), _grill(), _specification(), _implementation()],
-            {
-                "repair_rounds": 0,
-                "repository": FakeRepository([gdw.CommandResult(1, "bad")]),
-            },
-            "CI did not pass",
-        ),
-        (
-            [
-                _expansion(),
-                _grill(),
-                _specification(),
-                _implementation(),
-                _review("changes_requested"),
-                _review(),
-            ],
-            {"review_rounds": 1},
-            "review rounds exhausted",
         ),
     ],
 )
 def test_workflow_deliberate_stop_conditions(
-    tmp_path: Path, replies: list[dict], options: dict, message: str
+    tmp_path: Path, replies: list[dict], message: str
 ) -> None:
-    workflow, _github, _repository, _agents = _workflow(tmp_path, replies, options)
+    workflow, _github, _repository, _agents = _workflow(tmp_path, replies)
     with pytest.raises(gdw.WorkflowStopped, match=message):
         workflow.run()
 
@@ -715,7 +1351,7 @@ def test_workflow_stops_on_blocked_repairs_and_empty_pr_url(tmp_path: Path) -> N
         _review(),
     ]
     workflow, *_ = _workflow(tmp_path / "empty", happy, {"github": FakeGitHub("")})
-    with pytest.raises(gdw.WorkflowError, match="empty URL"):
+    with pytest.raises(gdw.WorkflowError, match="empty pull-request URL"):
         workflow.run()
 
 
@@ -733,9 +1369,6 @@ def test_positive_parser_and_main_success_and_failure(
     assert gdw._positive("2") == 2
     with pytest.raises(Exception, match="expected 1 or more"):
         gdw._positive("0")
-    assert gdw._nonnegative("0") == 0
-    with pytest.raises(Exception, match="expected 0 or more"):
-        gdw._nonnegative("-1")
     assert gdw._parser().parse_args(["4", "--ready"]).ready is True
 
     class MainGitHub(FakeGitHub):
@@ -783,3 +1416,171 @@ def test_positive_parser_and_main_success_and_failure(
     MainWorkflow.should_fail = True
     assert gdw.main(["4", "--base", "trunk"]) == 1
     assert "workflow stopped: halt" in capsys.readouterr().err
+
+
+def test_prepare_simple_workflow_checks_tools_and_builds_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _workflow_config()
+    monkeypatch.setattr(simple_setup.shutil, "which", lambda _name: None)
+    with pytest.raises(gdw.WorkflowError, match="git is not installed"):
+        simple_setup.prepare_workflow(7, config)
+
+    monkeypatch.setattr(
+        simple_setup.shutil,
+        "which",
+        lambda name: (
+            f"/bin/{name}" if name in {"git", "make", "uv", "orchestrator"} else None
+        ),
+    )
+    with pytest.raises(gdw.WorkflowError, match="configured agent backend 'codex'"):
+        simple_setup.prepare_workflow(7, config)
+
+    observed: dict = {}
+
+    class SetupStore:
+        initialized = False
+
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def initialize(self, issue: int, branch: str, base_sha: str) -> None:
+            observed["initialize"] = (issue, branch, base_sha)
+
+    class SetupRepository:
+        def __init__(self, root: Path) -> None:
+            observed["repository_root"] = root
+
+        def prepare(self, base: str, resuming: bool) -> tuple[str, str]:
+            observed["prepare"] = (base, resuming)
+            return "feature", "base-sha"
+
+    class SetupWorkflow:
+        def __init__(self, options, services) -> None:
+            self.options = options
+            self.services = services
+
+    github = SimpleNamespace(default_branch="trunk")
+    connect = MagicMock(return_value=github)
+    gateway = object()
+    gateway_factory = MagicMock(return_value=gateway)
+    monkeypatch.setattr(simple_setup.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(simple_setup.GitHubAppClient, "connect", connect)
+    monkeypatch.setattr(simple_setup, "ArtifactStore", SetupStore)
+    monkeypatch.setattr(simple_setup, "GitRepository", SetupRepository)
+    monkeypatch.setattr(simple_setup, "AgentGateway", gateway_factory)
+    monkeypatch.setattr(simple_setup, "DevelopmentWorkflow", SetupWorkflow)
+
+    workflow = simple_setup.prepare_workflow(7, config)
+    assert isinstance(workflow, SetupWorkflow)
+    assert connect.call_count == len(REQUIRED_ROLES)
+    assert {
+        (call.args[0], call.args[1], call.args[2]) for call in connect.call_args_list
+    } == {
+        (
+            role_config.github_app.app_id,
+            role_config.github_app.private_key.get_secret_value(),
+            "owner/project",
+        )
+        for role_config in config.roles.values()
+    }
+    assert observed["prepare"] == ("trunk", False)
+    assert observed["initialize"] == (7, "feature", "base-sha")
+    assert workflow.options == gdw.WorkflowOptions(7, "trunk", "feature", False)
+    assert workflow.services.store.root == tmp_path / ".git" / "gdw" / "issue-7"
+    assert workflow.services.github is github
+    assert workflow.services.repository.__class__ is SetupRepository
+    assert workflow.services.agents is gateway
+    assert workflow.services.role_github == dict.fromkeys(REQUIRED_ROLES, github)
+    gateway_factory.assert_called_once_with(
+        roles=config.roles,
+        issue=7,
+        state_file=tmp_path / ".git" / "gdw" / "issue-7" / "agents.json",
+        example_root=Path(simple_setup.__file__).resolve().parent,
+    )
+
+
+def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    class EntryWorkflow:
+        def __init__(self, completed: str | None) -> None:
+            self.completed = completed
+            self.calls: list[object] = []
+
+        def completed_url(self) -> str | None:
+            self.calls.append("completed")
+            return self.completed
+
+        def load_issue(self) -> dict:
+            self.calls.append("load")
+            return {"issue": 1}
+
+        def clarify(self, issue: dict) -> dict:
+            self.calls.append(("clarify", issue))
+            return {"proposal": 1}
+
+        def specify(self, issue: dict, proposal: dict) -> dict:
+            self.calls.append(("specify", issue, proposal))
+            return {"specification": 1}
+
+        def implement(self, specification: dict) -> None:
+            self.calls.append(("implement", specification))
+
+        def stabilize(self, specification: dict) -> dict:
+            self.calls.append(("stabilize", specification))
+            return {"ci": "green"}
+
+        def review(self, specification: dict, ci: dict) -> dict:
+            self.calls.append(("review", specification, ci))
+            return {"reviews": "approved"}
+
+        def publish(self, specification: dict, reviews: dict) -> str:
+            self.calls.append(("publish", specification, reviews))
+            return "https://example.test/pulls/new"
+
+    fresh = EntryWorkflow(None)
+    resumed = EntryWorkflow("https://example.test/pulls/existing")
+    prepare = MagicMock(side_effect=[fresh, resumed])
+    monkeypatch.setattr(simple_setup, "prepare_workflow", prepare)
+    load = MagicMock(
+        return_value=_workflow_config(repository="gabepsilva/agents-army-2")
+    )
+    monkeypatch.setattr(workflow_config, "load_config", load)
+    script = Path(simple_setup.__file__).with_name("simple_development_workflow.py")
+
+    monkeypatch.setattr(sys, "argv", [str(script), "42"])
+    runpy.run_path(str(script), run_name="__main__")
+    assert capsys.readouterr().out.strip() == "https://example.test/pulls/new"
+    assert fresh.calls == [
+        "completed",
+        "load",
+        ("clarify", {"issue": 1}),
+        ("specify", {"issue": 1}, {"proposal": 1}),
+        ("implement", {"specification": 1}),
+        ("stabilize", {"specification": 1}),
+        ("review", {"specification": 1}, {"ci": "green"}),
+        ("publish", {"specification": 1}, {"reviews": "approved"}),
+    ]
+
+    runpy.run_path(str(script), run_name="__main__")
+    assert capsys.readouterr().out.strip() == "https://example.test/pulls/existing"
+    assert resumed.calls == ["completed"]
+    assert [call.args[0] for call in prepare.call_args_list] == [42, 42]
+    assert [call.args[1].repository for call in prepare.call_args_list] == [
+        "gabepsilva/agents-army-2",
+        "gabepsilva/agents-army-2",
+    ]
+    assert [call.args[0] for call in load.call_args_list] == [
+        Path(simple_entrypoint.__file__).with_name("workflow.local"),
+        Path(simple_entrypoint.__file__).with_name("workflow.local"),
+    ]
+
+
+def test_simple_entrypoint_defaults_to_local_workflow_config() -> None:
+    options = simple_entrypoint._parser().parse_args(["42"])
+
+    assert options.config == Path(simple_entrypoint.__file__).with_name(
+        "workflow.local"
+    )
