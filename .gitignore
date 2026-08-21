@@ -10,6 +10,10 @@ build/
 .python-version
 .ruff_cache/
 .coverage
+# pytest-xdist writes one data file per worker and combines them at the end;
+# an interrupted run leaves them behind, and publish() commits every untracked
+# file that is not ignored.
+.coverage.*
 coverage.xml
 coverage.json
 reports/

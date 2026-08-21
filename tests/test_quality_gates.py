@@ -7,6 +7,7 @@ gate a known-bad input and assert the failure message.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,9 +17,11 @@ from pathlib import Path
 import pytest
 
 import tools.coverage_gate as coverage_gate
+import tools.mutation_cache as mutation_cache
 import tools.mutation_gate as mutation_gate
 import tools.ratchet_gate as ratchet_gate
 import tools.test_integrity as test_integrity
+from examples.gabriels_workflow import development_workflow as gdw
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -647,3 +650,182 @@ class TestBanditScope:
         )
         assert proc.returncode == 1
         assert "B301:blacklist" in proc.stdout
+
+
+class TestMutationCache:
+    """mutmut reuses a mutant's verdict when only the tests changed, so the
+    score it reports was reached by a suite that no longer exists."""
+
+    @staticmethod
+    def _project(root: Path, selection: list[str]) -> Path:
+        pyproject = root / "pyproject.toml"
+        entries = ", ".join(f'"{name}"' for name in selection)
+        pyproject.write_text(
+            f"[tool.mutmut]\npytest_add_cli_args_test_selection = [{entries}]\n",
+            encoding="utf-8",
+        )
+        return pyproject
+
+    @staticmethod
+    def _wire(monkeypatch: pytest.MonkeyPatch, root: Path, pyproject: Path) -> Path:
+        monkeypatch.setattr(mutation_cache, "PYPROJECT_PATH", pyproject)
+        monkeypatch.setattr(mutation_cache, "MUTANTS_DIR", root / "mutants")
+        digest_path = root / "reports" / "mutation-test-inputs.sha256"
+        monkeypatch.setattr(mutation_cache, "DIGEST_PATH", digest_path)
+        return digest_path
+
+    def test_changed_tests_drop_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        (tmp_path / "test_a.py").write_text("assert True\n", encoding="utf-8")
+        pyproject = self._project(tmp_path, [str(tmp_path / "test_a.py")])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+
+        # No digest recorded: the cache cannot be shown to match these tests,
+        # so it is not trusted.
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+        capsys.readouterr()
+
+        # Only a completed mutmut run may claim these tests were measured.
+        assert mutation_cache.main(["--record"]) == 0
+
+        # Same tests as the recorded digest: the fast path survives.
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        assert "reusing cached mutant results" in capsys.readouterr().out
+
+        # A planted assertion change must invalidate the cached verdicts.
+        (tmp_path / "test_a.py").write_text("assert False\n", encoding="utf-8")
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+        assert "tests changed since the cached run" in capsys.readouterr().out
+
+    def test_a_check_never_records_that_the_tests_were_measured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Recording up front would mark a suite measured before anything
+        measured it, so the next run would trust an unvalidated cache."""
+        (tmp_path / "test_a.py").write_text("assert True\n", encoding="utf-8")
+        pyproject = self._project(tmp_path, [str(tmp_path / "test_a.py")])
+        digest_path = self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+        assert capsys.readouterr().out == ""
+        assert not digest_path.exists()
+
+        assert mutation_cache.main(["--record"]) == 0
+        assert digest_path.read_text(encoding="utf-8").strip() == mutation_cache.digest(
+            [tmp_path / "test_a.py"]
+        )
+
+    def test_the_makefile_records_only_after_mutmut_has_measured(self) -> None:
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert mutation.index("mutmut run") < mutation.index(
+            "mutation_cache.py --record"
+        )
+
+    def test_digest_covers_the_selection_not_only_its_contents(
+        self, tmp_path: Path
+    ) -> None:
+        first = tmp_path / "test_a.py"
+        second = tmp_path / "test_b.py"
+        first.write_text("same\n", encoding="utf-8")
+        second.write_text("same\n", encoding="utf-8")
+
+        assert mutation_cache.digest([first]) != mutation_cache.digest([second])
+        assert mutation_cache.digest([first, second]) != mutation_cache.digest([first])
+
+    def test_selection_is_read_from_pyproject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pyproject = self._project(tmp_path, ["tests/b.py", "tests/a.py"])
+        monkeypatch.setattr(mutation_cache, "PYPROJECT_PATH", pyproject)
+
+        assert mutation_cache.selected_tests(pyproject) == [
+            Path("tests/a.py"),
+            Path("tests/b.py"),
+        ]
+
+    def test_an_unreadable_selection_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        pyproject = self._project(tmp_path, [str(tmp_path / "absent.py")])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        assert "cannot hash the mutmut test selection" in capsys.readouterr().out
+
+    def test_the_real_makefile_clears_the_cache_before_measuring(self) -> None:
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert "tools/mutation_cache.py" in mutation
+        assert mutation.index("tools/mutation_cache.py") < mutation.index("mutmut run")
+
+
+class TestCiGateAnnouncements:
+    """The driver reports one check per gate by reading a single interleaved
+    `make ci` log back apart. That only works while every gate announces
+    itself, in the form the driver parses, and while the list `make ci-gates`
+    publishes is the list `make ci` actually builds — a gate missing from it
+    would be reported as never started on every run.
+    """
+
+    def _make(self, *args: str) -> str:
+        env = os.environ.copy()
+        env.pop("MAKEFLAGS", None)
+        env.pop("MFLAGS", None)
+        env.pop("MAKELEVEL", None)
+        env["JOBS"] = "1"
+        proc = subprocess.run(
+            ["make", "--no-print-directory", "-j1", *args],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+        )
+        return proc.stdout
+
+    def test_the_advertised_gates_are_the_ones_ci_runs(self) -> None:
+        advertised = self._make("ci-gates").split()
+        announced = re.findall(
+            r"^printf '.*=== gate: %s ===.*' (\S+)$",
+            self._make("--dry-run", "ci"),
+            flags=re.MULTILINE,
+        )
+
+        assert advertised == announced
+        assert "mutation" in advertised
+
+    def test_every_gate_announces_itself_before_its_first_command(self) -> None:
+        makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+
+        for gate in self._make("ci-gates").split():
+            recipe = makefile.partition(f"\n{gate}:")[2]
+            assert recipe, f"{gate} has no recipe in the Makefile"
+            assert recipe.partition("\n")[2].partition("\n")[0] == "\t$(gate)", (
+                f"{gate} must announce itself first or its output is unattributable"
+            )
+
+    def test_the_announcement_is_the_form_the_driver_parses(self) -> None:
+        makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+        macro = re.search(r"^gate = @(printf .+)$", makefile, flags=re.MULTILINE)
+        assert macro is not None
+
+        printed = subprocess.run(
+            ["sh", "-c", macro.group(1).replace("$@", "lint")],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
+
+        assert gdw.GATE_ANNOUNCE.findall(printed) == ["lint"]

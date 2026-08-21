@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from github import Auth, Github, GithubIntegration
 from github.Repository import Repository
+
+LOGGER = logging.getLogger("gdw")
 
 
 class GitHubAppClient:
@@ -36,6 +39,12 @@ class GitHubAppClient:
         installation_auth = app_auth.get_installation_auth(installation.id)
         github = Github(auth=installation_auth, per_page=100)
         repository = github.get_repo(repository_name)
+        LOGGER.debug(
+            "github-app: app %s connected to %s as installation %s",
+            app_id,
+            repository_name,
+            installation.id,
+        )
         return cls(repository, github, integration)
 
     @property
@@ -69,6 +78,15 @@ class GitHubAppClient:
             "state": issue.state,
         }
 
+    def adopt_markers(self, markers: set[str]) -> None:
+        """Learn which stages another role's client already commented.
+
+        Only the client that read the issue saw its comments. Every other role
+        posts through its own app, so without this each of them repeats every
+        stage it owns on a resumed run.
+        """
+        self.markers |= markers
+
     def comment(self, number: int, body: str) -> None:
         self.repository.get_issue(number).create_comment(body)
 
@@ -81,9 +99,11 @@ class GitHubAppClient:
     ) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
         if marker in self.markers:
+            LOGGER.info("github-app: comment '%s' already posted, skipping", key)
             return
         from examples.gabriels_workflow.development_workflow import _render_comment
 
+        LOGGER.info("github-app: commenting '%s' on issue #%s", key, number)
         self.comment(number, _render_comment(marker, title, payload))
         self.markers.add(marker)
 
@@ -96,6 +116,12 @@ class GitHubAppClient:
         body: str,
         draft: bool,
     ) -> str:
+        LOGGER.info(
+            "github-app: creating %s pull request %s -> %s",
+            "draft" if draft else "ready",
+            branch,
+            base,
+        )
         pull_request = self.repository.create_pull(
             base=base,
             head=branch,

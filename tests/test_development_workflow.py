@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import runpy
 import subprocess
@@ -32,6 +33,17 @@ from examples.gabriels_workflow.config import (
 from orchestrator.schema import load_schema
 
 
+@pytest.fixture(autouse=True)
+def _isolate_workflow_logging():
+    """Keep configure_logging() calls from leaking handlers into later tests."""
+
+    logger = gdw.LOGGER
+    handlers, level = list(logger.handlers), logger.level
+    yield
+    logger.handlers = handlers
+    logger.setLevel(level)
+
+
 def _completed(
     args: list[str], returncode: int = 0, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
@@ -46,7 +58,13 @@ class ScriptedRun:
     def __call__(self, args: list[str], **kwargs):
         self.calls.append((args, kwargs))
         reply = self.replies.popleft()
-        return _completed(args, reply.returncode, reply.stdout, reply.stderr)
+        stdout, stderr = reply.stdout, reply.stderr
+        if kwargs.get("stderr") is subprocess.STDOUT:
+            merged = stdout or ""
+            if stderr:
+                merged = f"{merged}\n{stderr}" if merged else stderr
+            stdout, stderr = merged, ""
+        return _completed(args, reply.returncode, stdout, stderr)
 
 
 def _expansion(decision: str = "proceed", needs_another_round: bool = False) -> dict:
@@ -352,12 +370,19 @@ class FakeGitHub:
         self.comments: list[tuple] = []
         self.pr_calls: list[dict] = []
         self.pr_url = pr_url
+        self.markers: set[str] = set()
 
     def issue(self, number: int) -> dict:
         return {"number": number, "title": "Raw issue", "body": "Please build it"}
 
+    def adopt_markers(self, markers: set[str]) -> None:
+        self.markers |= markers
+
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
+        if key in self.markers:
+            return
         self.comments.append((number, key, title, payload))
+        self.markers.add(key)
 
     def create_pr(
         self,
@@ -478,6 +503,7 @@ def test_helpers_render_and_bound() -> None:
     assert gdw.CommandResult(1, "bad").as_json() == {
         "returncode": 1,
         "output": "bad",
+        "gates": [],
     }
 
 
@@ -516,6 +542,7 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
             _completed([], stdout="feature\n"),
             _completed([], stdout=""),
             _completed([], stdout="abc\n"),
+            _completed([], stdout="lint\n\n"),
             _completed([], stdout="out", stderr="err"),
             _completed([], stdout="file\0"),
             _completed([], stdout="new.py\0"),
@@ -530,6 +557,7 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
     assert repository.run_ci().as_json() == {
         "returncode": 0,
         "output": "out\nerr",
+        "gates": [{"name": "lint", "status": "not run", "reason": "not run"}],
     }
     repository.commit("message", "abc")
     repository.push("feature")
@@ -537,9 +565,13 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
     assert ["git", "add", "--", "file", "new.py"] in commands
     assert ["git", "commit", "-m", "message"] in commands
     assert commands[-1] == ["git", "push", "--set-upstream", "origin", "feature"]
-    ci_kwargs = runner.calls[3][1]
+    assert ["make", "--no-print-directory", "ci-gates"] in commands
+    ci_kwargs = runner.calls[4][1]
     assert ci_kwargs["timeout"] == gdw.DEFAULT_CI_TIMEOUT
     assert ci_kwargs["stdin"] == subprocess.DEVNULL
+    assert ci_kwargs["stdout"] is subprocess.PIPE
+    assert ci_kwargs["stderr"] is subprocess.STDOUT
+    assert "capture_output" not in ci_kwargs
 
     detached = gdw.GitRepository(tmp_path, ScriptedRun([_completed([], stdout="\n")]))
     with pytest.raises(gdw.WorkflowError, match="named git branch"):
@@ -1551,7 +1583,12 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
     script = Path(simple_setup.__file__).with_name("simple_development_workflow.py")
 
     monkeypatch.setattr(sys, "argv", [str(script), "42"])
-    runpy.run_path(str(script), run_name="__main__")
+    # The script has to exit with main()'s status: a stopped workflow that
+    # returns 1 through a discarded return value looks like success to the
+    # shell, cron job, or CI step that started it.
+    with pytest.raises(SystemExit) as exited:
+        runpy.run_path(str(script), run_name="__main__")
+    assert exited.value.code == 0
     assert capsys.readouterr().out.strip() == "https://example.test/pulls/new"
     assert fresh.calls == [
         "completed",
@@ -1564,7 +1601,9 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
         ("publish", {"specification": 1}, {"reviews": "approved"}),
     ]
 
-    runpy.run_path(str(script), run_name="__main__")
+    with pytest.raises(SystemExit) as resumed_exit:
+        runpy.run_path(str(script), run_name="__main__")
+    assert resumed_exit.value.code == 0
     assert capsys.readouterr().out.strip() == "https://example.test/pulls/existing"
     assert resumed.calls == ["completed"]
     assert [call.args[0] for call in prepare.call_args_list] == [42, 42]
@@ -1584,3 +1623,590 @@ def test_simple_entrypoint_defaults_to_local_workflow_config() -> None:
     assert options.config == Path(simple_entrypoint.__file__).with_name(
         "workflow.local"
     )
+
+
+def test_configure_logging_writes_one_stderr_handler_at_the_requested_level(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    gdw.configure_logging()
+    assert gdw.LOGGER.level == logging.INFO
+    assert len(gdw.LOGGER.handlers) == 1
+
+    gdw.configure_logging(verbose=True)
+    assert gdw.LOGGER.level == logging.DEBUG
+    assert len(gdw.LOGGER.handlers) == 1
+
+    gdw.LOGGER.debug("hello from the workflow")
+    captured = capsys.readouterr()
+    assert "hello from the workflow" in captured.err
+    assert captured.out == ""
+
+
+def test_outcome_digests_structured_replies_and_tail_bounds_evidence() -> None:
+    assert gdw._outcome(_grill()) == "verdict=ready, needs_another_round=False"
+    assert gdw._outcome(_implementation()) == "status=complete"
+    assert gdw._outcome({}) == "no outcome fields"
+    assert gdw._tail("a\nb\nc\nd", lines=2) == "c\nd"
+    assert gdw._tail("a\nb") == "a\nb"
+
+
+def test_workflow_logs_progress_checkpoint_reuse_and_ci_failures(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    replies = [
+        _expansion(),
+        _grill(),
+        _specification(),
+        _implementation(),
+        _implementation(),
+        _review(),
+        _review(),
+    ]
+    repository = FakeRepository(
+        [gdw.CommandResult(1, "boom\nfailing line"), gdw.CommandResult(0, "green")]
+    )
+    workflow, _github, _repository, _agents = _workflow(
+        tmp_path, replies, {"repository": repository}
+    )
+    with caplog.at_level(logging.DEBUG, logger="gdw"):
+        workflow.run()
+    messages = [record.getMessage() for record in caplog.records]
+
+    assert "workflow: issue #42, branch feature onto master, draft=True" in messages
+    assert "clarification: round 1" in messages
+    assert "clarification: converged after 1 round(s)" in messages
+    assert "stage expansion-1: asking expander" in messages
+    assert any(
+        message.startswith("stage expansion-1: expander answered in")
+        and message.endswith("(decision=proceed, needs_another_round=False)")
+        for message in messages
+    )
+    assert "ci: implementation attempt 1" in messages
+    assert any(
+        "ci: implementation failed on attempt 1 (exit 1)" in message
+        and "failing line" in message
+        for message in messages
+    )
+    assert "ci: implementation green on attempt 2" in messages
+    assert "review: round 1" in messages
+    assert "review: approved after 1 round(s)" in messages
+    assert "workflow: pull request created at https://example.test/pr/1" in messages
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        workflow.run()
+    assert "workflow: already completed, pull request https://example.test/pr/1" in [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+def test_cached_stage_logs_that_it_reused_the_checkpoint(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workflow, _github, _repository, agents = _workflow(tmp_path, [])
+    workflow.store.save("specification", _specification())
+    stage = gdw.Stage("specification", "Specification", "specifier", "specify", "s", {})
+
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        workflow._stage(stage)
+
+    assert agents.calls == []
+    assert (
+        "stage specification: reusing checkpoint from specifier (no outcome fields)"
+        in [record.getMessage() for record in caplog.records]
+    )
+
+
+def test_simple_entrypoint_reports_a_stopped_workflow_and_how_to_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def explode(issue: int, config: WorkflowConfig) -> None:
+        raise gdw.WorkflowStopped("clarification stalled")
+
+    monkeypatch.setattr(simple_entrypoint, "prepare_workflow", explode)
+    monkeypatch.setattr(
+        simple_entrypoint,
+        "load_config",
+        MagicMock(return_value=_workflow_config(repository="gabepsilva/agents-army-2")),
+    )
+
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        assert simple_entrypoint.main(["42"]) == 1
+
+    assert "workflow stopped: clarification stalled" in capsys.readouterr().err
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("clarification stalled" in message for message in messages)
+    assert (
+        "workflow: rerun the same command to resume from the last checkpoint"
+        in messages
+    )
+
+
+def test_progress_redraws_are_collapsed_out_of_ci_evidence() -> None:
+    """mutmut repaints one status line per mutant, and only the tail of the
+    output is kept: verbatim frames push the real errors out of the evidence."""
+    spinner = "\n".join(f"{glyph} 1719/1719  killed 1659" for glyph in "⠦⠧⠇⠏⠋")
+    noisy = f"ruff: would reformat orchestrator/__init__.py\n{spinner}\nError 1"
+
+    assert gdw._readable(noisy) == (
+        "ruff: would reformat orchestrator/__init__.py\n1719/1719  killed 1659\nError 1"
+    )
+    assert gdw._readable("same\rsame") == "same"
+    assert gdw._readable("keep\nboth") == "keep\nboth"
+
+
+def test_a_gate_reason_comes_from_its_own_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Separate stdout/stderr pipes dump every gate's diagnostics after the
+    last announcement. Merging the streams at spawn keeps a failing gate's
+    stderr inside its own block."""
+    monkeypatch.delenv("MAKEFLAGS", raising=False)
+    monkeypatch.delenv("MFLAGS", raising=False)
+    monkeypatch.delenv("MAKELEVEL", raising=False)
+    monkeypatch.setenv("JOBS", "1")
+    (tmp_path / "Makefile").write_text(
+        "\n".join(
+            [
+                ".PHONY: ci lint types",
+                "MAKEFLAGS += -k",
+                "ifneq ($(filter output-sync,$(.FEATURES)),)",
+                "MAKEFLAGS += --output-sync=target",
+                "endif",
+                "gate = @printf '\\n=== gate: %s ===\\n' $@",
+                "ci-gates:",
+                "\t@printf '%s\\n' lint types",
+                "lint:",
+                "\t$(gate)",
+                "\t@echo uv run ruff check",
+                "\t@echo Found 12 errors. >&2",
+                "\t@false",
+                "types:",
+                "\t$(gate)",
+                "\t@echo uv run ty check",
+                "ci: lint types",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = gdw.GitRepository(tmp_path).run_ci(timeout=30)
+
+    lint = next(gate for gate in result.gates if gate.name == "lint")
+    types = next(gate for gate in result.gates if gate.name == "types")
+    assert lint.status == "failed"
+    assert "Found 12 errors." in lint.reason
+    assert types.status == "passed"
+    assert "Found 12 errors." not in types.reason
+
+
+def test_run_ci_reports_the_readable_evidence_not_the_raw_redraws(
+    tmp_path: Path,
+) -> None:
+    frames = "\n".join(f"{glyph} working" for glyph in "⠦⠧⠇")
+    run = ScriptedRun(
+        [
+            _completed([], stdout="lint\n"),
+            _completed([], 2, stdout=f"boom\n{frames}", stderr=""),
+        ]
+    )
+    repository = gdw.GitRepository(tmp_path, run)
+
+    result = repository.run_ci()
+
+    assert result.returncode == 2
+    assert result.output == "boom\nworking"
+
+
+def test_a_blocked_stage_names_the_checkpoint_to_delete(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The blocked reply is checkpointed, so a plain resume replays it."""
+    workflow, _github, _repository, _agents = _workflow(tmp_path, [])
+    blocked = _implementation(status="blocked")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="gdw"),
+        pytest.raises(gdw.WorkflowStopped, match="CI repair blocked"),
+    ):
+        workflow._require_complete(blocked, "CI repair", "repair-implementation-2")
+
+    assert (
+        f"stage repair-implementation-2 reported itself blocked; delete "
+        f"{tmp_path / 'state' / 'artifacts' / 'repair-implementation-2.json'} "
+        f"to ask again" in [record.getMessage() for record in caplog.records]
+    )
+
+
+def test_ci_signature_ignores_run_to_run_noise_but_not_a_moved_score() -> None:
+    """`make -j` interleaves differently every run, so comparing the evidence
+    itself never reports a stall on a repair that achieved nothing."""
+    failure = (
+        "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%\n"
+        "make: *** [Makefile:85: mutation] Error 1\n"
+    )
+    noisier = f"unrelated gate chatter\n{failure}"
+    moved = failure.replace("95.4", "96.1").replace("1671", "1685")
+
+    signature = gdw._ci_signature({"returncode": 2, "output": failure})
+
+    assert signature == gdw._ci_signature({"returncode": 2, "output": noisier})
+    assert signature != gdw._ci_signature({"returncode": 2, "output": moved})
+    assert json.loads(signature) == {
+        "returncode": 2,
+        "failed_targets": ["mutation"],
+        "verdicts": [
+            "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%"
+        ],
+    }
+    assert json.loads(gdw._ci_signature({"returncode": 0})) == {
+        "returncode": 0,
+        "failed_targets": [],
+        "verdicts": [],
+    }
+
+
+def test_ci_signature_follows_gate_reasons_not_the_interleaved_log() -> None:
+    """A coverage or pytest number that moved is progress, even when the same
+    target still fails and the log around it is noise."""
+    first = {
+        "returncode": 2,
+        "output": "whatever interleaving",
+        "gates": [
+            {
+                "name": "test-coverage",
+                "status": "failed",
+                "reason": "=== 10 failed, 0 passed in 5.2s ===",
+            }
+        ],
+    }
+    moved = {
+        "returncode": 2,
+        "output": "whatever interleaving",
+        "gates": [
+            {
+                "name": "test-coverage",
+                "status": "failed",
+                "reason": "=== 1 failed, 9 passed in 5.1s ===",
+            }
+        ],
+    }
+    noisier = {
+        "returncode": 2,
+        "output": "different make -j ordering",
+        "gates": first["gates"],
+    }
+
+    assert gdw._ci_signature(first) == gdw._ci_signature(noisier)
+    assert gdw._ci_signature(first) != gdw._ci_signature(moved)
+    assert json.loads(gdw._ci_signature(first)) == {
+        "returncode": 2,
+        "failed": [
+            {
+                "name": "test-coverage",
+                "reason": "=== 10 failed, 0 passed in 5.2s ===",
+            }
+        ],
+    }
+
+
+def test_ci_signature_sees_a_moved_coverage_failure_in_the_log() -> None:
+    """When make never named its gates, the fallback still has to see the
+    numbers coverage actually prints, not a regex that never matches them."""
+    first = (
+        "error: mod.py: 90.0% is below its floor of 100.0%.\n"
+        "1 per-file coverage failure(s).\n"
+        "make: *** [Makefile:1: test-coverage] Error 1\n"
+    )
+    moved = first.replace("90.0", "96.0")
+
+    assert gdw._ci_signature({"returncode": 2, "output": first}) != gdw._ci_signature(
+        {"returncode": 2, "output": moved}
+    )
+
+
+CI_LOG = """
+=== gate: lint ===
+uv run ruff check .
+All checks passed!
+
+=== gate: types ===
+uv run ty check
+error[invalid-assignment] orchestrator/state.py:41: not assignable
+Found 3 diagnostics.
+make: *** [Makefile:88: types] Error 1
+make: *** Waiting for unfinished jobs....
+
+=== gate: mutation ===
+mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%
+make: *** [Makefile:110: mutation] Error 1
+"""
+
+
+def test_each_gate_is_reported_as_passed_failed_or_never_started() -> None:
+    """A gate that never announced itself never ran, which is not passing."""
+    gates = gdw._gate_results(("lint", "types", "mutation", "secrets"), CI_LOG)
+
+    assert [gate.as_json() for gate in gates] == [
+        {"name": "lint", "status": "passed", "reason": ""},
+        {
+            "name": "types",
+            "status": "failed",
+            "reason": (
+                "uv run ty check error[invalid-assignment] "
+                "orchestrator/state.py:41: not assignable Found 3 diagnostics."
+            ),
+        },
+        {
+            "name": "mutation",
+            "status": "failed",
+            "reason": (
+                "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) "
+                "floor 98.0%"
+            ),
+        },
+        {"name": "secrets", "status": "not run", "reason": "not run"},
+    ]
+    assert gdw._gate_checklist(gates) == [
+        "✅ lint",
+        "❌ types — uv run ty check error[invalid-assignment] "
+        "orchestrator/state.py:41: not assignable Found 3 diagnostics.",
+        "❌ mutation — mutation score 95.4% (1671 killed, 78 survived, "
+        "1751 mutants) floor 98.0%",
+        "⚪ secrets — not run",
+    ]
+
+
+def test_a_gate_the_makefile_never_advertised_is_still_reported() -> None:
+    """The advertised list is the Makefile's; a run that contradicts it is
+    evidence about the run, not a reason to drop a gate from the report."""
+    gates = gdw._gate_results((), CI_LOG)
+
+    assert [(gate.name, gate.status) for gate in gates] == [
+        ("lint", "passed"),
+        ("mutation", "failed"),
+        ("types", "failed"),
+    ]
+
+
+def test_a_failure_reason_is_a_headline_not_a_log() -> None:
+    wordy = "=== gate: lint ===\n" + " ".join(f"word{index}" for index in range(40))
+    wordy += "\nmake: *** [Makefile:1: lint] Error 1\n"
+
+    reason = gdw._gate_results(("lint",), wordy)[0].reason
+
+    assert reason.split() == [f"word{index}" for index in range(15)] + ["…"]
+
+
+def test_a_gate_that_failed_silently_says_so() -> None:
+    silent = "=== gate: secrets ===\nmake: *** [Makefile:1: secrets] Error 1\n"
+
+    assert gdw._gate_results(("secrets",), silent) == (
+        gdw.GateResult("secrets", "failed", "failed without saying anything"),
+    )
+
+
+def test_a_run_whose_gates_are_unknown_still_reports_a_verdict() -> None:
+    """An older make cannot list its gates; the run still owes the issue an
+    answer, so it reports as the one command it was."""
+    assert gdw.CommandResult(0, "green").checklist() == ["✅ make ci"]
+    assert gdw.CommandResult(2, "boom").checklist() == [
+        "❌ make ci — exit 2, no gate named itself"
+    ]
+
+
+def test_gates_are_read_from_the_whole_log_not_the_bounded_tail(
+    tmp_path: Path,
+) -> None:
+    """Only the tail of a long run is kept as evidence. Reading the gates from
+    that tail would report every early gate as never started."""
+    # Distinct lines: identical consecutive ones collapse as progress redraws.
+    filler = "\n".join(f"noise {index}" for index in range(gdw.CI_EVIDENCE_CHARS))
+    log = f"=== gate: lint ===\nok\n{filler}\n=== gate: secrets ===\nclean\n"
+    run = ScriptedRun(
+        [
+            _completed([], stdout="lint\nsecrets\n"),
+            _completed([], stdout=log, stderr=""),
+        ]
+    )
+
+    result = gdw.GitRepository(tmp_path, run).run_ci()
+
+    assert "=== gate: lint ===" not in result.output
+    assert result.checklist() == ["✅ lint", "✅ secrets"]
+
+
+def test_a_make_that_cannot_list_its_gates_does_not_stop_ci(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    run = ScriptedRun(
+        [
+            _completed([], 2, stdout="", stderr="No rule to make target 'ci-gates'"),
+            _completed([], 1, stdout="boom", stderr=""),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gdw"):
+        result = gdw.GitRepository(tmp_path, run).run_ci()
+
+    assert result.gates == ()
+    assert result.checklist() == ["❌ make ci — exit 1, no gate named itself"]
+    assert "unstarted gates will go unreported" in caplog.text
+
+
+def test_ci_posts_a_checklist_and_keeps_the_log_off_the_issue(
+    tmp_path: Path,
+) -> None:
+    """The issue gets the verdict; the evidence stays in the checkpoint and in
+    the repair agent's prompt, where it is actually read."""
+    failing = gdw.CommandResult(
+        2,
+        "uv run ruff check .\nFound 12 errors.",
+        (
+            gdw.GateResult("lint", "failed", "Found 12 errors."),
+            gdw.GateResult("mutation", "not run", "not run"),
+        ),
+    )
+    repository = FakeRepository([failing, gdw.CommandResult(0, "green")])
+    workflow, github, _repository, agents = _workflow(
+        tmp_path, [_implementation()], {"repository": repository}
+    )
+
+    workflow.stabilize(_specification())
+
+    titles = [comment[2] for comment in github.comments]
+    payloads = [comment[3] for comment in github.comments]
+    assert titles[0] == "CI checks for implementation, attempt 1"
+    assert payloads[0] == [
+        "❌ lint — Found 12 errors.",
+        "⚪ mutation — not run",
+    ]
+    assert all("uv run ruff check" not in gdw._json(payload) for payload in payloads)
+    assert "uv run ruff check ." in agents.calls[0]["values"]["FAILURE_EVIDENCE"]
+    checkpoint = json.loads(
+        (tmp_path / "state" / "artifacts" / "ci-implementation-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint["output"] == "uv run ruff check .\nFound 12 errors."
+    assert checkpoint["gates"][0]["name"] == "lint"
+
+
+def test_a_coverage_failure_that_moved_is_not_a_stall(tmp_path: Path) -> None:
+    """Two test-coverage failures that still moved (10 tests then 1; 90% then
+    96%) must not stop the repair loop as stalled."""
+    first = gdw.CommandResult(
+        2,
+        "=== 10 failed, 0 passed in 5.2s ===\n"
+        "error: mod.py: 90.0% is below its floor of 100.0%.",
+        (
+            gdw.GateResult(
+                "test-coverage",
+                "failed",
+                "=== 10 failed, 0 passed in 5.2s === error: mod.py: 90.0% is "
+                "below its floor of 100.0%.",
+            ),
+        ),
+    )
+    second = gdw.CommandResult(
+        2,
+        "=== 1 failed, 9 passed in 5.1s ===\n"
+        "error: mod.py: 96.0% is below its floor of 100.0%.",
+        (
+            gdw.GateResult(
+                "test-coverage",
+                "failed",
+                "=== 1 failed, 9 passed in 5.1s === error: mod.py: 96.0% is "
+                "below its floor of 100.0%.",
+            ),
+        ),
+    )
+    repository = FakeRepository([first, second, gdw.CommandResult(0, "green")])
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path,
+        [_implementation(), _implementation()],
+        {"repository": repository},
+    )
+
+    assert workflow.stabilize(_specification())["returncode"] == 0
+    assert len(agents.calls) == 2
+
+
+def test_a_ci_failure_that_never_moves_is_reported_as_stalled(
+    tmp_path: Path,
+) -> None:
+    """The loop this replaces ran forever: the agent reworded its repair every
+    round, so the compared state never repeated even though CI never moved."""
+    failure = (
+        "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%\n"
+        "make: *** [Makefile:85: mutation] Error 1\n"
+    )
+    repository = FakeRepository(
+        [
+            gdw.CommandResult(2, f"first ordering\n{failure}"),
+            gdw.CommandResult(2, f"second ordering, other gates chatter\n{failure}"),
+        ]
+    )
+    repairs = [
+        _implementation() | {"summary": "tightened the assertions"},
+        _implementation() | {"summary": "rewrote them again, differently"},
+    ]
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path, repairs, {"repository": repository}
+    )
+
+    with pytest.raises(gdw.WorkflowStopped, match="CI repair stalled"):
+        workflow.stabilize(_specification())
+
+    assert len(agents.calls) == 2
+
+
+def test_every_role_learns_which_stages_were_already_commented(
+    tmp_path: Path,
+) -> None:
+    """Only the client that reads the issue sees its comments. Without sharing
+    them, each other role repeats every stage it owns on a resumed run —
+    issue #22 carried two 'specification' comments because of exactly this."""
+    reader = FakeGitHub()
+    specifier_app = FakeGitHub()
+    reader.markers = {"specification", "expansion-1"}
+    workflow, _github, _repository, _agents = _workflow(
+        tmp_path,
+        [_specification()],
+        {"github": reader},
+    )
+    # The reader is itself a role client: it must not be handed its own set.
+    workflow.role_github = {"specifier": specifier_app, "implementer": reader}
+
+    workflow.load_issue()
+    workflow._stage(
+        gdw.Stage("specification", "Specification", "specifier", "specify", "s", {})
+    )
+
+    assert specifier_app.markers == {"specification", "expansion-1"}
+    assert reader.markers == {"specification", "expansion-1"}
+    assert specifier_app.comments == [], (
+        "the specifier reposted a stage already on the issue"
+    )
+
+
+def test_both_github_clients_adopt_markers(tmp_path: Path) -> None:
+    """Each client keeps its own set, so a resumed run needs both to learn."""
+    gh_cli = gdw.GitHub(
+        tmp_path,
+        "owner/repo",
+        executable=tmp_path / "gh",
+        run=ScriptedRun([]),
+    )
+    gh_cli.markers = {"already"}
+    gh_cli.adopt_markers({"expansion-1"})
+
+    app = app_github.GitHubAppClient(cast(app_github.Repository, SimpleNamespace()))
+    app.adopt_markers({"grill-1"})
+    app.adopt_markers({"grill-2"})
+
+    assert gh_cli.markers == {"already", "expansion-1"}
+    assert app.markers == {"grill-1", "grill-2"}

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from examples.gabriels_workflow.config import WorkflowConfig
 from examples.gabriels_workflow.development_workflow import (
+    LOGGER,
     AgentGateway,
     ArtifactStore,
     DevelopmentWorkflow,
@@ -22,15 +23,27 @@ def prepare_workflow(issue_number: int, config: WorkflowConfig) -> DevelopmentWo
     repository_root = Path.cwd().resolve()
 
     for command in ("git", "make", "uv", "orchestrator"):
-        if shutil.which(command) is None:
+        located = shutil.which(command)
+        if located is None:
             raise WorkflowError(f"{command} is not installed or is not on PATH")
+        LOGGER.debug("setup: %s found at %s", command, located)
 
     for backend in sorted({role.backend for role in config.roles.values()}):
-        if shutil.which(backend) is None:
+        located = shutil.which(backend)
+        if located is None:
             raise WorkflowError(
                 f"configured agent backend '{backend}' is not installed or is not on PATH"
             )
+        LOGGER.debug("setup: backend %s found at %s", backend, located)
 
+    LOGGER.info(
+        "setup: repository %s, roles %s",
+        config.repository,
+        ", ".join(
+            f"{role}={options.backend}/{options.model}/{options.reasoning_effort}"
+            for role, options in sorted(config.roles.items())
+        ),
+    )
     role_github = {
         role: GitHubAppClient.connect(
             role_config.github_app.app_id,
@@ -43,6 +56,7 @@ def prepare_workflow(issue_number: int, config: WorkflowConfig) -> DevelopmentWo
 
     store = ArtifactStore(repository_root / ".git" / "gdw" / f"issue-{issue_number}")
     repository = GitRepository(repository_root)
+    LOGGER.info("setup: connected %s GitHub App installation(s)", len(role_github))
     branch, base_sha = repository.prepare(github.default_branch, store.initialized)
     store.initialize(issue_number, branch, base_sha)
     agents = AgentGateway(

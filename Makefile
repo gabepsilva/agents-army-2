@@ -27,6 +27,26 @@ VERIFY_COVERAGE := test-coverage
 VERIFY_MUTATION := mutation
 VERIFY_SECURITY := security-static
 
+# Every gate `make ci` runs, in the order a reader wants them reported.
+# `make ci-gates` publishes this list so a driver can tell a gate that passed
+# from one that never started, and tests/test_quality_gates.py fails if it
+# drifts from what `make ci` actually builds.
+CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) $(VERIFY_MUTATION) \
+	semgrep $(VERIFY_SECURITY) secrets
+
+# Each gate names itself before its first command. Under -j the gates finish
+# interleaved, and make reports only which target failed, never which output
+# was whose; this line is what lets a log be split back into per-gate
+# verdicts. Keep it first in every gate recipe.
+gate = @printf '\n=== gate: %s ===\n' $@
+
+# Buffer each target's output and emit it in one block, so the lines under a
+# gate's announcement are that gate's own. Guarded because it arrived in GNU
+# Make 4.0 and the 3.81 that macOS ships would reject the flag outright.
+ifneq ($(filter output-sync,$(.FEATURES)),)
+MAKEFLAGS += --output-sync=target
+endif
+
 # Lines this change touches must be tested even where the file's own floor is
 # still low. Overridable so a stacked branch can compare against its base.
 DIFF_BASE ?= origin/master
@@ -39,7 +59,7 @@ RATCHET_BASE ?= origin/master
 .PHONY: format format-check lint types test test-coverage diff-coverage \
 	verify-regression mutation semgrep security-static secrets \
 	test-integrity ratchet workflows verify-quick \
-	verify-coverage verify-mutation verify-security verify ci ci-hosted \
+	verify-coverage verify-mutation verify-security verify ci ci-gates ci-hosted \
 	hooks hook-check dev
 
 # Editable installs now link the orchestrator/ and backends/ packages, so an
@@ -52,12 +72,15 @@ format:
 	uv run ruff format .
 
 format-check:
+	$(gate)
 	uv run ruff format --check .
 
 lint:
+	$(gate)
 	uv run ruff check .
 
 types:
+	$(gate)
 	uv run ty check
 
 # -n on the command line wins over the pyproject addopts default, so the job
@@ -66,6 +89,7 @@ test:
 	uv run pytest -n $(CI_JOBS)
 
 test-coverage:
+	$(gate)
 	uv run pytest -n $(CI_JOBS) --cov --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=json:coverage.json
 	uv run python tools/coverage_gate.py
 
@@ -79,20 +103,29 @@ verify-regression:
 # Without --max-children mutmut forks os.cpu_count() children, ignoring the
 # budget entirely. Its own pytest runs -n0 (see pyproject), so these children
 # are the whole of this gate's parallelism.
+# mutmut re-runs a mutant when its source changed but not when the tests did,
+# so a test-only edit is served from cache and the score never moves. Clear it
+# first when the selected tests no longer hash the same.
 mutation:
+	$(gate)
+	mkdir -p reports
+	uv run python tools/mutation_cache.py
 	uv run mutmut run --max-children $(CI_JOBS)
 	uv run mutmut export-cicd-stats
 	uv run python tools/mutation_gate.py
+	uv run python tools/mutation_cache.py --record
 
 # --network none keeps this hermetic and deterministic: no registry rule
 # packs (p/python, p/security-audit) that could change or go unreachable
 # between runs, only the pinned image and the rules committed in
 # semgrep.yml.
 semgrep:
+	$(gate)
 	mkdir -p reports
 	docker run --rm --network none --env SEMGREP_ENABLE_VERSION_CHECK=0 --env SEMGREP_SEND_METRICS=off --volume "$(CURDIR):/src:ro" --volume "$(CURDIR)/reports:/reports" --workdir /src "$(SEMGREP_IMAGE)" semgrep scan --config semgrep.yml --error --metrics=off --json-output /reports/semgrep.json
 
 security-static: semgrep
+	$(gate)
 	mkdir -p reports
 	uv run bandit --recursive --configfile pyproject.toml --format json --output reports/bandit.json --exit-zero $(PYTHON_SOURCES)
 	uv run bandit --recursive --configfile pyproject.toml --severity-level medium --confidence-level medium $(PYTHON_SOURCES)
@@ -107,15 +140,19 @@ security-static: semgrep
 	uv run pip-audit --strict --no-deps --disable-pip -r reports/requirements.txt
 
 secrets:
+	$(gate)
 	gitleaks detect --source . --log-opts="--all"
 
 test-integrity:
+	$(gate)
 	uv run python tools/test_integrity.py
 
 ratchet:
+	$(gate)
 	uv run python tools/ratchet_gate.py $(RATCHET_BASE)
 
 workflows:
+	$(gate)
 	@workflow_file="$$(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print -quit)"; \
 		test -n "$$workflow_file" || { echo "error: .github/workflows holds no YAML workflows to lint."; exit 1; }; \
 		find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -exec uv run actionlint {} +
@@ -133,6 +170,11 @@ security: security-static secrets
 verify: verify-quick verify-coverage verify-mutation
 
 ci: verify security
+
+# The gates `make ci` will attempt, one per line, for a driver that reports a
+# check per gate rather than a wall of CI output.
+ci-gates:
+	@printf '%s\n' $(CI_GATES)
 
 ci-hosted: verify verify-security
 
