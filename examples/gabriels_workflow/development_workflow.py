@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,14 +36,29 @@ CI_EVIDENCE_CHARS = 20_000
 SPINNER_FRAME = re.compile(r"^[\u2800-\u28ff]+\s*")
 # `make: *** [Makefile:85: mutation] Error 1` — which gate failed, not where.
 FAILED_TARGET = re.compile(r"^make: \*\*\* \[[^\]]*: (\S+)\] Error", re.MULTILINE)
-# The numbers a gate reports when it refuses: a score that has not moved is a
-# repair that achieved nothing, however differently the agent described it.
+# Fallback when make never named its gates: the numbers a gate prints when it
+# refuses. Structured gate reasons are preferred; this is for an older make.
 GATE_VERDICT = re.compile(
-    r"^(?:mutation score .*|.*Coverage failure.*|Found \d+ (?:error|diagnostic)s?\.)$",
+    r"^(?:mutation score .*|"
+    r".*per-file coverage failure.*|"
+    r".*Coverage failure.*|"
+    r"Found \d+ (?:error|diagnostic)s?\.|"
+    r"=+ \d+ failed,.*|"
+    r"error: \S+: [\d.]+% is below its floor of [\d.]+%\.)$",
     re.MULTILINE,
 )
+# `=== gate: lint ===`, printed by the Makefile's own `gate` macro before a
+# gate's first command. Under `make -j` this is the only thing tying a line of
+# output to the gate that wrote it.
+GATE_ANNOUNCE = re.compile(r"^=== gate: (\S+) ===$", re.MULTILINE)
+GATE_MARKS = {"passed": "✅", "failed": "❌", "not run": "⚪"}
+# A headline, not a log: the reason is there to say what broke, and the
+# evidence the repair agent works from is kept whole in the checkpoint.
+GATE_REASON_WORDS = 15
+GATE_NOT_RUN = "not run"
 DEFAULT_AGENT_TIMEOUT = 3_600
 DEFAULT_CI_TIMEOUT = 7_200
+DEFAULT_GATE_LIST_TIMEOUT = 60
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
 LOG_TAIL_LINES = 40
 LOGGER = logging.getLogger("gdw")
@@ -83,18 +98,51 @@ class WorkflowStopped(WorkflowError):
 
 
 @dataclass(frozen=True)
+class GateResult:
+    """How one CI gate ended, and in one line, why it refused."""
+
+    name: str
+    status: str
+    reason: str = ""
+
+    def as_json(self) -> dict:
+        return {"name": self.name, "status": self.status, "reason": self.reason}
+
+
+@dataclass(frozen=True)
 class CommandResult:
     """The bounded evidence retained from a subprocess."""
 
     returncode: int
     output: str
+    gates: tuple[GateResult, ...] = ()
 
     @property
     def succeeded(self) -> bool:
         return self.returncode == 0
 
+    def checklist(self) -> list[str]:
+        """One check per gate, for a reader who wants the verdict not the log.
+
+        A run whose gates could not be identified still owes that reader a
+        verdict, so it reports as the single command it actually was.
+        """
+
+        if self.gates:
+            return _gate_checklist(self.gates)
+        whole = GateResult(
+            "make ci",
+            "passed" if self.succeeded else "failed",
+            "" if self.succeeded else f"exit {self.returncode}, no gate named itself",
+        )
+        return _gate_checklist((whole,))
+
     def as_json(self) -> dict:
-        return {"returncode": self.returncode, "output": self.output}
+        return {
+            "returncode": self.returncode,
+            "output": self.output,
+            "gates": [gate.as_json() for gate in self.gates],
+        }
 
 
 class GitHubService(Protocol):
@@ -191,15 +239,10 @@ def _json(value: object) -> str:
 def _readable(text: str) -> str:
     """Collapse in-place progress redraws so the real errors survive bounding.
 
-    `make ci` runs mutmut, whose spinner repaints one status line once per
-    mutant. Kept verbatim those frames were 369 of 416 lines of a failure this
-    workflow captured, and because only the tail is retained they pushed the
-    ruff, ty and pytest messages out of the evidence entirely: the agent asked
-    to repair a failure could no longer see it.
-
-    splitlines() already breaks each carriage-return repaint onto its own
-    line, so a frame differs from the one before it only by its spinner glyph.
-    Dropping that glyph leaves consecutive duplicates, which collapse.
+    mutmut repaints one status line per mutant; kept verbatim those frames
+    push the diagnostics out of the retained tail. splitlines() already breaks
+    each carriage-return repaint onto its own line, so dropping the spinner
+    glyph leaves consecutive duplicates, which collapse.
     """
 
     kept: list[str] = []
@@ -220,12 +263,23 @@ def _tail(text: str, lines: int = LOG_TAIL_LINES) -> str:
 def _ci_signature(result: Mapping[str, object]) -> str:
     """What a CI failure is, stripped of everything that varies between runs.
 
-    `make -j` interleaves its gates differently every time, so two runs of one
-    unchanged failure differ by thousands of characters and comparing the
-    evidence itself never reports a stall. Which targets failed, and the
-    numbers they refused on, do not vary — and when those repeat, the repair
-    between them changed nothing that CI can see.
+    Compare the structured gates (failed names and their headlines), not the
+    interleaved log: two runs of one unchanged failure differ by thousands of
+    characters, and a coverage or pytest number that moved is progress even
+    when the same target still fails. When make never named its gates, fall
+    back to the error lines and verdicts still sitting in the log.
     """
+
+    raw_gates = result.get("gates")
+    failed: list[dict[str, object]] = []
+    if isinstance(raw_gates, Sequence) and not isinstance(raw_gates, (str, bytes)):
+        for gate in raw_gates:
+            if isinstance(gate, Mapping) and gate.get("status") == "failed":
+                failed.append(
+                    {"name": gate.get("name"), "reason": gate.get("reason", "")}
+                )
+    if failed:
+        return _json({"returncode": result.get("returncode"), "failed": failed})
 
     output = str(result.get("output", ""))
     return _json(
@@ -235,6 +289,81 @@ def _ci_signature(result: Mapping[str, object]) -> str:
             "verdicts": sorted(set(GATE_VERDICT.findall(output))),
         }
     )
+
+
+def _gate_blocks(output: str) -> dict[str, str]:
+    """The output each gate produced, split apart at the gates' own headers."""
+
+    blocks: dict[str, str] = {}
+    headers = list(GATE_ANNOUNCE.finditer(output))
+    for index, header in enumerate(headers):
+        following = (
+            headers[index + 1].start() if index + 1 < len(headers) else len(output)
+        )
+        name = header.group(1)
+        blocks[name] = blocks.get(name, "") + output[header.end() : following]
+    return blocks
+
+
+def _gate_reason(block: str) -> str:
+    """The last thing a failing gate said, cut down to a headline.
+
+    Read backwards, because a gate states its verdict last, but take whole
+    lines until there are enough words to say something: the very last line is
+    often the advice that follows the failure rather than the failure itself.
+    make's own `*** [Error]` bookkeeping is skipped — it says nothing a reader
+    cannot already see from the red cross.
+    """
+
+    tail: list[str] = []
+    spoken = 0
+    for line in reversed(block.splitlines()):
+        words = line.split()
+        if not words or words[0].startswith("make"):
+            continue
+        tail.append(line.strip())
+        spoken += len(words)
+        if spoken >= GATE_REASON_WORDS:
+            break
+    if not tail:
+        return "failed without saying anything"
+    reason = " ".join(reversed(tail)).split()
+    if len(reason) <= GATE_REASON_WORDS:
+        return " ".join(reason)
+    return " ".join(reason[:GATE_REASON_WORDS]) + " …"
+
+
+def _gate_results(expected: Sequence[str], output: str) -> tuple[GateResult, ...]:
+    """Read each gate's verdict back out of one interleaved CI log.
+
+    A gate that announced itself and was never reported as failing passed:
+    make waits for its running jobs before giving up, so a gate that started
+    also finished. One that never announced never started, which is a
+    different thing from passing and is reported as such.
+    """
+
+    blocks = _gate_blocks(output)
+    failed = set(FAILED_TARGET.findall(output))
+    surprises = sorted((set(blocks) | failed).difference(expected))
+    results = []
+    for name in [*expected, *surprises]:
+        if name in failed:
+            results.append(
+                GateResult(name, "failed", _gate_reason(blocks.get(name, "")))
+            )
+        elif name in blocks:
+            results.append(GateResult(name, "passed"))
+        else:
+            results.append(GateResult(name, GATE_NOT_RUN, GATE_NOT_RUN))
+    return tuple(results)
+
+
+def _gate_checklist(gates: Sequence[GateResult]) -> list[str]:
+    return [
+        f"{GATE_MARKS[gate.status]} {gate.name}"
+        + (f" — {gate.reason}" if gate.reason else "")
+        for gate in gates
+    ]
 
 
 def _outcome(result: Mapping[str, object]) -> str:
@@ -406,19 +535,48 @@ class GitRepository:
         )
         return branch, head
 
-    def run_ci(self, timeout: int = DEFAULT_CI_TIMEOUT) -> CommandResult:
-        LOGGER.info("ci: running 'make ci' in %s (timeout %ss)", self.root, timeout)
-        started = time.monotonic()
+    def ci_gates(self) -> tuple[str, ...]:
+        """The gates `make ci` will attempt, named by the Makefile itself.
+
+        Asked before the run, so a gate that never started can be told apart
+        from one that passed. A make too old to answer costs the checklist its
+        unstarted gates, never its verdicts, so the run goes ahead regardless.
+        """
+
         proc = self._run_process(
-            ["make", "ci"],
+            ["make", "--no-print-directory", "ci-gates"],
             cwd=str(self.root),
             capture_output=True,
             text=True,
             check=False,
             stdin=subprocess.DEVNULL,
+            timeout=DEFAULT_GATE_LIST_TIMEOUT,
+        )
+        if proc.returncode != 0:
+            LOGGER.warning(
+                "ci: 'make ci-gates' exited %s; unstarted gates will go unreported",
+                proc.returncode,
+            )
+            return ()
+        gates = tuple(line.strip() for line in proc.stdout.splitlines() if line.strip())
+        LOGGER.info("ci: %s gate(s) expected: %s", len(gates), ", ".join(gates))
+        return gates
+
+    def run_ci(self, timeout: int = DEFAULT_CI_TIMEOUT) -> CommandResult:
+        LOGGER.info("ci: running 'make ci' in %s (timeout %ss)", self.root, timeout)
+        expected = self.ci_gates()
+        started = time.monotonic()
+        proc = self._run_process(
+            ["make", "ci"],
+            cwd=str(self.root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
             timeout=timeout,
         )
-        combined = f"{proc.stdout}\n{proc.stderr}".strip()
+        combined = (proc.stdout or "").strip()
         evidence = _readable(combined)
         LOGGER.info(
             "ci: 'make ci' exited %s after %.1fs with %s chars of output "
@@ -428,7 +586,13 @@ class GitRepository:
             len(combined),
             len(evidence),
         )
-        return CommandResult(proc.returncode, _bounded(evidence))
+        gates = _gate_results(expected, evidence)
+        LOGGER.info(
+            "ci: %s",
+            ", ".join(f"{gate.name}={gate.status}" for gate in gates)
+            or "no gates seen",
+        )
+        return CommandResult(proc.returncode, _bounded(evidence), gates)
 
     def commit(self, message: str, base_sha: str) -> None:
         tracked = self._call("diff", "--no-renames", "--name-only", "-z", "HEAD").split(
@@ -966,11 +1130,13 @@ class DevelopmentWorkflow:
             ci = self.repository.run_ci()
             result = ci.as_json()
             self.store.save(key, result)
+            # The log itself stays local: it is checkpointed and handed to the
+            # repair agent, while the issue gets the verdict it can act on.
             self.github.comment_once(
                 self.issue_number,
                 key,
-                f"CI result for {prefix}, attempt {attempt}",
-                result,
+                f"CI checks for {prefix}, attempt {attempt}",
+                ci.checklist(),
             )
             if result["returncode"] == 0:
                 LOGGER.info("ci: %s green on attempt %s", prefix, attempt)

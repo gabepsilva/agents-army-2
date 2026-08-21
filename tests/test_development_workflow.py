@@ -58,7 +58,13 @@ class ScriptedRun:
     def __call__(self, args: list[str], **kwargs):
         self.calls.append((args, kwargs))
         reply = self.replies.popleft()
-        return _completed(args, reply.returncode, reply.stdout, reply.stderr)
+        stdout, stderr = reply.stdout, reply.stderr
+        if kwargs.get("stderr") is subprocess.STDOUT:
+            merged = stdout or ""
+            if stderr:
+                merged = f"{merged}\n{stderr}" if merged else stderr
+            stdout, stderr = merged, ""
+        return _completed(args, reply.returncode, stdout, stderr)
 
 
 def _expansion(decision: str = "proceed", needs_another_round: bool = False) -> dict:
@@ -497,6 +503,7 @@ def test_helpers_render_and_bound() -> None:
     assert gdw.CommandResult(1, "bad").as_json() == {
         "returncode": 1,
         "output": "bad",
+        "gates": [],
     }
 
 
@@ -535,6 +542,7 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
             _completed([], stdout="feature\n"),
             _completed([], stdout=""),
             _completed([], stdout="abc\n"),
+            _completed([], stdout="lint\n\n"),
             _completed([], stdout="out", stderr="err"),
             _completed([], stdout="file\0"),
             _completed([], stdout="new.py\0"),
@@ -549,6 +557,7 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
     assert repository.run_ci().as_json() == {
         "returncode": 0,
         "output": "out\nerr",
+        "gates": [{"name": "lint", "status": "not run", "reason": "not run"}],
     }
     repository.commit("message", "abc")
     repository.push("feature")
@@ -556,9 +565,13 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
     assert ["git", "add", "--", "file", "new.py"] in commands
     assert ["git", "commit", "-m", "message"] in commands
     assert commands[-1] == ["git", "push", "--set-upstream", "origin", "feature"]
-    ci_kwargs = runner.calls[3][1]
+    assert ["make", "--no-print-directory", "ci-gates"] in commands
+    ci_kwargs = runner.calls[4][1]
     assert ci_kwargs["timeout"] == gdw.DEFAULT_CI_TIMEOUT
     assert ci_kwargs["stdin"] == subprocess.DEVNULL
+    assert ci_kwargs["stdout"] is subprocess.PIPE
+    assert ci_kwargs["stderr"] is subprocess.STDOUT
+    assert "capture_output" not in ci_kwargs
 
     detached = gdw.GitRepository(tmp_path, ScriptedRun([_completed([], stdout="\n")]))
     with pytest.raises(gdw.WorkflowError, match="named git branch"):
@@ -1744,11 +1757,62 @@ def test_progress_redraws_are_collapsed_out_of_ci_evidence() -> None:
     assert gdw._readable("keep\nboth") == "keep\nboth"
 
 
+def test_a_gate_reason_comes_from_its_own_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Separate stdout/stderr pipes dump every gate's diagnostics after the
+    last announcement. Merging the streams at spawn keeps a failing gate's
+    stderr inside its own block."""
+    monkeypatch.delenv("MAKEFLAGS", raising=False)
+    monkeypatch.delenv("MFLAGS", raising=False)
+    monkeypatch.delenv("MAKELEVEL", raising=False)
+    monkeypatch.setenv("JOBS", "1")
+    (tmp_path / "Makefile").write_text(
+        "\n".join(
+            [
+                ".PHONY: ci lint types",
+                "MAKEFLAGS += -k",
+                "ifneq ($(filter output-sync,$(.FEATURES)),)",
+                "MAKEFLAGS += --output-sync=target",
+                "endif",
+                "gate = @printf '\\n=== gate: %s ===\\n' $@",
+                "ci-gates:",
+                "\t@printf '%s\\n' lint types",
+                "lint:",
+                "\t$(gate)",
+                "\t@echo uv run ruff check",
+                "\t@echo Found 12 errors. >&2",
+                "\t@false",
+                "types:",
+                "\t$(gate)",
+                "\t@echo uv run ty check",
+                "ci: lint types",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = gdw.GitRepository(tmp_path).run_ci(timeout=30)
+
+    lint = next(gate for gate in result.gates if gate.name == "lint")
+    types = next(gate for gate in result.gates if gate.name == "types")
+    assert lint.status == "failed"
+    assert "Found 12 errors." in lint.reason
+    assert types.status == "passed"
+    assert "Found 12 errors." not in types.reason
+
+
 def test_run_ci_reports_the_readable_evidence_not_the_raw_redraws(
     tmp_path: Path,
 ) -> None:
     frames = "\n".join(f"{glyph} working" for glyph in "⠦⠧⠇")
-    run = ScriptedRun([_completed([], 2, stdout=f"boom\n{frames}", stderr="")])
+    run = ScriptedRun(
+        [
+            _completed([], stdout="lint\n"),
+            _completed([], 2, stdout=f"boom\n{frames}", stderr=""),
+        ]
+    )
     repository = gdw.GitRepository(tmp_path, run)
 
     result = repository.run_ci()
@@ -1803,6 +1867,272 @@ def test_ci_signature_ignores_run_to_run_noise_but_not_a_moved_score() -> None:
         "failed_targets": [],
         "verdicts": [],
     }
+
+
+def test_ci_signature_follows_gate_reasons_not_the_interleaved_log() -> None:
+    """A coverage or pytest number that moved is progress, even when the same
+    target still fails and the log around it is noise."""
+    first = {
+        "returncode": 2,
+        "output": "whatever interleaving",
+        "gates": [
+            {
+                "name": "test-coverage",
+                "status": "failed",
+                "reason": "=== 10 failed, 0 passed in 5.2s ===",
+            }
+        ],
+    }
+    moved = {
+        "returncode": 2,
+        "output": "whatever interleaving",
+        "gates": [
+            {
+                "name": "test-coverage",
+                "status": "failed",
+                "reason": "=== 1 failed, 9 passed in 5.1s ===",
+            }
+        ],
+    }
+    noisier = {
+        "returncode": 2,
+        "output": "different make -j ordering",
+        "gates": first["gates"],
+    }
+
+    assert gdw._ci_signature(first) == gdw._ci_signature(noisier)
+    assert gdw._ci_signature(first) != gdw._ci_signature(moved)
+    assert json.loads(gdw._ci_signature(first)) == {
+        "returncode": 2,
+        "failed": [
+            {
+                "name": "test-coverage",
+                "reason": "=== 10 failed, 0 passed in 5.2s ===",
+            }
+        ],
+    }
+
+
+def test_ci_signature_sees_a_moved_coverage_failure_in_the_log() -> None:
+    """When make never named its gates, the fallback still has to see the
+    numbers coverage actually prints, not a regex that never matches them."""
+    first = (
+        "error: mod.py: 90.0% is below its floor of 100.0%.\n"
+        "1 per-file coverage failure(s).\n"
+        "make: *** [Makefile:1: test-coverage] Error 1\n"
+    )
+    moved = first.replace("90.0", "96.0")
+
+    assert gdw._ci_signature({"returncode": 2, "output": first}) != gdw._ci_signature(
+        {"returncode": 2, "output": moved}
+    )
+
+
+CI_LOG = """
+=== gate: lint ===
+uv run ruff check .
+All checks passed!
+
+=== gate: types ===
+uv run ty check
+error[invalid-assignment] orchestrator/state.py:41: not assignable
+Found 3 diagnostics.
+make: *** [Makefile:88: types] Error 1
+make: *** Waiting for unfinished jobs....
+
+=== gate: mutation ===
+mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%
+make: *** [Makefile:110: mutation] Error 1
+"""
+
+
+def test_each_gate_is_reported_as_passed_failed_or_never_started() -> None:
+    """A gate that never announced itself never ran, which is not passing."""
+    gates = gdw._gate_results(("lint", "types", "mutation", "secrets"), CI_LOG)
+
+    assert [gate.as_json() for gate in gates] == [
+        {"name": "lint", "status": "passed", "reason": ""},
+        {
+            "name": "types",
+            "status": "failed",
+            "reason": (
+                "uv run ty check error[invalid-assignment] "
+                "orchestrator/state.py:41: not assignable Found 3 diagnostics."
+            ),
+        },
+        {
+            "name": "mutation",
+            "status": "failed",
+            "reason": (
+                "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) "
+                "floor 98.0%"
+            ),
+        },
+        {"name": "secrets", "status": "not run", "reason": "not run"},
+    ]
+    assert gdw._gate_checklist(gates) == [
+        "✅ lint",
+        "❌ types — uv run ty check error[invalid-assignment] "
+        "orchestrator/state.py:41: not assignable Found 3 diagnostics.",
+        "❌ mutation — mutation score 95.4% (1671 killed, 78 survived, "
+        "1751 mutants) floor 98.0%",
+        "⚪ secrets — not run",
+    ]
+
+
+def test_a_gate_the_makefile_never_advertised_is_still_reported() -> None:
+    """The advertised list is the Makefile's; a run that contradicts it is
+    evidence about the run, not a reason to drop a gate from the report."""
+    gates = gdw._gate_results((), CI_LOG)
+
+    assert [(gate.name, gate.status) for gate in gates] == [
+        ("lint", "passed"),
+        ("mutation", "failed"),
+        ("types", "failed"),
+    ]
+
+
+def test_a_failure_reason_is_a_headline_not_a_log() -> None:
+    wordy = "=== gate: lint ===\n" + " ".join(f"word{index}" for index in range(40))
+    wordy += "\nmake: *** [Makefile:1: lint] Error 1\n"
+
+    reason = gdw._gate_results(("lint",), wordy)[0].reason
+
+    assert reason.split() == [f"word{index}" for index in range(15)] + ["…"]
+
+
+def test_a_gate_that_failed_silently_says_so() -> None:
+    silent = "=== gate: secrets ===\nmake: *** [Makefile:1: secrets] Error 1\n"
+
+    assert gdw._gate_results(("secrets",), silent) == (
+        gdw.GateResult("secrets", "failed", "failed without saying anything"),
+    )
+
+
+def test_a_run_whose_gates_are_unknown_still_reports_a_verdict() -> None:
+    """An older make cannot list its gates; the run still owes the issue an
+    answer, so it reports as the one command it was."""
+    assert gdw.CommandResult(0, "green").checklist() == ["✅ make ci"]
+    assert gdw.CommandResult(2, "boom").checklist() == [
+        "❌ make ci — exit 2, no gate named itself"
+    ]
+
+
+def test_gates_are_read_from_the_whole_log_not_the_bounded_tail(
+    tmp_path: Path,
+) -> None:
+    """Only the tail of a long run is kept as evidence. Reading the gates from
+    that tail would report every early gate as never started."""
+    # Distinct lines: identical consecutive ones collapse as progress redraws.
+    filler = "\n".join(f"noise {index}" for index in range(gdw.CI_EVIDENCE_CHARS))
+    log = f"=== gate: lint ===\nok\n{filler}\n=== gate: secrets ===\nclean\n"
+    run = ScriptedRun(
+        [
+            _completed([], stdout="lint\nsecrets\n"),
+            _completed([], stdout=log, stderr=""),
+        ]
+    )
+
+    result = gdw.GitRepository(tmp_path, run).run_ci()
+
+    assert "=== gate: lint ===" not in result.output
+    assert result.checklist() == ["✅ lint", "✅ secrets"]
+
+
+def test_a_make_that_cannot_list_its_gates_does_not_stop_ci(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    run = ScriptedRun(
+        [
+            _completed([], 2, stdout="", stderr="No rule to make target 'ci-gates'"),
+            _completed([], 1, stdout="boom", stderr=""),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gdw"):
+        result = gdw.GitRepository(tmp_path, run).run_ci()
+
+    assert result.gates == ()
+    assert result.checklist() == ["❌ make ci — exit 1, no gate named itself"]
+    assert "unstarted gates will go unreported" in caplog.text
+
+
+def test_ci_posts_a_checklist_and_keeps_the_log_off_the_issue(
+    tmp_path: Path,
+) -> None:
+    """The issue gets the verdict; the evidence stays in the checkpoint and in
+    the repair agent's prompt, where it is actually read."""
+    failing = gdw.CommandResult(
+        2,
+        "uv run ruff check .\nFound 12 errors.",
+        (
+            gdw.GateResult("lint", "failed", "Found 12 errors."),
+            gdw.GateResult("mutation", "not run", "not run"),
+        ),
+    )
+    repository = FakeRepository([failing, gdw.CommandResult(0, "green")])
+    workflow, github, _repository, agents = _workflow(
+        tmp_path, [_implementation()], {"repository": repository}
+    )
+
+    workflow.stabilize(_specification())
+
+    titles = [comment[2] for comment in github.comments]
+    payloads = [comment[3] for comment in github.comments]
+    assert titles[0] == "CI checks for implementation, attempt 1"
+    assert payloads[0] == [
+        "❌ lint — Found 12 errors.",
+        "⚪ mutation — not run",
+    ]
+    assert all("uv run ruff check" not in gdw._json(payload) for payload in payloads)
+    assert "uv run ruff check ." in agents.calls[0]["values"]["FAILURE_EVIDENCE"]
+    checkpoint = json.loads(
+        (tmp_path / "state" / "artifacts" / "ci-implementation-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint["output"] == "uv run ruff check .\nFound 12 errors."
+    assert checkpoint["gates"][0]["name"] == "lint"
+
+
+def test_a_coverage_failure_that_moved_is_not_a_stall(tmp_path: Path) -> None:
+    """Two test-coverage failures that still moved (10 tests then 1; 90% then
+    96%) must not stop the repair loop as stalled."""
+    first = gdw.CommandResult(
+        2,
+        "=== 10 failed, 0 passed in 5.2s ===\n"
+        "error: mod.py: 90.0% is below its floor of 100.0%.",
+        (
+            gdw.GateResult(
+                "test-coverage",
+                "failed",
+                "=== 10 failed, 0 passed in 5.2s === error: mod.py: 90.0% is "
+                "below its floor of 100.0%.",
+            ),
+        ),
+    )
+    second = gdw.CommandResult(
+        2,
+        "=== 1 failed, 9 passed in 5.1s ===\n"
+        "error: mod.py: 96.0% is below its floor of 100.0%.",
+        (
+            gdw.GateResult(
+                "test-coverage",
+                "failed",
+                "=== 1 failed, 9 passed in 5.1s === error: mod.py: 96.0% is "
+                "below its floor of 100.0%.",
+            ),
+        ),
+    )
+    repository = FakeRepository([first, second, gdw.CommandResult(0, "green")])
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path,
+        [_implementation(), _implementation()],
+        {"repository": repository},
+    )
+
+    assert workflow.stabilize(_specification())["returncode"] == 0
+    assert len(agents.calls) == 2
 
 
 def test_a_ci_failure_that_never_moves_is_reported_as_stalled(

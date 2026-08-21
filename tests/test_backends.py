@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -2591,7 +2592,16 @@ class TestCLI:
         assert orchestrator.NAME_SEPARATORS == (" ", "-")
 
     def test_dependency_floor_matches_the_packaged_requires_python(self) -> None:
-        assert orchestrator.MIN_PYTHON == (3, 11)
+        required = tomllib.loads(
+            Path(__file__)
+            .resolve()
+            .parents[1]
+            .joinpath("pyproject.toml")
+            .read_text(encoding="utf-8")
+        )["project"]["requires-python"]
+        parsed = re.fullmatch(r">=(\d+)\.(\d+)", required)
+        assert parsed is not None, required
+        assert tuple(int(part) for part in parsed.groups()) == orchestrator.MIN_PYTHON
 
     def test_only_jq_is_optional(self) -> None:
         assert orchestrator.DEPENDENCY_TOOLS == (

@@ -7,6 +7,7 @@ gate a known-bad input and assert the failure message.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ import tools.mutation_cache as mutation_cache
 import tools.mutation_gate as mutation_gate
 import tools.ratchet_gate as ratchet_gate
 import tools.test_integrity as test_integrity
+from examples.gabriels_workflow import development_workflow as gdw
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -765,3 +767,65 @@ class TestMutationCache:
 
         assert "tools/mutation_cache.py" in mutation
         assert mutation.index("tools/mutation_cache.py") < mutation.index("mutmut run")
+
+
+class TestCiGateAnnouncements:
+    """The driver reports one check per gate by reading a single interleaved
+    `make ci` log back apart. That only works while every gate announces
+    itself, in the form the driver parses, and while the list `make ci-gates`
+    publishes is the list `make ci` actually builds — a gate missing from it
+    would be reported as never started on every run.
+    """
+
+    def _make(self, *args: str) -> str:
+        env = os.environ.copy()
+        env.pop("MAKEFLAGS", None)
+        env.pop("MFLAGS", None)
+        env.pop("MAKELEVEL", None)
+        env["JOBS"] = "1"
+        proc = subprocess.run(
+            ["make", "--no-print-directory", "-j1", *args],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+        )
+        return proc.stdout
+
+    def test_the_advertised_gates_are_the_ones_ci_runs(self) -> None:
+        advertised = self._make("ci-gates").split()
+        announced = re.findall(
+            r"^printf '.*=== gate: %s ===.*' (\S+)$",
+            self._make("--dry-run", "ci"),
+            flags=re.MULTILINE,
+        )
+
+        assert advertised == announced
+        assert "mutation" in advertised
+
+    def test_every_gate_announces_itself_before_its_first_command(self) -> None:
+        makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+
+        for gate in self._make("ci-gates").split():
+            recipe = makefile.partition(f"\n{gate}:")[2]
+            assert recipe, f"{gate} has no recipe in the Makefile"
+            assert recipe.partition("\n")[2].partition("\n")[0] == "\t$(gate)", (
+                f"{gate} must announce itself first or its output is unattributable"
+            )
+
+    def test_the_announcement_is_the_form_the_driver_parses(self) -> None:
+        makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+        macro = re.search(r"^gate = @(printf .+)$", makefile, flags=re.MULTILINE)
+        assert macro is not None
+
+        printed = subprocess.run(
+            ["sh", "-c", macro.group(1).replace("$@", "lint")],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
+
+        assert gdw.GATE_ANNOUNCE.findall(printed) == ["lint"]

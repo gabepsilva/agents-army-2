@@ -2,23 +2,17 @@
 """Drop mutmut's cache when the tests that judge its mutants have changed.
 
 mutmut re-runs a mutant when the mutated source changes, but not when the
-tests do: on 2026-08-21 a run against edited tests returned in 8 seconds
-reporting 1751/1751 already complete, while deleting `mutants/` and re-running
-took 83 seconds and produced a different score. A stale score is worse than a
-slow one here, because a mutation score exists to answer whether the tests
-would notice a defect — so the one edit that must invalidate it is an edit to
-those tests, and that is exactly the edit mutmut ignores.
+tests do. A stale score is worse than a slow one: a mutation score exists to
+answer whether the tests would notice a defect, so the one edit that must
+invalidate it is an edit to those tests.
 
 The selected tests are hashed and the digest kept beside the cache. A digest
 that no longer matches means the cached verdicts were reached by a different
-suite, so the cache is removed and mutmut measures again. An unchanged digest
-keeps the fast path.
+suite, so the cache is removed and mutmut measures again.
 
-The digest is recorded only by `--record`, which the Makefile runs *after*
+The digest is recorded only by `--record`, which the Makefile runs after
 mutmut has measured. Writing it up front would mark a suite as measured before
-anything measured it: any other invocation — a developer's, or an agent's
-mid-edit — would stamp the digest, and the next run would reuse a cache no
-mutmut pass had ever validated against those tests.
+anything measured it.
 """
 
 from __future__ import annotations

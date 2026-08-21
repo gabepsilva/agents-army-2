@@ -63,7 +63,16 @@ must be configured explicitly.
 
 Each stage result is commented through that stage role's GitHub App. The
 implementer app also loads the issue, posts workflow-level status, and creates
-the pull request. Install all six apps on the configured repository with the
+the pull request.
+
+CI is reported as a checklist rather than a log: one ✅, ❌ or ⚪ per gate that
+`make ci` runs, a failing gate carrying a one-line reason. The gate list comes
+from `make ci-gates`, and a gate that never started when an earlier one failed
+is marked as such instead of being reported as passing. The full CI output
+stays out of the issue — it is checkpointed under `.git/gdw/` and handed to
+the repair agent, which is what actually reads it.
+
+Install all six apps on the configured repository with the
 permissions required for issues, pull requests, and repository contents.
 
 Private keys are accepted directly as YAML strings, including `|` multiline
