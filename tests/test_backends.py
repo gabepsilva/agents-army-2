@@ -2739,7 +2739,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """`talk <new-name>` is a spawn plus a turn, not an error."""
+        """`talk <new-name>` creates it and runs the turn, not an error."""
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         main(["talk", "nope", "hi"])
@@ -2747,7 +2747,7 @@ class TestCLI:
         assert captured.err == "created agent 'nope' backend=echo\n"
         assert "echo:hi" in captured.out
 
-    def test_main_duplicate_spawn_is_one_line(
+    def test_main_duplicate_create_is_one_line(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
