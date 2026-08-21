@@ -87,6 +87,17 @@ class GitHubAppClient:
         """
         self.markers |= markers
 
+    def collect_markers(self, number: int) -> None:
+        """Union gdw markers from comments on this issue or pull request."""
+
+        issue = self.repository.get_issue(number)
+        self.markers |= {
+            line
+            for comment in issue.get_comments()
+            for line in (comment.body or "").splitlines()
+            if line.startswith("<!-- gdw:")
+        }
+
     def comment(self, number: int, body: str) -> None:
         self.repository.get_issue(number).create_comment(body)
 
@@ -103,7 +114,7 @@ class GitHubAppClient:
             return
         from examples.gabriels_workflow.development_workflow import _render_comment
 
-        LOGGER.info("github-app: commenting '%s' on issue #%s", key, number)
+        LOGGER.info("github-app: commenting '%s' on #%s", key, number)
         self.comment(number, _render_comment(marker, title, payload))
         self.markers.add(marker)
 
@@ -130,6 +141,10 @@ class GitHubAppClient:
             draft=draft,
         )
         return pull_request.html_url
+
+    def update_pr(self, number: int, *, body: str) -> None:
+        LOGGER.info("github-app: updating pull request #%s", number)
+        self.repository.get_pull(number).edit(body=body)
 
     def close(self) -> None:
         if self.github is not None:

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Turn one GitHub issue into a reviewed draft pull request."""
+"""Turn one GitHub issue into a reviewed draft pull request.
+
+The issue conversation ends at the specification. After that, bot comments
+belong on the pull request the implementer opens.
+"""
 
 import argparse
 import sys
@@ -50,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             issue = workflow.load_issue()
             proposal = workflow.clarify(issue)
             specification = workflow.specify(issue, proposal)
+            workflow.open_pull_request(specification)
             workflow.implement(specification)
             passing_ci = workflow.stabilize(specification)
             approvals = workflow.review(specification, passing_ci)
