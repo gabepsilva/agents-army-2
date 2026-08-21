@@ -2,7 +2,7 @@
 
 A CLI that manages a fleet of coding-agent CLI sessions (Claude Code, Codex, ...).
 Each agent is a named, persistent conversation backed by a real CLI session, so
-you can spawn many agents and talk to each one independently, resuming its
+you can create many agents and talk to each one independently, resuming its
 session every time.
 
 ## Requirements
@@ -31,17 +31,17 @@ the reply, so each agent remembers its own conversation history.
 
 ```sh
 # Create a new agent backed by a Claude Code session (default backend)
-uv run orchestrator spawn reviewer -b claude
+uv run orchestrator create reviewer -b claude
 
 # Create an agent backed by a Codex session
-uv run orchestrator spawn dev -b codex
+uv run orchestrator create dev -b codex
 
 # Create an agent backed by a Grok session
-uv run orchestrator spawn builder -b grok
+uv run orchestrator create builder -b grok
 
-# Idempotently create or verify an agent with an exact configuration
-uv run orchestrator ensure reviewer -b codex --model gpt-5 \
-  --reasoning-effort high
+# Create or verify an agent's configuration as part of a turn
+uv run orchestrator talk -b codex --model gpt-5 --reasoning-effort high \
+  reviewer "what did we decide about issue #23?"
 
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer "what did we decide about issue #23?"
@@ -173,8 +173,8 @@ unaffected. Two things worth knowing:
 ### Example
 
 ```sh
-uv run orchestrator spawn reviewer -b claude
-# spawned agent 'reviewer' backend=claude
+uv run orchestrator create reviewer -b claude
+# created agent 'reviewer' backend=claude
 
 uv run orchestrator talk reviewer "reply with only: first"
 # [reviewer session=22f8bfee-...]
@@ -187,10 +187,11 @@ uv run orchestrator talk reviewer "what did you just reply?"
 
 ### Backends
 
-Each agent is bound to one backend, chosen at `spawn` or `ensure` time with
-`-b`/`--backend`. Both commands also accept `--model` and
-`--reasoning-effort`. `ensure` creates a missing agent and otherwise verifies
-that the existing agent has exactly the requested backend/model/effort.
+Each agent is bound to one backend, model, and reasoning effort at first use,
+whether that is `create` or the first turn that names those values. Later turns
+that pass any of `-b`/`--backend`, `--model`, or `--reasoning-effort` assert the
+agent's exact configuration and fail on a mismatch. A turn with no config flags
+silently reuses the stored configuration.
 Currently available: `claude`, `codex`, `grok`.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
@@ -235,14 +236,14 @@ The entire registry lives in one JSON file, `orchestrator_state.json`:
 ```
 
 It persists every agent's name, backend, and session id, so any process can
-`talk` to an agent spawned earlier and resume its CLI session. No per-agent
+`talk` to an agent created earlier and resume its CLI session. No per-agent
 folders or session files are written.
 
 The file lives next to where you run the CLI (the working directory), so the
 state never leaks into the venv. To relocate it, set `AGENTS_ARMY_HOME`:
 
 ```sh
-AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator spawn dev -b claude
+AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
 ```
 
 To relocate only the registry file while leaving the backend working directory
@@ -262,7 +263,7 @@ backends/          # AgentBackend interface + implementations (claude, codex, gr
   codex.py         # CodexBackend (resumes via codex exec resume)
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator/      # the orchestrator CLI (spawn / talk / list / delete)
+orchestrator/      # the orchestrator CLI (create / talk / list / delete)
   schema.py        # --validate-schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite

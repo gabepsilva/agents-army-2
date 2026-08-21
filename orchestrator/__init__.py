@@ -55,7 +55,7 @@ STATE_FILE = Path(
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
 SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", HOME / "SKILLS"))
-# The backend an agent gets when none is named: by `spawn`, and by the agent a
+# The backend an agent gets when none is named: by `create`, and by the agent a
 # talk creates for a name that does not exist yet.
 DEFAULT_BACKEND = "claude"
 
@@ -428,21 +428,25 @@ class Orchestrator:
 def _agent_config_parser(prog: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name")
-    # No argparse default: leaving this None lets spawn() resolve
+    _add_agent_config_options(parser)
+    return parser
+
+
+def _add_agent_config_options(parser: argparse.ArgumentParser) -> None:
+    # No argparse default: leaving this None lets create() and ensure() resolve
     # DEFAULT_BACKEND, which is what that constant documents itself as. A
-    # literal here would pin spawn to claude however DEFAULT_BACKEND changed.
+    # literal here would pin them to claude however DEFAULT_BACKEND changed.
     parser.add_argument("--backend", "-b", choices=list_backends())
     parser.add_argument("--model")
     parser.add_argument("--reasoning-effort")
-    return parser
 
 
 def _agent_config(agent: Agent) -> tuple[str, str | None, str | None]:
     return agent.backend.name, agent.backend.model, agent.backend.reasoning_effort
 
 
-def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = _agent_config_parser("spawn")
+def cmd_create(orchestrator: Orchestrator, args: list[str]) -> None:
+    parser = _agent_config_parser("create")
     opts = parser.parse_args(args)
     agent = orchestrator.spawn(
         opts.name,
@@ -450,19 +454,40 @@ def cmd_spawn(orchestrator: Orchestrator, args: list[str]) -> None:
         model=opts.model,
         reasoning_effort=opts.reasoning_effort,
     )
-    print(f"spawned agent '{agent.name}' backend={agent.backend.name}")
+    print(f"created agent '{agent.name}' backend={agent.backend.name}")
 
 
-def cmd_ensure(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = _agent_config_parser("ensure")
-    opts = parser.parse_args(args)
-    backend = DEFAULT_BACKEND if opts.backend is None else opts.backend
-    expected = (backend, opts.model, opts.reasoning_effort)
+def _ensure_agent(
+    orchestrator: Orchestrator,
+    name: str,
+    backend: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> None:
+    """Create `name` if talking to it would otherwise fail, and say so.
+
+    The notice goes to stderr: stdout carries the reply and is what a pipe
+    reads, and an agent having been created is commentary on the turn, not
+    part of it.
+    """
     agent, created = orchestrator.ensure(
-        opts.name,
-        opts.backend,
-        model=opts.model,
-        reasoning_effort=opts.reasoning_effort,
+        name,
+        backend,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    if created:
+        print(
+            f"created agent '{agent.name}' backend={agent.backend.name}",
+            file=sys.stderr,
+        )
+        return
+    if backend is None and model is None and reasoning_effort is None:
+        return
+    expected = (
+        DEFAULT_BACKEND if backend is None else backend,
+        model,
+        reasoning_effort,
     )
     actual = _agent_config(agent)
     if actual != expected:
@@ -470,27 +495,11 @@ def cmd_ensure(orchestrator: Orchestrator, args: list[str]) -> None:
             f"agent '{agent.name}' already uses backend/model/effort {actual!r}; "
             f"configured {expected!r}"
         )
-    action = "created" if created else "reused"
-    print(f"{action} agent '{agent.name}' backend={agent.backend.name}")
-
-
-def _ensure_agent(orchestrator: Orchestrator, name: str) -> None:
-    """Create `name` if talking to it would otherwise fail, and say so.
-
-    The notice goes to stderr: stdout carries the reply and is what a pipe
-    reads, and an agent having been created is commentary on the turn, not
-    part of it.
-    """
-    agent, created = orchestrator.ensure(name)
-    if created:
-        print(
-            f"spawned agent '{agent.name}' backend={agent.backend.name}",
-            file=sys.stderr,
-        )
 
 
 def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="talk")
+    _add_agent_config_options(parser)
     parser.add_argument("name")
     parser.add_argument("prompt", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
@@ -498,9 +507,19 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
     if not prompt:
         # Exit 2 like argparse does for a bad invocation: a caller under
         # `set -e` must not read "nothing ran" as a turn that succeeded.
-        print("usage: talk <agent> <prompt>", file=sys.stderr)
+        print(
+            "usage: talk [-b BACKEND] [--model MODEL] "
+            "[--reasoning-effort EFFORT] <agent> <prompt>",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
-    _ensure_agent(orchestrator, opts.name)
+    _ensure_agent(
+        orchestrator,
+        opts.name,
+        opts.backend,
+        opts.model,
+        opts.reasoning_effort,
+    )
     try:
         result = orchestrator.talk(opts.name, prompt)
     except TurnError as exc:
@@ -557,6 +576,7 @@ def _positive_seconds(raw: str) -> int:
 def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="orchestrator")
     parser.add_argument("--agent", required=True)
+    _add_agent_config_options(parser)
     parser.add_argument("--skill")
     parser.add_argument("--validate-schema")
     parser.add_argument(
@@ -598,7 +618,13 @@ def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
         log.info("agent '%s': validating the reply against %s", opts.agent, schema.path)
     # After the skills and the schema resolve, so a bad argument exits without
     # having left a new agent behind for a turn that never ran.
-    _ensure_agent(orchestrator, opts.agent)
+    _ensure_agent(
+        orchestrator,
+        opts.agent,
+        opts.backend,
+        opts.model,
+        opts.reasoning_effort,
+    )
     try:
         result = orchestrator.talk(
             opts.agent,
@@ -640,8 +666,7 @@ def _is_list_invocation(argv: list[str]) -> bool:
 
 
 COMMANDS: dict[str, Callable[[Orchestrator, list[str]], None]] = {
-    "spawn": cmd_spawn,
-    "ensure": cmd_ensure,
+    "create": cmd_create,
     "talk": cmd_talk,
     "list": cmd_list,
     "delete": cmd_delete,
@@ -665,7 +690,8 @@ OWN_LOGGERS = ("orchestrator", "backends")
 # margins — "usage: " and the USAGE block's — so it reads as a continuation
 # of the form above it rather than as a third one.
 SKILL_INVOCATION_FORM = (
-    "orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+    "orchestrator [-v|-vv] --agent NAME [-b BACKEND] [--model MODEL]\n"
+    "              [--reasoning-effort EFFORT] [--skill NAME[,NAME...]]\n"
     "              [--validate-schema PATH [--validation-retries N]]\n"
     "              [--timeout SECONDS] --prompt TEXT"
 )

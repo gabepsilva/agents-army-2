@@ -892,18 +892,18 @@ class AgentGateway:
         reasoning_effort = role_options.reasoning_effort
         agent_name = f"gdw-{self.issue}-{role}"
         LOGGER.info(
-            "agent %s: ensuring '%s' (backend=%s model=%s effort=%s)",
+            "agent %s: using '%s' (backend=%s model=%s effort=%s)",
             role,
             agent_name,
             backend,
             model,
             reasoning_effort,
         )
-        ensure_args = ["ensure", agent_name, "--backend", backend]
+        turn_args = ["--agent", agent_name, "--backend", backend]
         if model is not None:
-            ensure_args += ["--model", model]
+            turn_args += ["--model", model]
         if reasoning_effort is not None:
-            ensure_args += ["--reasoning-effort", reasoning_effort]
+            turn_args += ["--reasoning-effort", reasoning_effort]
         LOGGER.info(
             "agent %s: turn starting (prompt=%s '%s' of %s chars, schema=%s, "
             "timeout=%ss)",
@@ -917,21 +917,15 @@ class AgentGateway:
         LOGGER.debug("agent %s: prompt sent\n%s", role, prompt)
         started = time.monotonic()
         with self._without_github_access() as environment:
-            self._run_cli(ensure_args, environment, timeout=30)
-            turn = self._run_cli(
-                [
-                    "--agent",
-                    agent_name,
-                    "--validate-schema",
-                    str(schema),
-                    "--timeout",
-                    str(timeout),
-                    "--prompt",
-                    prompt,
-                ],
-                environment,
-                timeout=timeout + 5,
-            )
+            turn_args += [
+                "--validate-schema",
+                str(schema),
+                "--timeout",
+                str(timeout),
+                "--prompt",
+                prompt,
+            ]
+            turn = self._run_cli(turn_args, environment, timeout=timeout + 5)
         LOGGER.info(
             "agent %s: turn finished in %.1fs with %s chars of stdout",
             role,
