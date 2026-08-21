@@ -369,6 +369,8 @@ class FakeGitHub:
     def __init__(self, pr_url: str = "https://example.test/pr/1") -> None:
         self.comments: list[tuple] = []
         self.pr_calls: list[dict] = []
+        self.pr_updates: list[dict] = []
+        self.collected_markers: list[int] = []
         self.pr_url = pr_url
         self.markers: set[str] = set()
 
@@ -377,6 +379,9 @@ class FakeGitHub:
 
     def adopt_markers(self, markers: set[str]) -> None:
         self.markers |= markers
+
+    def collect_markers(self, number: int) -> None:
+        self.collected_markers.append(number)
 
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
         if key in self.markers:
@@ -404,21 +409,69 @@ class FakeGitHub:
         )
         return self.pr_url
 
+    def update_pr(self, number: int, *, body: str) -> None:
+        self.pr_updates.append({"number": number, "body": body})
+
 
 class FakeRepository:
     def __init__(self, ci: list[gdw.CommandResult] | None = None) -> None:
         self.ci = deque(ci or [gdw.CommandResult(0, "green")])
         self.commits: list[tuple[str, str]] = []
+        self.start_commits: list[tuple[str, str]] = []
         self.pushes: list[str] = []
 
     def run_ci(self) -> gdw.CommandResult:
         return self.ci.popleft()
+
+    def ensure_branch_ahead(self, message: str, base_sha: str) -> None:
+        self.start_commits.append((message, base_sha))
 
     def commit(self, message: str, base_sha: str) -> None:
         self.commits.append((message, base_sha))
 
     def push(self, branch: str) -> None:
         self.pushes.append(branch)
+
+
+class EntryWorkflow:
+    def __init__(self, completed: str | None) -> None:
+        self.completed = completed
+        self.calls: list[object] = []
+
+    def completed_url(self) -> str | None:
+        self.calls.append("completed")
+        return self.completed
+
+    def load_issue(self) -> dict:
+        self.calls.append("load")
+        return {"issue": 1}
+
+    def clarify(self, issue: dict) -> dict:
+        self.calls.append(("clarify", issue))
+        return {"proposal": 1}
+
+    def specify(self, issue: dict, proposal: dict) -> dict:
+        self.calls.append(("specify", issue, proposal))
+        return {"specification": 1}
+
+    def open_pull_request(self, specification: dict) -> str:
+        self.calls.append(("open_pull_request", specification))
+        return "https://example.test/pulls/new"
+
+    def implement(self, specification: dict) -> None:
+        self.calls.append(("implement", specification))
+
+    def stabilize(self, specification: dict) -> dict:
+        self.calls.append(("stabilize", specification))
+        return {"ci": "green"}
+
+    def review(self, specification: dict, ci: dict) -> dict:
+        self.calls.append(("review", specification, ci))
+        return {"reviews": "approved"}
+
+    def publish(self, specification: dict, reviews: dict) -> str:
+        self.calls.append(("publish", specification, reviews))
+        return "https://example.test/pulls/new"
 
 
 class FakeAgents:
@@ -498,6 +551,10 @@ def test_helpers_render_and_bound() -> None:
     assert rendered.count("_None._") == 2
     assert "```json" not in rendered
     assert '{"' not in rendered
+    assert gdw._pull_request_number("https://github.com/owner/repo/pull/12") == 12
+    assert gdw._pull_request_number("https://example.test/pr/1/") == 1
+    with pytest.raises(gdw.WorkflowError, match="without a number"):
+        gdw._pull_request_number("https://example.test/pulls")
     assert gdw.CommandResult(0, "ok").succeeded is True
     assert gdw.CommandResult(1, "bad").succeeded is False
     assert gdw.CommandResult(1, "bad").as_json() == {
@@ -519,6 +576,10 @@ def test_artifact_store_round_trip_resume_and_errors(tmp_path: Path) -> None:
     store.save("stage", {"answer": 1})
     assert store.has("stage") is True
     assert store.load("stage") == {"answer": 1}
+    store.record_development_pr(12, "https://example.test/pr/12")
+    assert store.metadata["pr_number"] == 12
+    assert store.metadata["development_pr_url"] == "https://example.test/pr/12"
+    assert store.metadata["pr_url"] is None
     store.record_pr("https://example.test/pr")
     assert store.metadata["pr_url"] == "https://example.test/pr"
     store.initialize(7, "feature", "ignored-on-resume")
@@ -608,6 +669,23 @@ def test_git_repository_prepare_ci_commit_push_and_failures(tmp_path: Path) -> N
         no_commits.commit("message", "abc")
 
 
+def test_git_repository_opens_an_empty_commit_only_when_the_branch_matches_base(
+    tmp_path: Path,
+) -> None:
+    ahead = ScriptedRun([_completed([], stdout="2\n")])
+    gdw.GitRepository(tmp_path, ahead).ensure_branch_ahead("Start work", "abc")
+    empty = ScriptedRun([_completed([], stdout="0\n"), _completed([])])
+    gdw.GitRepository(tmp_path, empty).ensure_branch_ahead("Start work", "abc")
+
+    assert [call[0] for call in ahead.calls] == [
+        ["git", "rev-list", "--count", "abc..HEAD"],
+    ]
+    assert [call[0] for call in empty.calls] == [
+        ["git", "rev-list", "--count", "abc..HEAD"],
+        ["git", "commit", "--allow-empty", "-m", "Start work"],
+    ]
+
+
 def test_github_owns_markdown_comments_and_pull_requests(tmp_path: Path) -> None:
     bodies: list[str] = []
 
@@ -657,6 +735,8 @@ def test_github_owns_markdown_comments_and_pull_requests(tmp_path: Path) -> None
         == "https://example.test/pr/9"
     )
     assert bodies[-1] == "PR body"
+    github.update_pr(9, body="Updated body")
+    assert bodies[-1] == "Updated body"
 
     nondraft_bodies: list[str] = []
 
@@ -696,6 +776,40 @@ def test_github_reports_missing_invalid_and_failed_cli(
         run=ScriptedRun([_completed([], stdout='{"comments": {}}')]),
     )
     assert odd_comments.issue(1) == {"comments": {}}
+    odd_markers = gdw.GitHub(
+        tmp_path,
+        executable=Path("/gh"),
+        run=ScriptedRun([_completed([], stdout='{"comments": {}}')]),
+    )
+    odd_markers.markers = {"keep"}
+    odd_markers.collect_markers(8)
+    assert odd_markers.markers == {"keep"}
+    pr_markers = gdw.GitHub(
+        tmp_path,
+        executable=Path("/gh"),
+        run=ScriptedRun(
+            [
+                _completed(
+                    [],
+                    stdout=json.dumps(
+                        {
+                            "comments": [
+                                {"body": "<!-- gdw:1:implementation -->\nimpl"},
+                                "noise",
+                                {"body": 12},
+                            ]
+                        }
+                    ),
+                )
+            ]
+        ),
+    )
+    pr_markers.markers = {"<!-- gdw:42:specification -->"}
+    pr_markers.collect_markers(1)
+    assert pr_markers.markers == {
+        "<!-- gdw:42:specification -->",
+        "<!-- gdw:1:implementation -->",
+    }
     invalid_json = gdw.GitHub(
         tmp_path,
         executable=Path("/gh"),
@@ -810,6 +924,28 @@ def test_github_app_client_owns_app_auth_comments_and_pull_requests(
     integration.get_repo_installation.assert_called_once_with("owner", "repo")
     app_auth.get_installation_auth.assert_called_once_with(77)
     github_factory.assert_called_once_with(auth="installation-auth", per_page=100)
+
+
+def test_github_app_client_collects_pr_markers_and_updates_the_body() -> None:
+    issue = SimpleNamespace(
+        get_comments=lambda: [
+            SimpleNamespace(body="<!-- gdw:1:implementation -->\nalready on the PR"),
+            SimpleNamespace(body=None),
+        ]
+    )
+    pull = SimpleNamespace(edit=MagicMock())
+    repository = SimpleNamespace(
+        get_issue=MagicMock(return_value=issue),
+        get_pull=MagicMock(return_value=pull),
+    )
+    client = app_github.GitHubAppClient(cast(app_github.Repository, repository))
+
+    client.collect_markers(1)
+    client.update_pr(9, body="Updated")
+
+    assert "<!-- gdw:1:implementation -->" in client.markers
+    repository.get_pull.assert_called_once_with(9)
+    pull.edit.assert_called_once_with(body="Updated")
 
 
 def test_agent_gateway_validates_prompt_and_removes_github_access(
@@ -1109,12 +1245,20 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     ]
     workflow, github, repository, agents = _workflow(tmp_path, replies)
     assert workflow.run() == "https://example.test/pr/1"
+    assert repository.start_commits == [
+        ("Start work on #42: Implement the thing with detail", "base-sha")
+    ]
     assert repository.commits == [
         ("Implement #42: Implement the thing with detail", "base-sha")
     ]
-    assert repository.pushes == ["feature"]
+    assert repository.pushes == ["feature", "feature"]
     assert github.pr_calls[0]["draft"] is True
-    pr_body = github.pr_calls[0]["body"]
+    opening = github.pr_calls[0]["body"]
+    assert "Closes #42" in opening
+    assert "### Problem Statement\n\nproblem" in opening
+    assert "review comments follow on this pull request" in opening
+    assert github.pr_updates[0]["number"] == 1
+    pr_body = github.pr_updates[0]["body"]
     assert "Closes #42" in pr_body
     assert "### Problem Statement\n\nproblem" in pr_body
     assert "### Specification\n\n#### Verdict\n\napprove" in pr_body
@@ -1151,10 +1295,84 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         role: client.comments[0][1] for role, client in role_github.items()
     } == expected_keys
     assert all(len(client.comments) == 1 for client in role_github.values())
-    assert {comment[1] for comment in driver_github.comments} == {
+    issue_roles = gdw.ISSUE_COMMENT_ROLES
+    for role, client in role_github.items():
+        number = client.comments[0][0]
+        if role in issue_roles:
+            assert number == 42
+        else:
+            assert number == 1
+    assert {comment[1] for comment in driver_github.comments} == {"ci-implementation-1"}
+    assert driver_github.comments[0][0] == 1
+
+
+def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
+    tmp_path: Path,
+) -> None:
+    replies = [
+        _expansion(),
+        _grill(),
+        _specification(),
+        _implementation(),
+        _review(),
+        _review(),
+    ]
+    workflow, github, _repository, _agents = _workflow(tmp_path, replies)
+
+    workflow.run()
+
+    issue_keys = [
+        key for number, key, _title, _payload in github.comments if number == 42
+    ]
+    pr_keys = [key for number, key, _title, _payload in github.comments if number == 1]
+    assert issue_keys == ["expansion-1", "grill-1", "specification"]
+    assert pr_keys == [
+        "implementation",
         "ci-implementation-1",
-        "pull-request",
-    }
+        "review-1-specification",
+        "review-1-quality",
+    ]
+
+
+def test_open_pull_request_reuses_a_recorded_development_pr(tmp_path: Path) -> None:
+    workflow, github, repository, _agents = _workflow(tmp_path, [])
+    workflow.store.record_development_pr(7, "https://example.test/pr/7")
+
+    assert workflow.open_pull_request(_specification()) == "https://example.test/pr/7"
+    assert github.pr_calls == []
+    assert repository.pushes == []
+
+
+def test_open_pull_request_rejects_a_url_without_a_number(tmp_path: Path) -> None:
+    workflow, *_ = _workflow(
+        tmp_path, [], {"github": FakeGitHub("https://example.test/pulls")}
+    )
+    with pytest.raises(gdw.WorkflowError, match="without a number"):
+        workflow.open_pull_request(_specification())
+
+
+def test_resumed_issue_load_collects_pull_request_comment_markers(
+    tmp_path: Path,
+) -> None:
+    workflow, github, _repository, _agents = _workflow(tmp_path, [])
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+
+    workflow.load_issue()
+
+    assert github.collected_markers == [1]
+
+
+def test_comment_number_stays_on_the_issue_until_a_pull_request_exists(
+    tmp_path: Path,
+) -> None:
+    workflow, *_ = _workflow(tmp_path, [])
+    assert workflow._comment_number("specifier") == 42
+    assert workflow._comment_number("implementer") == 42
+    assert workflow._comment_number() == 42
+    workflow.store.record_development_pr(9, "https://example.test/pr/9")
+    assert workflow._comment_number("specifier") == 42
+    assert workflow._comment_number("implementer") == 9
+    assert workflow._comment_number() == 9
 
 
 def test_workflow_sends_the_body_once_and_only_five_latest_comments(
@@ -1536,42 +1754,6 @@ def test_prepare_simple_workflow_checks_tools_and_builds_services(
 def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    class EntryWorkflow:
-        def __init__(self, completed: str | None) -> None:
-            self.completed = completed
-            self.calls: list[object] = []
-
-        def completed_url(self) -> str | None:
-            self.calls.append("completed")
-            return self.completed
-
-        def load_issue(self) -> dict:
-            self.calls.append("load")
-            return {"issue": 1}
-
-        def clarify(self, issue: dict) -> dict:
-            self.calls.append(("clarify", issue))
-            return {"proposal": 1}
-
-        def specify(self, issue: dict, proposal: dict) -> dict:
-            self.calls.append(("specify", issue, proposal))
-            return {"specification": 1}
-
-        def implement(self, specification: dict) -> None:
-            self.calls.append(("implement", specification))
-
-        def stabilize(self, specification: dict) -> dict:
-            self.calls.append(("stabilize", specification))
-            return {"ci": "green"}
-
-        def review(self, specification: dict, ci: dict) -> dict:
-            self.calls.append(("review", specification, ci))
-            return {"reviews": "approved"}
-
-        def publish(self, specification: dict, reviews: dict) -> str:
-            self.calls.append(("publish", specification, reviews))
-            return "https://example.test/pulls/new"
-
     fresh = EntryWorkflow(None)
     resumed = EntryWorkflow("https://example.test/pulls/existing")
     prepare = MagicMock(side_effect=[fresh, resumed])
@@ -1595,6 +1777,7 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
         "load",
         ("clarify", {"issue": 1}),
         ("specify", {"issue": 1}, {"proposal": 1}),
+        ("open_pull_request", {"specification": 1}),
         ("implement", {"specification": 1}),
         ("stabilize", {"specification": 1}),
         ("review", {"specification": 1}, {"ci": "green"}),
@@ -2057,11 +2240,11 @@ def test_a_make_that_cannot_list_its_gates_does_not_stop_ci(
     assert "unstarted gates will go unreported" in caplog.text
 
 
-def test_ci_posts_a_checklist_and_keeps_the_log_off_the_issue(
+def test_ci_posts_a_checklist_and_keeps_the_log_off_github(
     tmp_path: Path,
 ) -> None:
-    """The issue gets the verdict; the evidence stays in the checkpoint and in
-    the repair agent's prompt, where it is actually read."""
+    """The pull request gets the verdict; the evidence stays in the checkpoint
+    and in the repair agent's prompt, where it is actually read."""
     failing = gdw.CommandResult(
         2,
         "uv run ruff check .\nFound 12 errors.",
@@ -2079,6 +2262,7 @@ def test_ci_posts_a_checklist_and_keeps_the_log_off_the_issue(
 
     titles = [comment[2] for comment in github.comments]
     payloads = [comment[3] for comment in github.comments]
+    assert github.comments[0][0] == 1
     assert titles[0] == "CI checks for implementation, attempt 1"
     assert payloads[0] == [
         "❌ lint — Found 12 errors.",

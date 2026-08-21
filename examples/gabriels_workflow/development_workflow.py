@@ -72,6 +72,9 @@ AGENT_ROLES = frozenset(
         "reviewer-quality",
     }
 )
+# Clarification and the specification stay on the issue. Once that
+# specification is posted, every later bot comment belongs on the PR.
+ISSUE_COMMENT_ROLES = frozenset({"expander", "griller", "specifier"})
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -156,6 +159,8 @@ class GitHubService(Protocol):
         self, number: int, key: str, title: str, payload: object
     ) -> None: ...
 
+    def collect_markers(self, number: int) -> None: ...
+
     def create_pr(
         self,
         *,
@@ -166,9 +171,13 @@ class GitHubService(Protocol):
         draft: bool,
     ) -> str: ...
 
+    def update_pr(self, number: int, *, body: str) -> None: ...
+
 
 class RepositoryService(Protocol):
     def run_ci(self) -> CommandResult: ...
+
+    def ensure_branch_ahead(self, message: str, base_sha: str) -> None: ...
 
     def commit(self, message: str, base_sha: str) -> None: ...
 
@@ -428,6 +437,27 @@ def _render_comment(marker: str, title: str, payload: object) -> str:
     return f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
 
 
+def _pull_request_number(url: str) -> int:
+    match = re.search(r"/(\d+)/?$", url.strip())
+    if match is None:
+        raise WorkflowError(
+            f"GitHub returned a pull-request URL without a number: {url!r}"
+        )
+    return int(match.group(1))
+
+
+def _comment_markers(comments: object) -> set[str]:
+    if not isinstance(comments, list):
+        return set()
+    return {
+        line
+        for comment in comments
+        if isinstance(comment, dict)
+        for line in str(comment.get("body", "")).splitlines()
+        if line.startswith("<!-- gdw:")
+    }
+
+
 class ArtifactStore:
     """Durable, atomic checkpoints kept under .git so they are never committed."""
 
@@ -460,7 +490,14 @@ class ArtifactStore:
         )
         self._write(
             self.metadata_path,
-            {"issue": issue, "branch": branch, "base_sha": base_sha, "pr_url": None},
+            {
+                "issue": issue,
+                "branch": branch,
+                "base_sha": base_sha,
+                "pr_url": None,
+                "pr_number": None,
+                "development_pr_url": None,
+            },
         )
 
     @property
@@ -481,6 +518,12 @@ class ArtifactStore:
     def record_pr(self, url: str) -> None:
         metadata = self.metadata
         metadata["pr_url"] = url
+        self._write(self.metadata_path, metadata)
+
+    def record_development_pr(self, number: int, url: str) -> None:
+        metadata = self.metadata
+        metadata["pr_number"] = number
+        metadata["development_pr_url"] = url
         self._write(self.metadata_path, metadata)
 
     def artifact_path(self, name: str) -> Path:
@@ -594,6 +637,21 @@ class GitRepository:
         )
         return CommandResult(proc.returncode, _bounded(evidence), gates)
 
+    def ensure_branch_ahead(self, message: str, base_sha: str) -> None:
+        """Make the branch pushable as a pull request, without implementation.
+
+        GitHub refuses a PR whose head matches the base. An empty commit is
+        enough to open the draft that later bot comments belong on; the
+        implementation commit still happens in publish().
+        """
+
+        commits = self._call("rev-list", "--count", f"{base_sha}..HEAD").strip()
+        if commits != "0":
+            LOGGER.info("git: already %s commit(s) ahead of %s", commits, base_sha)
+            return
+        LOGGER.info("git: creating empty start-work commit ahead of %s", base_sha)
+        self._call("commit", "--allow-empty", "-m", message)
+
     def commit(self, message: str, base_sha: str) -> None:
         tracked = self._call("diff", "--no-renames", "--name-only", "-z", "HEAD").split(
             "\0"
@@ -676,21 +734,19 @@ class GitHub:
         )
         comments = payload.get("comments", [])
         if isinstance(comments, list):
-            self.markers = {
-                line
-                for comment in comments
-                if isinstance(comment, dict)
-                for line in str(comment.get("body", "")).splitlines()
-                if line.startswith("<!-- gdw:")
-            }
+            self.markers = _comment_markers(comments)
         return payload
+
+    def collect_markers(self, number: int) -> None:
+        payload = self._json_call("issue", "view", str(number), "--json", "comments")
+        self.markers |= _comment_markers(payload.get("comments", []))
 
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
         if marker in self.markers:
             LOGGER.info("github: comment '%s' already posted, skipping", key)
             return
-        LOGGER.info("github: commenting '%s' on issue #%s", key, number)
+        LOGGER.info("github: commenting '%s' on #%s", key, number)
         self._body_call(
             _render_comment(marker, title, payload),
             "issue",
@@ -719,6 +775,10 @@ class GitHub:
         if draft:
             args.append("--draft")
         return self._body_call(body, *args, "--body-file").strip()
+
+    def update_pr(self, number: int, *, body: str) -> None:
+        LOGGER.info("github: updating pull request #%s", number)
+        self._body_call(body, "pr", "edit", str(number), "--body-file")
 
     def _repo_args(self) -> list[str]:
         return [] if self.repository is None else ["--repo", self.repository]
@@ -947,6 +1007,7 @@ class DevelopmentWorkflow:
         issue_context = self.load_issue()
         expansion = self.clarify(issue_context)
         specification = self.specify(issue_context, expansion)
+        self.open_pull_request(specification)
         self.implement(specification)
         ci_summary = self.stabilize(specification)
         final_reviews = self.review(specification, ci_summary)
@@ -969,9 +1030,12 @@ class DevelopmentWorkflow:
             and isinstance(comment.get("body"), str)
             and "<!-- gdw:" not in comment["body"]
         ][-5:]
-        # Only this client read the issue, so only it knows which stages have
-        # already been commented. Every other role posts through its own app
-        # and would repeat them all on a resumed run.
+        pr_number = self.store.metadata.get("pr_number")
+        if isinstance(pr_number, int) and pr_number > 0:
+            self.github.collect_markers(pr_number)
+        # Only this client read the issue (and PR), so only it knows which
+        # stages have already been commented. Every other role posts through
+        # its own app and would repeat them all on a resumed run.
         for client in self.role_github.values():
             if client is not self.github:
                 client.adopt_markers(self.github.markers)
@@ -1011,6 +1075,7 @@ class DevelopmentWorkflow:
         )
 
     def implement(self, specification: dict) -> dict:
+        self.open_pull_request(specification)
         implementation = self._stage(
             Stage(
                 "implementation",
@@ -1025,36 +1090,62 @@ class DevelopmentWorkflow:
         return implementation
 
     def stabilize(self, specification: dict) -> dict:
+        self.open_pull_request(specification)
         return self._ci_until_green("implementation", specification)
 
     def review(self, specification: dict, ci_summary: dict) -> dict[str, dict]:
+        self.open_pull_request(specification)
         return self._review_until_approved(specification, ci_summary)
 
+    def open_pull_request(self, specification: dict) -> str:
+        """Open the draft PR that later bot comments belong on.
+
+        The specification comment is the last thing this workflow posts on the
+        issue. Implementation, CI, and review talk on the pull request.
+        """
+
+        existing_number = self.store.metadata.get("pr_number")
+        existing_url = self.store.metadata.get("development_pr_url")
+        if (
+            isinstance(existing_number, int)
+            and existing_number > 0
+            and isinstance(existing_url, str)
+            and existing_url
+        ):
+            LOGGER.info("workflow: reusing development pull request %s", existing_url)
+            return existing_url
+        title = str(specification["title"]).replace("\n", " ")[:72]
+        self.repository.ensure_branch_ahead(
+            f"Start work on #{self.issue_number}: {title}",
+            str(self.store.metadata["base_sha"]),
+        )
+        self.repository.push(self.branch)
+        url = self.github.create_pr(
+            base=self.base_branch,
+            branch=self.branch,
+            title=title,
+            body=self._opening_pr_body(specification),
+            draft=self.draft,
+        )
+        if not url:
+            raise WorkflowError("GitHub returned an empty pull-request URL")
+        number = _pull_request_number(url)
+        LOGGER.info("workflow: pull request created at %s", url)
+        self.store.record_development_pr(number, url)
+        return url
+
     def publish(self, specification: dict, final_reviews: dict[str, dict]) -> str:
+        url = self.open_pull_request(specification)
+        number = _pull_request_number(url)
         base_sha = str(self.store.metadata["base_sha"])
         commit_title = str(specification["title"]).replace("\n", " ")[:72]
         self.repository.commit(
             f"Implement #{self.issue_number}: {commit_title}", base_sha
         )
         self.repository.push(self.branch)
-        body = self._pr_body(specification, final_reviews)
-        url = self.github.create_pr(
-            base=self.base_branch,
-            branch=self.branch,
-            title=commit_title,
-            body=body,
-            draft=self.draft,
-        )
-        if not url:
-            raise WorkflowError("GitHub returned an empty pull-request URL")
-        LOGGER.info("workflow: pull request created at %s", url)
+        self.github.update_pr(number, body=self._pr_body(specification, final_reviews))
+        LOGGER.info("workflow: pull request updated at %s", url)
         self.store.record_pr(url)
-        self.github.comment_once(
-            self.issue_number,
-            "pull-request",
-            "Pull request created",
-            {"url": url, "draft": self.draft},
-        )
         return url
 
     def _reach_agreement(self, issue_context: dict) -> dict:
@@ -1131,9 +1222,9 @@ class DevelopmentWorkflow:
             result = ci.as_json()
             self.store.save(key, result)
             # The log itself stays local: it is checkpointed and handed to the
-            # repair agent, while the issue gets the verdict it can act on.
+            # repair agent, while the pull request gets the verdict it can act on.
             self.github.comment_once(
-                self.issue_number,
+                self._comment_number(),
                 key,
                 f"CI checks for {prefix}, attempt {attempt}",
                 ci.checklist(),
@@ -1258,7 +1349,9 @@ class DevelopmentWorkflow:
         LOGGER.debug("stage %s: reply\n%s", stage.key, _json(result))
         self.store.save(stage.key, result)
         role_github = self.role_github.get(stage.role, self.github)
-        role_github.comment_once(self.issue_number, stage.key, stage.title, result)
+        role_github.comment_once(
+            self._comment_number(stage.role), stage.key, stage.title, result
+        )
         return result
 
     def _require_complete(self, result: dict, stage: str, key: str) -> None:
@@ -1280,6 +1373,23 @@ class DevelopmentWorkflow:
         LOGGER.debug("%s: unresolved state\n%s", process, unresolved)
         if unresolved == previous_unresolved:
             raise WorkflowStopped(f"{process} stalled with the same unresolved state")
+
+    def _comment_number(self, role: str | None = None) -> int:
+        if role in ISSUE_COMMENT_ROLES:
+            return self.issue_number
+        number = self.store.metadata.get("pr_number")
+        if isinstance(number, int) and number > 0:
+            return number
+        return self.issue_number
+
+    def _opening_pr_body(self, specification: dict) -> str:
+        return (
+            f"Closes #{self.issue_number}\n\n"
+            "## Validated specification\n\n"
+            f"{_markdown(specification)}\n\n"
+            "Generated by Gabriel's development workflow. Implementation, CI, "
+            "and review comments follow on this pull request.\n"
+        )
 
     def _pr_body(self, specification: dict, reviews: dict[str, dict]) -> str:
         return (

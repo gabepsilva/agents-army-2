@@ -5,11 +5,12 @@ main flow:
 
 1. Load the issue.
 2. Clarify the request with an expander and an independent griller.
-3. Produce a specification.
-4. Implement it.
-5. Run CI and repair failures.
-6. Obtain specification and quality approvals.
-7. Commit, push, and create a draft pull request.
+3. Produce a specification — the last bot comment on the issue.
+4. Open a draft pull request. Implementation, CI, and review talk there.
+5. Implement the specification.
+6. Run CI and repair failures.
+7. Obtain specification and quality approvals.
+8. Commit, push, and update the pull request.
 
 The supporting modules own the details:
 
@@ -61,15 +62,17 @@ values are passed through to the configured CLI. Each of `expander`, `griller`,
 `specifier`, `implementer`, `reviewer-specification`, and `reviewer-quality`
 must be configured explicitly.
 
-Each stage result is commented through that stage role's GitHub App. The
-implementer app also loads the issue, posts workflow-level status, and creates
-the pull request.
+Each stage result is commented through that stage role's GitHub App. Expansion,
+grilling, and the specification stay on the issue — the specification is the
+last bot comment there. The implementer app then opens a draft pull request and
+posts implementation, CI, and review there. The same app commits, pushes, and
+updates that pull request when the work is done.
 
 CI is reported as a checklist rather than a log: one ✅, ❌ or ⚪ per gate that
 `make ci` runs, a failing gate carrying a one-line reason. The gate list comes
 from `make ci-gates`, and a gate that never started when an earlier one failed
 is marked as such instead of being reported as passing. The full CI output
-stays out of the issue — it is checkpointed under `.git/gdw/` and handed to
+stays out of GitHub — it is checkpointed under `.git/gdw/` and handed to
 the repair agent, which is what actually reads it.
 
 Install all six apps on the configured repository with the
