@@ -98,7 +98,11 @@ class CommandResult:
 
 
 class GitHubService(Protocol):
+    markers: set[str]
+
     def issue(self, number: int) -> dict: ...
+
+    def adopt_markers(self, markers: set[str]) -> None: ...
 
     def comment_once(
         self, number: int, key: str, title: str, payload: object
@@ -485,7 +489,7 @@ class GitHub:
         self.repository = repository
         self._run_process = run
         self._environment = dict(os.environ if environment is None else environment)
-        self._markers: set[str] = set()
+        self.markers: set[str] = set()
 
     def default_branch(self) -> str:
         payload = self._json_call("repo", "view", "--json", "defaultBranchRef")
@@ -493,6 +497,9 @@ class GitHub:
         if not isinstance(branch, dict) or not isinstance(branch.get("name"), str):
             raise WorkflowError("gh repo view did not report a default branch")
         return branch["name"]
+
+    def adopt_markers(self, markers: set[str]) -> None:
+        self.markers |= markers
 
     def issue(self, number: int) -> dict:
         LOGGER.info("github: loading issue #%s", number)
@@ -505,7 +512,7 @@ class GitHub:
         )
         comments = payload.get("comments", [])
         if isinstance(comments, list):
-            self._markers = {
+            self.markers = {
                 line
                 for comment in comments
                 if isinstance(comment, dict)
@@ -516,7 +523,7 @@ class GitHub:
 
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
-        if marker in self._markers:
+        if marker in self.markers:
             LOGGER.info("github: comment '%s' already posted, skipping", key)
             return
         LOGGER.info("github: commenting '%s' on issue #%s", key, number)
@@ -527,7 +534,7 @@ class GitHub:
             str(number),
             "--body-file",
         )
-        self._markers.add(marker)
+        self.markers.add(marker)
 
     def create_pr(
         self,
@@ -798,6 +805,12 @@ class DevelopmentWorkflow:
             and isinstance(comment.get("body"), str)
             and "<!-- gdw:" not in comment["body"]
         ][-5:]
+        # Only this client read the issue, so only it knows which stages have
+        # already been commented. Every other role posts through its own app
+        # and would repeat them all on a resumed run.
+        for client in self.role_github.values():
+            if client is not self.github:
+                client.adopt_markers(self.github.markers)
         LOGGER.info(
             "workflow: issue #%s %r loaded with %s of %s comment(s) forwarded",
             issue.get("number"),

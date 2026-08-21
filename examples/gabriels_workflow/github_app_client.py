@@ -78,6 +78,15 @@ class GitHubAppClient:
             "state": issue.state,
         }
 
+    def adopt_markers(self, markers: set[str]) -> None:
+        """Learn which stages another role's client already commented.
+
+        Only the client that read the issue saw its comments. Every other role
+        posts through its own app, so without this each of them repeats every
+        stage it owns on a resumed run.
+        """
+        self.markers |= markers
+
     def comment(self, number: int, body: str) -> None:
         self.repository.get_issue(number).create_comment(body)
 
