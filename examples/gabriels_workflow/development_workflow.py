@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,8 @@ GITHUB_TOKEN_NAMES = (
     "GITHUB_APP_PRIVATE_KEY",
 )
 CI_EVIDENCE_CHARS = 20_000
+# The braille block, which every spinner this project's gates print draws from.
+SPINNER_FRAME = re.compile(r"^[\u2800-\u28ff]+\s*")
 DEFAULT_AGENT_TIMEOUT = 3_600
 DEFAULT_CI_TIMEOUT = 7_200
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
@@ -173,6 +176,29 @@ def _json(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
 
 
+def _readable(text: str) -> str:
+    """Collapse in-place progress redraws so the real errors survive bounding.
+
+    `make ci` runs mutmut, whose spinner repaints one status line once per
+    mutant. Kept verbatim those frames were 369 of 416 lines of a failure this
+    workflow captured, and because only the tail is retained they pushed the
+    ruff, ty and pytest messages out of the evidence entirely: the agent asked
+    to repair a failure could no longer see it.
+
+    splitlines() already breaks each carriage-return repaint onto its own
+    line, so a frame differs from the one before it only by its spinner glyph.
+    Dropping that glyph leaves consecutive duplicates, which collapse.
+    """
+
+    kept: list[str] = []
+    for raw in text.splitlines():
+        line = SPINNER_FRAME.sub("", raw)
+        if kept and kept[-1] == line:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _tail(text: str, lines: int = LOG_TAIL_LINES) -> str:
     """The last few lines of long evidence, for a readable failure log."""
 
@@ -283,20 +309,20 @@ class ArtifactStore:
         return self._read(self.metadata_path)
 
     def has(self, name: str) -> bool:
-        return self._artifact_path(name).exists()
+        return self.artifact_path(name).exists()
 
     def load(self, name: str) -> dict:
-        return self._read(self._artifact_path(name))
+        return self._read(self.artifact_path(name))
 
     def save(self, name: str, payload: dict) -> None:
-        self._write(self._artifact_path(name), payload)
+        self._write(self.artifact_path(name), payload)
 
     def record_pr(self, url: str) -> None:
         metadata = self.metadata
         metadata["pr_url"] = url
         self._write(self.metadata_path, metadata)
 
-    def _artifact_path(self, name: str) -> Path:
+    def artifact_path(self, name: str) -> Path:
         return self.artifacts / f"{name}.json"
 
     @staticmethod
@@ -361,13 +387,16 @@ class GitRepository:
             timeout=timeout,
         )
         combined = f"{proc.stdout}\n{proc.stderr}".strip()
+        evidence = _readable(combined)
         LOGGER.info(
-            "ci: 'make ci' exited %s after %.1fs with %s chars of output",
+            "ci: 'make ci' exited %s after %.1fs with %s chars of output "
+            "(%s after collapsing progress redraws)",
             proc.returncode,
             time.monotonic() - started,
             len(combined),
+            len(evidence),
         )
-        return CommandResult(proc.returncode, _bounded(combined))
+        return CommandResult(proc.returncode, _bounded(evidence))
 
     def commit(self, message: str, base_sha: str) -> None:
         tracked = self._call("diff", "--no-renames", "--name-only", "-z", "HEAD").split(
@@ -787,7 +816,7 @@ class DevelopmentWorkflow:
                 {"SPECIFICATION_JSON": _json(specification)},
             )
         )
-        self._require_complete(implementation, "implementation")
+        self._require_complete(implementation, "implementation", "implementation")
         return implementation
 
     def stabilize(self, specification: dict) -> dict:
@@ -926,7 +955,7 @@ class DevelopmentWorkflow:
                     },
                 )
             )
-            self._require_complete(repair, "CI repair")
+            self._require_complete(repair, "CI repair", f"repair-{prefix}-{attempt}")
             unresolved = _json({"ci": result, "repair": repair})
             self._require_progress(previous_unresolved, unresolved, "CI repair")
             previous_unresolved = unresolved
@@ -987,7 +1016,9 @@ class DevelopmentWorkflow:
                     },
                 )
             )
-            self._require_complete(repair, "review repair")
+            self._require_complete(
+                repair, "review repair", f"review-repair-{round_number}"
+            )
             ci_summary = self._ci_until_green(f"review-{round_number}", specification)
             round_number += 1
 
@@ -1022,10 +1053,16 @@ class DevelopmentWorkflow:
         role_github.comment_once(self.issue_number, stage.key, stage.title, result)
         return result
 
-    @staticmethod
-    def _require_complete(result: dict, stage: str) -> None:
+    def _require_complete(self, result: dict, stage: str, key: str) -> None:
         if result["status"] != "complete":
             blockers = "; ".join(str(item) for item in result["blockers"])
+            # The blocked reply is already checkpointed, so resuming replays it
+            # rather than asking again. Say which file to remove to retry.
+            LOGGER.error(
+                "stage %s reported itself blocked; delete %s to ask again",
+                key,
+                self.store.artifact_path(key),
+            )
             raise WorkflowStopped(f"{stage} blocked: {blockers}")
 
     @staticmethod

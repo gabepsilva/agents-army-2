@@ -1722,3 +1722,49 @@ def test_simple_entrypoint_reports_a_stopped_workflow_and_how_to_resume(
         "workflow: rerun the same command to resume from the last checkpoint"
         in messages
     )
+
+
+def test_progress_redraws_are_collapsed_out_of_ci_evidence() -> None:
+    """mutmut repaints one status line per mutant, and only the tail of the
+    output is kept: verbatim frames push the real errors out of the evidence."""
+    spinner = "\n".join(f"{glyph} 1719/1719  killed 1659" for glyph in "⠦⠧⠇⠏⠋")
+    noisy = f"ruff: would reformat orchestrator/__init__.py\n{spinner}\nError 1"
+
+    assert gdw._readable(noisy) == (
+        "ruff: would reformat orchestrator/__init__.py\n1719/1719  killed 1659\nError 1"
+    )
+    assert gdw._readable("same\rsame") == "same"
+    assert gdw._readable("keep\nboth") == "keep\nboth"
+
+
+def test_run_ci_reports_the_readable_evidence_not_the_raw_redraws(
+    tmp_path: Path,
+) -> None:
+    frames = "\n".join(f"{glyph} working" for glyph in "⠦⠧⠇")
+    run = ScriptedRun([_completed([], 2, stdout=f"boom\n{frames}", stderr="")])
+    repository = gdw.GitRepository(tmp_path, run)
+
+    result = repository.run_ci()
+
+    assert result.returncode == 2
+    assert result.output == "boom\nworking"
+
+
+def test_a_blocked_stage_names_the_checkpoint_to_delete(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The blocked reply is checkpointed, so a plain resume replays it."""
+    workflow, _github, _repository, _agents = _workflow(tmp_path, [])
+    blocked = _implementation(status="blocked")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="gdw"),
+        pytest.raises(gdw.WorkflowStopped, match="CI repair blocked"),
+    ):
+        workflow._require_complete(blocked, "CI repair", "repair-implementation-2")
+
+    assert (
+        f"stage repair-implementation-2 reported itself blocked; delete "
+        f"{tmp_path / 'state' / 'artifacts' / 'repair-implementation-2.json'} "
+        f"to ask again" in [record.getMessage() for record in caplog.records]
+    )
