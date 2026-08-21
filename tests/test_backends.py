@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -75,6 +76,52 @@ def _flock_is_held(path: Path) -> bool:
             return True
         fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
         return False
+
+
+# What each tool prints for `--version` on a machine that has all of them.
+# The spellings are the real ones: uv leads with its own name, jq glues its
+# name on with a hyphen, claude prints a bare number, and codex names the
+# package rather than the command.
+ALL_TOOLS_PRESENT = {
+    "uv": "uv 0.4.18",
+    "claude": "2.1.234 (Claude Code)",
+    "codex": "codex-cli 0.147.0",
+    "grok": "grok 1.0.5",
+    "jq": "jq-1.7",
+}
+
+
+def _running_python() -> str:
+    """The interpreter version the report is expected to name."""
+    return ".".join(str(part) for part in sys.version_info[:3])
+
+
+def _fake_dependency_env(
+    monkeypatch: pytest.MonkeyPatch, versions: dict[str, str]
+) -> list[list[str]]:
+    """Stand in for PATH and for every `<tool> --version` process.
+
+    Only the tools named in `versions` are on PATH; the rest are absent. The
+    returned list records each command actually run, so a test can assert on
+    the invocation and not merely that something was spawned.
+    """
+    calls: list[list[str]] = []
+
+    def which(tool: str) -> str | None:
+        return f"/usr/bin/{tool}" if tool in versions else None
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is False
+        assert kwargs["timeout"] == 5
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(args, 0, stdout=versions[args[0]], stderr="")
+
+    monkeypatch.setattr(orchestrator.shutil, "which", which)
+    monkeypatch.setattr(orchestrator.subprocess, "run", run)
+    return calls
 
 
 def _messages(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -2235,8 +2282,10 @@ class TestCLI:
             "              [--timeout SECONDS] --prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
             "       orchestrator [-v|-vv] --version\n"
+            "       orchestrator [-v|-vv] --dependency-check\n"
             "  -h, --help      show this message\n"
             "  --version       show the installed version\n"
+            "  --dependency-check  report which agent CLIs and tools are installed\n"
             "  -v, --verbose   log each step and how long it took\n"
             "  -vv, --verbose2  also log full prompts and replies\n"
             "commands: spawn, ensure, talk, list, delete\n"
@@ -2345,6 +2394,242 @@ class TestCLI:
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         main(["talk", "agent", "a", "--version"])
         assert capsys.readouterr().out.endswith("echo:a --version\n")
+
+    @pytest.mark.parametrize(
+        "flags", [[], ["-v"], ["--verbose"], ["-vv"], ["--verbose2"]]
+    )
+    def test_main_dependency_check_is_clean_and_early(
+        self,
+        flags: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def fail_orchestrator() -> None:
+            raise AssertionError("dependency check must not construct Orchestrator")
+
+        monkeypatch.setattr(orchestrator, "Orchestrator", fail_orchestrator)
+        _fake_dependency_env(monkeypatch, ALL_TOOLS_PRESENT)
+        main([*flags, "--dependency-check", "ignored"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2713 uv 0.4.18\n"
+            "\u2713 claude 2.1.234 (Claude Code)\n"
+            "\u2713 codex-cli 0.147.0\n"
+            "\u2713 grok 1.0.5\n"
+            "\u25cb jq 1.7 (optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_probes_each_tool_with_its_own_version_flag(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        calls = _fake_dependency_env(monkeypatch, ALL_TOOLS_PRESENT)
+        main(["--dependency-check"])
+        assert calls == [
+            ["uv", "--version"],
+            ["claude", "--version"],
+            ["codex", "--version"],
+            ["grok", "--version"],
+            ["jq", "--version"],
+        ]
+        assert capsys.readouterr().err == ""
+
+    def test_dependency_check_reports_every_missing_agent_cli_and_still_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Zero usable backends is a report, not a failure."""
+        _fake_dependency_env(monkeypatch, {"uv": "uv 0.4.18", "jq": "jq-1.7"})
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2713 uv 0.4.18\n"
+            "\u2717 claude (not found)\n"
+            "\u2717 codex (not found)\n"
+            "\u2717 grok (not found)\n"
+            "\u25cb jq 1.7 (optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_exits_zero_with_nothing_installed(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _fake_dependency_env(monkeypatch, {})
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2717 uv (not found)\n"
+            "\u2717 claude (not found)\n"
+            "\u2717 codex (not found)\n"
+            "\u2717 grok (not found)\n"
+            "\u2717 jq (not found, optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_marks_absent_jq_optional_and_leaves_the_rest_alone(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        present = {
+            tool: version for tool, version in ALL_TOOLS_PRESENT.items() if tool != "jq"
+        }
+        _fake_dependency_env(monkeypatch, present)
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2713 uv 0.4.18\n"
+            "\u2713 claude 2.1.234 (Claude Code)\n"
+            "\u2713 codex-cli 0.147.0\n"
+            "\u2713 grok 1.0.5\n"
+            "\u2717 jq (not found, optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_keeps_a_silent_tool_on_its_own_line(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Empty stdout means installed, version unknown — not missing."""
+        _fake_dependency_env(monkeypatch, {"uv": "", "jq": "\n"})
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2713 uv (version unknown)\n"
+            "\u2717 claude (not found)\n"
+            "\u2717 codex (not found)\n"
+            "\u2717 grok (not found)\n"
+            "\u25cb jq (version unknown, optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_reads_only_the_first_line_of_a_version(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _fake_dependency_env(monkeypatch, {"uv": "  uv 0.4.18  \nbuild deadbeef\n"})
+        main(["--dependency-check"])
+        assert "\u2713 uv 0.4.18\n" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            OSError("no such file"),
+            subprocess.TimeoutExpired(cmd=["uv", "--version"], timeout=5),
+            subprocess.SubprocessError("spawn failed"),
+        ],
+    )
+    def test_dependency_check_survives_a_failing_version_probe(
+        self,
+        failure: Exception,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            orchestrator.shutil, "which", lambda tool: f"/usr/bin/{tool}"
+        )
+
+        def explode(args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(orchestrator.subprocess, "run", explode)
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert captured.out == (
+            f"\u2713 Python {_running_python()}\n"
+            "\u2713 uv (version unknown)\n"
+            "\u2713 claude (version unknown)\n"
+            "\u2713 codex (version unknown)\n"
+            "\u2713 grok (version unknown)\n"
+            "\u25cb jq (version unknown, optional)\n"
+        )
+        assert captured.err == ""
+
+    def test_dependency_check_ignores_a_version_probe_that_exits_nonzero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(orchestrator.shutil, "which", lambda _tool: "/usr/bin/uv")
+
+        def refuse(args, **kwargs):
+            return subprocess.CompletedProcess(args, 1, stdout="uv 0.4.18", stderr="")
+
+        monkeypatch.setattr(orchestrator.subprocess, "run", refuse)
+        main(["--dependency-check"])
+        captured = capsys.readouterr()
+        assert "\u2713 uv (version unknown)\n" in captured.out
+        assert "0.4.18" not in captured.out
+        assert captured.err == ""
+
+    def test_dependency_check_reports_an_interpreter_below_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _fake_dependency_env(monkeypatch, {})
+        monkeypatch.setattr(orchestrator.sys, "version_info", (3, 10, 2, "final", 0))
+        main(["--dependency-check"])
+        assert capsys.readouterr().out.startswith(
+            "\u2717 Python 3.10.2 (needs 3.11+)\n"
+        )
+
+    def test_dependency_check_accepts_an_interpreter_exactly_at_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """3.11.0 is the floor, not the first version above it."""
+        _fake_dependency_env(monkeypatch, {})
+        monkeypatch.setattr(orchestrator.sys, "version_info", (3, 11, 0, "final", 0))
+        main(["--dependency-check"])
+        assert capsys.readouterr().out.startswith("\u2713 Python 3.11.0\n")
+
+    def test_dependency_check_reports_a_later_major_as_satisfying_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _fake_dependency_env(monkeypatch, {})
+        monkeypatch.setattr(orchestrator.sys, "version_info", (4, 0, 1, "final", 0))
+        main(["--dependency-check"])
+        assert capsys.readouterr().out.startswith("\u2713 Python 4.0.1\n")
+
+    def test_only_a_space_or_hyphen_separates_a_name_from_its_version(self) -> None:
+        assert orchestrator.NAME_SEPARATORS == (" ", "-")
+
+    def test_dependency_floor_matches_the_packaged_requires_python(self) -> None:
+        assert orchestrator.MIN_PYTHON == (3, 11)
+
+    def test_only_jq_is_optional(self) -> None:
+        assert orchestrator.DEPENDENCY_TOOLS == (
+            ("uv", False),
+            ("claude", False),
+            ("codex", False),
+            ("grok", False),
+            ("jq", True),
+        )
+
+    @pytest.mark.parametrize(
+        ("tool", "reported", "expected"),
+        [
+            ("uv", "uv 0.4.18", "uv 0.4.18"),
+            ("jq", "jq-1.7", "jq 1.7"),
+            ("claude", "2.1.234 (Claude Code)", "claude 2.1.234 (Claude Code)"),
+            ("codex", "codex-cli 0.147.0", "codex-cli 0.147.0"),
+            ("jq", "jq", "jq"),
+            ("grok", "unreleased build", "grok unreleased build"),
+            ("uv", "uv  0.4.18", "uv  0.4.18"),
+            ("jq", "jqX1.7", "jqX1.7"),
+        ],
+    )
+    def test_describe_version_names_each_tool_exactly_once(
+        self, tool: str, reported: str, expected: str
+    ) -> None:
+        assert orchestrator._describe_version(tool, reported) == expected
+
+    def test_main_dependency_check_after_command_remains_prompt_data(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        main(["talk", "agent", "a", "--dependency-check"])
+        assert capsys.readouterr().out.endswith("echo:a --dependency-check\n")
 
     def test_main_reads_sys_argv_when_none_given(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
