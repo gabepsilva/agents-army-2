@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import runpy
 import subprocess
@@ -30,6 +31,17 @@ from examples.gabriels_workflow.config import (
     load_config,
 )
 from orchestrator.schema import load_schema
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workflow_logging():
+    """Keep configure_logging() calls from leaking handlers into later tests."""
+
+    logger = gdw.LOGGER
+    handlers, level = list(logger.handlers), logger.level
+    yield
+    logger.handlers = handlers
+    logger.setLevel(level)
 
 
 def _completed(
@@ -1583,4 +1595,123 @@ def test_simple_entrypoint_defaults_to_local_workflow_config() -> None:
 
     assert options.config == Path(simple_entrypoint.__file__).with_name(
         "workflow.local"
+    )
+
+
+def test_configure_logging_writes_one_stderr_handler_at_the_requested_level(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    gdw.configure_logging()
+    assert gdw.LOGGER.level == logging.INFO
+    assert len(gdw.LOGGER.handlers) == 1
+
+    gdw.configure_logging(verbose=True)
+    assert gdw.LOGGER.level == logging.DEBUG
+    assert len(gdw.LOGGER.handlers) == 1
+
+    gdw.LOGGER.debug("hello from the workflow")
+    captured = capsys.readouterr()
+    assert "hello from the workflow" in captured.err
+    assert captured.out == ""
+
+
+def test_outcome_digests_structured_replies_and_tail_bounds_evidence() -> None:
+    assert gdw._outcome(_grill()) == "verdict=ready, needs_another_round=False"
+    assert gdw._outcome(_implementation()) == "status=complete"
+    assert gdw._outcome({}) == "no outcome fields"
+    assert gdw._tail("a\nb\nc\nd", lines=2) == "c\nd"
+    assert gdw._tail("a\nb") == "a\nb"
+
+
+def test_workflow_logs_progress_checkpoint_reuse_and_ci_failures(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    replies = [
+        _expansion(),
+        _grill(),
+        _specification(),
+        _implementation(),
+        _implementation(),
+        _review(),
+        _review(),
+    ]
+    repository = FakeRepository(
+        [gdw.CommandResult(1, "boom\nfailing line"), gdw.CommandResult(0, "green")]
+    )
+    workflow, _github, _repository, _agents = _workflow(
+        tmp_path, replies, {"repository": repository}
+    )
+    with caplog.at_level(logging.DEBUG, logger="gdw"):
+        workflow.run()
+    messages = [record.getMessage() for record in caplog.records]
+
+    assert "workflow: issue #42, branch feature onto master, draft=True" in messages
+    assert "clarification: round 1" in messages
+    assert "clarification: converged after 1 round(s)" in messages
+    assert "stage expansion-1: asking expander" in messages
+    assert any(
+        message.startswith("stage expansion-1: expander answered in")
+        and message.endswith("(decision=proceed, needs_another_round=False)")
+        for message in messages
+    )
+    assert "ci: implementation attempt 1" in messages
+    assert any(
+        "ci: implementation failed on attempt 1 (exit 1)" in message
+        and "failing line" in message
+        for message in messages
+    )
+    assert "ci: implementation green on attempt 2" in messages
+    assert "review: round 1" in messages
+    assert "review: approved after 1 round(s)" in messages
+    assert "workflow: pull request created at https://example.test/pr/1" in messages
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        workflow.run()
+    assert "workflow: already completed, pull request https://example.test/pr/1" in [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+def test_cached_stage_logs_that_it_reused_the_checkpoint(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workflow, _github, _repository, agents = _workflow(tmp_path, [])
+    workflow.store.save("specification", _specification())
+    stage = gdw.Stage("specification", "Specification", "specifier", "specify", "s", {})
+
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        workflow._stage(stage)
+
+    assert agents.calls == []
+    assert (
+        "stage specification: reusing checkpoint from specifier (no outcome fields)"
+        in [record.getMessage() for record in caplog.records]
+    )
+
+
+def test_simple_entrypoint_reports_a_stopped_workflow_and_how_to_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def explode(issue: int, config: WorkflowConfig) -> None:
+        raise gdw.WorkflowStopped("clarification stalled")
+
+    monkeypatch.setattr(simple_entrypoint, "prepare_workflow", explode)
+    monkeypatch.setattr(
+        simple_entrypoint,
+        "load_config",
+        MagicMock(return_value=_workflow_config(repository="gabepsilva/agents-army-2")),
+    )
+
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        assert simple_entrypoint.main(["42"]) == 1
+
+    assert "workflow stopped: clarification stalled" in capsys.readouterr().err
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("clarification stalled" in message for message in messages)
+    assert (
+        "workflow: rerun the same command to resume from the last checkpoint"
+        in messages
     )

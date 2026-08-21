@@ -2,9 +2,16 @@
 """Turn one GitHub issue into a reviewed draft pull request."""
 
 import argparse
+import sys
+import time
 from pathlib import Path
 
 from examples.gabriels_workflow.config import DEFAULT_CONFIG_PATH, load_config
+from examples.gabriels_workflow.development_workflow import (
+    LOGGER,
+    WorkflowError,
+    configure_logging,
+)
 from examples.gabriels_workflow.setup import prepare_workflow
 
 
@@ -19,24 +26,45 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_CONFIG_PATH,
         help=f"workflow YAML (default: {DEFAULT_CONFIG_PATH})",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="log every prompt, reply, and subprocess at DEBUG level",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     options = _parser().parse_args(argv)
-    workflow = prepare_workflow(options.issue, load_config(options.config))
+    configure_logging(options.verbose)
+    started = time.monotonic()
+    LOGGER.info("workflow: starting issue #%s with %s", options.issue, options.config)
 
-    pull_request_url = workflow.completed_url()
+    try:
+        workflow = prepare_workflow(options.issue, load_config(options.config))
 
-    if pull_request_url is None:
-        issue = workflow.load_issue()
-        proposal = workflow.clarify(issue)
-        specification = workflow.specify(issue, proposal)
-        workflow.implement(specification)
-        passing_ci = workflow.stabilize(specification)
-        approvals = workflow.review(specification, passing_ci)
-        pull_request_url = workflow.publish(specification, approvals)
+        pull_request_url = workflow.completed_url()
 
+        if pull_request_url is None:
+            issue = workflow.load_issue()
+            proposal = workflow.clarify(issue)
+            specification = workflow.specify(issue, proposal)
+            workflow.implement(specification)
+            passing_ci = workflow.stabilize(specification)
+            approvals = workflow.review(specification, passing_ci)
+            pull_request_url = workflow.publish(specification, approvals)
+    except WorkflowError as exc:
+        LOGGER.error(
+            "workflow: stopped after %.1fs: %s", time.monotonic() - started, exc
+        )
+        LOGGER.error(
+            "workflow: rerun the same command to resume from the last checkpoint"
+        )
+        print(f"workflow stopped: {exc}", file=sys.stderr)
+        return 1
+
+    LOGGER.info("workflow: finished in %.1fs", time.monotonic() - started)
     print(pull_request_url)
     return 0
 

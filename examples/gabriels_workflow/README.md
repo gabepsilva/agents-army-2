@@ -51,6 +51,9 @@ uv run python examples/gabriels_workflow/simple_development_workflow.py \
   42
 ```
 
+Add `-v`/`--verbose` to log every prompt sent, every reply received, and every
+subprocess invoked.
+
 To use another configuration file, pass `--config path/to/workflow.yaml`.
 Without that option, the script loads
 `examples/gabriels_workflow/workflow.local`. Model names and reasoning-effort
@@ -74,6 +77,26 @@ sessions while retaining completed workflow checkpoints.
 
 Workflow and agent state is stored under `.git/gdw/issue-<number>/`. Running the
 same issue again resumes completed stages and avoids duplicate bot comments.
+
+## Progress logs
+
+Timestamped progress goes to stderr, so stdout stays the pull-request URL and
+the run stays pipeable. At the default level each line says which stage is
+running, which role was asked, how long the turn took, and the reply's
+`decision`/`verdict`/`status`; checkpoint reuse on a resumed run is logged as
+such, `make ci` reports its exit code, duration, and the tail of a failure, and
+a stopped workflow ends with the reminder that rerunning resumes it.
+
+```
+2026-08-21 13:04:22,110 INFO    setup: repository gabepsilva/agents-army-2, roles ...
+2026-08-21 13:04:24,882 INFO    git: branch=gdw/issue-22 base=master head=9f1c2ab resuming=False
+2026-08-21 13:04:26,003 INFO    stage expansion-1: asking expander
+2026-08-21 13:07:41,559 INFO    stage expansion-1: expander answered in 195.6s (decision=proceed, needs_another_round=False)
+2026-08-21 13:07:42,004 INFO    github-app: commenting 'expansion-1' on issue #22
+2026-08-21 13:21:08,771 INFO    ci: 'make ci' exited 0 after 402.1s with 18244 chars of output
+```
+
+`-v` adds the full prompt, the full reply, and each subprocess invocation.
 
 The required local tools are `git`, `make`, `uv`, `orchestrator`, and every
 authenticated agent CLI referenced by the configuration: `claude`, `codex`,

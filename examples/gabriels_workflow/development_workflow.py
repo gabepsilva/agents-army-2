@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +33,9 @@ GITHUB_TOKEN_NAMES = (
 CI_EVIDENCE_CHARS = 20_000
 DEFAULT_AGENT_TIMEOUT = 3_600
 DEFAULT_CI_TIMEOUT = 7_200
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
+LOG_TAIL_LINES = 40
+LOGGER = logging.getLogger("gdw")
 AGENT_ROLES = frozenset(
     {
         "expander",
@@ -41,6 +46,21 @@ AGENT_ROLES = frozenset(
         "reviewer-quality",
     }
 )
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """Send timestamped progress to stderr so stdout stays the result channel.
+
+    Only this workflow's own logger is touched: the root logger is left to
+    whatever embeds the example, and a second call replaces the handler rather
+    than printing every line twice.
+    """
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    LOGGER.handlers.clear()
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
 class WorkflowError(RuntimeError):
@@ -153,6 +173,23 @@ def _json(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
 
 
+def _tail(text: str, lines: int = LOG_TAIL_LINES) -> str:
+    """The last few lines of long evidence, for a readable failure log."""
+
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _outcome(result: Mapping[str, object]) -> str:
+    """A one-line digest of a structured reply, for the progress log."""
+
+    fields = [
+        f"{key}={result[key]}"
+        for key in ("decision", "verdict", "status", "needs_another_round")
+        if key in result
+    ]
+    return ", ".join(fields) if fields else "no outcome fields"
+
+
 def _bounded(text: str, limit: int = CI_EVIDENCE_CHARS) -> str:
     if len(text) <= limit:
         return text
@@ -218,6 +255,7 @@ class ArtifactStore:
 
     def initialize(self, issue: int, branch: str, base_sha: str) -> None:
         if self.initialized:
+            LOGGER.info("state: resuming from %s", self.metadata_path)
             metadata = self._read(self.metadata_path)
             expected = {"issue": issue, "branch": branch}
             actual = {name: metadata.get(name) for name in expected}
@@ -226,6 +264,13 @@ class ArtifactStore:
                     f"workflow state belongs to {actual}, not {expected}"
                 )
             return
+        LOGGER.info(
+            "state: initializing %s for issue #%s on %s at %s",
+            self.root,
+            issue,
+            branch,
+            base_sha,
+        )
         self._write(
             self.metadata_path,
             {"issue": issue, "branch": branch, "base_sha": base_sha, "pr_url": None},
@@ -293,9 +338,19 @@ class GitRepository:
             )
         if not resuming and self._call("status", "--porcelain").strip():
             raise WorkflowError("start the workflow from a clean worktree")
-        return branch, self._call("rev-parse", "HEAD").strip()
+        head = self._call("rev-parse", "HEAD").strip()
+        LOGGER.info(
+            "git: branch=%s base=%s head=%s resuming=%s",
+            branch,
+            base_branch,
+            head,
+            resuming,
+        )
+        return branch, head
 
     def run_ci(self, timeout: int = DEFAULT_CI_TIMEOUT) -> CommandResult:
+        LOGGER.info("ci: running 'make ci' in %s (timeout %ss)", self.root, timeout)
+        started = time.monotonic()
         proc = self._run_process(
             ["make", "ci"],
             cwd=str(self.root),
@@ -306,6 +361,12 @@ class GitRepository:
             timeout=timeout,
         )
         combined = f"{proc.stdout}\n{proc.stderr}".strip()
+        LOGGER.info(
+            "ci: 'make ci' exited %s after %.1fs with %s chars of output",
+            proc.returncode,
+            time.monotonic() - started,
+            len(combined),
+        )
         return CommandResult(proc.returncode, _bounded(combined))
 
     def commit(self, message: str, base_sha: str) -> None:
@@ -316,14 +377,21 @@ class GitRepository:
             "ls-files", "--others", "--exclude-standard", "-z"
         ).split("\0")
         changed_paths = [path for path in (*tracked, *untracked) if path]
+        LOGGER.info("git: %s path(s) changed since HEAD", len(changed_paths))
+        LOGGER.debug("git: changed paths %s", changed_paths)
         if changed_paths:
             self._call("add", "--", *changed_paths)
             self._call("commit", "-m", message)
-        if self._call("rev-list", "--count", f"{base_sha}..HEAD").strip() == "0":
+            LOGGER.info("git: committed %r", message)
+        commits = self._call("rev-list", "--count", f"{base_sha}..HEAD").strip()
+        LOGGER.info("git: %s commit(s) ahead of %s", commits, base_sha)
+        if commits == "0":
             raise WorkflowStopped("implementation produced no commits")
 
     def push(self, branch: str) -> None:
+        LOGGER.info("git: pushing %s to origin", branch)
         self._call("push", "--set-upstream", "origin", branch)
+        LOGGER.info("git: pushed %s", branch)
 
     def _call(self, *args: str) -> str:
         proc = self._run_process(
@@ -336,6 +404,7 @@ class GitRepository:
         )
         if proc.returncode != 0:
             command = " ".join(("git", *args))
+            LOGGER.error("git: %s failed: %s", command, proc.stderr.strip())
             raise WorkflowError(f"{command} failed: {proc.stderr.strip()}")
         return proc.stdout
 
@@ -369,6 +438,7 @@ class GitHub:
         return branch["name"]
 
     def issue(self, number: int) -> dict:
+        LOGGER.info("github: loading issue #%s", number)
         payload = self._json_call(
             "issue",
             "view",
@@ -390,7 +460,9 @@ class GitHub:
     def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
         if marker in self._markers:
+            LOGGER.info("github: comment '%s' already posted, skipping", key)
             return
+        LOGGER.info("github: commenting '%s' on issue #%s", key, number)
         self._body_call(
             _render_comment(marker, title, payload),
             "issue",
@@ -409,6 +481,12 @@ class GitHub:
         body: str,
         draft: bool,
     ) -> str:
+        LOGGER.info(
+            "github: creating %s pull request %s -> %s",
+            "draft" if draft else "ready",
+            branch,
+            base,
+        )
         args = ["pr", "create", "--base", base, "--head", branch, "--title", title]
         if draft:
             args.append("--draft")
@@ -444,6 +522,7 @@ class GitHub:
             stdin=subprocess.DEVNULL,
         )
         if proc.returncode != 0:
+            LOGGER.error("gh: %s failed: %s", args[0], proc.stderr.strip())
             raise WorkflowError(f"gh {' '.join(args)} failed: {proc.stderr.strip()}")
         return proc.stdout
 
@@ -485,11 +564,31 @@ class AgentGateway:
         model = role_options.model
         reasoning_effort = role_options.reasoning_effort
         agent_name = f"gdw-{self.issue}-{role}"
+        LOGGER.info(
+            "agent %s: ensuring '%s' (backend=%s model=%s effort=%s)",
+            role,
+            agent_name,
+            backend,
+            model,
+            reasoning_effort,
+        )
         ensure_args = ["ensure", agent_name, "--backend", backend]
         if model is not None:
             ensure_args += ["--model", model]
         if reasoning_effort is not None:
             ensure_args += ["--reasoning-effort", reasoning_effort]
+        LOGGER.info(
+            "agent %s: turn starting (prompt=%s '%s' of %s chars, schema=%s, "
+            "timeout=%ss)",
+            role,
+            prompt_name,
+            schema_name,
+            len(prompt),
+            schema.name,
+            timeout,
+        )
+        LOGGER.debug("agent %s: prompt sent\n%s", role, prompt)
+        started = time.monotonic()
         with self._without_github_access() as environment:
             self._run_cli(ensure_args, environment, timeout=30)
             turn = self._run_cli(
@@ -506,6 +605,13 @@ class AgentGateway:
                 environment,
                 timeout=timeout + 5,
             )
+        LOGGER.info(
+            "agent %s: turn finished in %.1fs with %s chars of stdout",
+            role,
+            time.monotonic() - started,
+            len(turn.stdout),
+        )
+        LOGGER.debug("agent %s: stdout\n%s", role, turn.stdout)
         _header, separator, payload = turn.stdout.partition("\n")
         if not separator:
             raise WorkflowError(f"agent '{role}' returned no structured response")
@@ -526,6 +632,7 @@ class AgentGateway:
         *,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
+        LOGGER.debug("orchestrator: invoking '%s' (timeout %ss)", args[0], timeout)
         try:
             result = self._run_process(
                 ["orchestrator", *args],
@@ -538,9 +645,11 @@ class AgentGateway:
                 timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            LOGGER.error("orchestrator: '%s' failed to run: %s", args[0], exc)
             raise WorkflowError(f"orchestrator CLI failed: {exc}") from exc
         if result.returncode != 0:
             message = result.stderr.strip() or f"exited {result.returncode}"
+            LOGGER.error("orchestrator: '%s' failed: %s", args[0], message)
             raise WorkflowError(f"orchestrator CLI failed: {message}")
         return result
 
@@ -600,6 +709,13 @@ class DevelopmentWorkflow:
         existing_url = self.completed_url()
         if existing_url is not None:
             return existing_url
+        LOGGER.info(
+            "workflow: issue #%s, branch %s onto %s, draft=%s",
+            self.issue_number,
+            self.branch,
+            self.base_branch,
+            self.draft,
+        )
         issue_context = self.load_issue()
         expansion = self.clarify(issue_context)
         specification = self.specify(issue_context, expansion)
@@ -611,6 +727,7 @@ class DevelopmentWorkflow:
     def completed_url(self) -> str | None:
         existing_url = self.store.metadata.get("pr_url")
         if isinstance(existing_url, str) and existing_url:
+            LOGGER.info("workflow: already completed, pull request %s", existing_url)
             return existing_url
         return None
 
@@ -624,6 +741,13 @@ class DevelopmentWorkflow:
             and isinstance(comment.get("body"), str)
             and "<!-- gdw:" not in comment["body"]
         ][-5:]
+        LOGGER.info(
+            "workflow: issue #%s %r loaded with %s of %s comment(s) forwarded",
+            issue.get("number"),
+            issue.get("title"),
+            len(latest_comments),
+            len(comments) if isinstance(comments, list) else 0,
+        )
         return {
             "initial": {
                 "number": issue.get("number"),
@@ -689,6 +813,7 @@ class DevelopmentWorkflow:
         )
         if not url:
             raise WorkflowError("GitHub returned an empty pull-request URL")
+        LOGGER.info("workflow: pull request created at %s", url)
         self.store.record_pr(url)
         self.github.comment_once(
             self.issue_number,
@@ -704,6 +829,7 @@ class DevelopmentWorkflow:
         previous_unresolved: str | None = None
         round_number = 1
         while True:
+            LOGGER.info("clarification: round %s", round_number)
             if expansion is None:
                 prompt = "expand"
                 values = {"ISSUE_CONTEXT_JSON": _json(issue_context["initial"])}
@@ -746,6 +872,7 @@ class DevelopmentWorkflow:
                 and not grill["needs_another_round"]
                 and grill["verdict"] == "ready"
             ):
+                LOGGER.info("clarification: converged after %s round(s)", round_number)
                 return expansion
             unresolved = _json(
                 {
@@ -765,6 +892,7 @@ class DevelopmentWorkflow:
         attempt = 1
         while True:
             key = f"ci-{prefix}-{attempt}"
+            LOGGER.info("ci: %s attempt %s", prefix, attempt)
             ci = self.repository.run_ci()
             result = ci.as_json()
             self.store.save(key, result)
@@ -775,7 +903,16 @@ class DevelopmentWorkflow:
                 result,
             )
             if result["returncode"] == 0:
+                LOGGER.info("ci: %s green on attempt %s", prefix, attempt)
                 return result
+            LOGGER.warning(
+                "ci: %s failed on attempt %s (exit %s); last %s lines:\n%s",
+                prefix,
+                attempt,
+                result["returncode"],
+                LOG_TAIL_LINES,
+                _tail(str(result["output"])),
+            )
             repair = self._stage(
                 Stage(
                     f"repair-{prefix}-{attempt}",
@@ -802,6 +939,7 @@ class DevelopmentWorkflow:
         previous_unresolved: str | None = None
         round_number = 1
         while True:
+            LOGGER.info("review: round %s", round_number)
             final = {}
             for kind in ("specification", "quality"):
                 final[kind] = self._stage(
@@ -822,6 +960,7 @@ class DevelopmentWorkflow:
                 review["verdict"] == "approve" and not review["needs_another_round"]
                 for review in final.values()
             ):
+                LOGGER.info("review: approved after %s round(s)", round_number)
                 return final
             unresolved = _json(
                 {
@@ -854,14 +993,30 @@ class DevelopmentWorkflow:
 
     def _stage(self, stage: Stage) -> dict:
         if self.store.has(stage.key):
-            return self.store.load(stage.key)
-        print(f"[{stage.key}] asking {stage.role}", file=sys.stderr)
+            cached = self.store.load(stage.key)
+            LOGGER.info(
+                "stage %s: reusing checkpoint from %s (%s)",
+                stage.key,
+                stage.role,
+                _outcome(cached),
+            )
+            return cached
+        LOGGER.info("stage %s: asking %s", stage.key, stage.role)
+        started = time.monotonic()
         result = self.agents.ask(
             role=stage.role,
             prompt_name=stage.prompt,
             schema_name=stage.schema,
             values=stage.values,
         )
+        LOGGER.info(
+            "stage %s: %s answered in %.1fs (%s)",
+            stage.key,
+            stage.role,
+            time.monotonic() - started,
+            _outcome(result),
+        )
+        LOGGER.debug("stage %s: reply\n%s", stage.key, _json(result))
         self.store.save(stage.key, result)
         role_github = self.role_github.get(stage.role, self.github)
         role_github.comment_once(self.issue_number, stage.key, stage.title, result)
@@ -877,6 +1032,7 @@ class DevelopmentWorkflow:
     def _require_progress(
         previous_unresolved: str | None, unresolved: str, process: str
     ) -> None:
+        LOGGER.debug("%s: unresolved state\n%s", process, unresolved)
         if unresolved == previous_unresolved:
             raise WorkflowStopped(f"{process} stalled with the same unresolved state")
 
@@ -912,11 +1068,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ready", action="store_true", help="open a ready PR instead of a draft"
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="log every prompt, reply, and subprocess at DEBUG level",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     opts = _parser().parse_args(argv)
+    configure_logging(opts.verbose)
     root = Path.cwd().resolve()
     example_root = Path(__file__).resolve().parent
     github = GitHub(root, opts.repo)
@@ -943,6 +1106,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         url = workflow.run()
     except WorkflowError as exc:
+        LOGGER.error("workflow stopped: %s", exc)
+        LOGGER.error(
+            "workflow: state kept in %s; rerun the same command to resume",
+            store.root,
+        )
         print(f"workflow stopped: {exc}", file=sys.stderr)
         return 1
     print(url)
