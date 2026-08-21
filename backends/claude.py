@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
@@ -43,10 +44,35 @@ OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
 # value starts with "{", which no argument parser reads as a flag.
 SCHEMA_FLAG = "--json-schema"
 
+# The dialect declaration, which the CLI cannot resolve. `--json-schema` is
+# checked by an ajv instance that only knows draft-07, so a document declaring
+# a newer dialect is refused before the turn starts:
+#   Error: --json-schema is not a valid JSON Schema: no schema with key or ref
+#   "https://json-schema.org/draft/2020-12/schema"
+# The keyword names the dialect and constrains nothing, and the orchestrator
+# has already checked the document against the dialect the file declared, so
+# dropping it for this one argument costs no validation. Every other keyword
+# is passed through exactly as loaded.
+DIALECT_KEYWORD = "$schema"
+
 # Claude's own parse of a schema-constrained reply. `result` carries the same
 # object as a JSON *string*, so this field only saves a parse — it is not a
 # second source of truth.
 STRUCTURED_FIELD = "structured_output"
+
+
+def schema_argument(schema: OutputSchema) -> str:
+    """The schema document as `--json-schema` accepts it: no dialect keyword.
+
+    A document that never declared one is passed through as loaded, so the
+    rewrite below is reached only by the schemas the CLI would otherwise
+    reject.
+    """
+    document = json.loads(schema.text)
+    if DIALECT_KEYWORD not in document:
+        return schema.text
+    del document[DIALECT_KEYWORD]
+    return json.dumps(document, separators=(",", ":"), sort_keys=True)
 
 
 def _pick_result_object(candidates: list[dict]) -> dict:
@@ -100,7 +126,7 @@ class ClaudeBackend(AgentBackend):
         if self.reasoning_effort is not None:
             args += ["--effort", self.reasoning_effort]
         if schema is not None:
-            args += [SCHEMA_FLAG, schema.text]
+            args += [SCHEMA_FLAG, schema_argument(schema)]
         if session_id:
             args += ["--resume", session_id]
         args += ["-p", prompt]

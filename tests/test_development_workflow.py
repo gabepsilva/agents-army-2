@@ -1563,7 +1563,12 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
     script = Path(simple_setup.__file__).with_name("simple_development_workflow.py")
 
     monkeypatch.setattr(sys, "argv", [str(script), "42"])
-    runpy.run_path(str(script), run_name="__main__")
+    # The script has to exit with main()'s status: a stopped workflow that
+    # returns 1 through a discarded return value looks like success to the
+    # shell, cron job, or CI step that started it.
+    with pytest.raises(SystemExit) as exited:
+        runpy.run_path(str(script), run_name="__main__")
+    assert exited.value.code == 0
     assert capsys.readouterr().out.strip() == "https://example.test/pulls/new"
     assert fresh.calls == [
         "completed",
@@ -1576,7 +1581,9 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
         ("publish", {"specification": 1}, {"reviews": "approved"}),
     ]
 
-    runpy.run_path(str(script), run_name="__main__")
+    with pytest.raises(SystemExit) as resumed_exit:
+        runpy.run_path(str(script), run_name="__main__")
+    assert resumed_exit.value.code == 0
     assert capsys.readouterr().out.strip() == "https://example.test/pulls/existing"
     assert resumed.calls == ["completed"]
     assert [call.args[0] for call in prepare.call_args_list] == [42, 42]

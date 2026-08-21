@@ -157,6 +157,18 @@ SCHEMA = OutputSchema(
 )
 
 
+# The same schema as the orchestrator loads it from a file that declares its
+# dialect. Its keys are deliberately unsorted, so a re-serialisation that lost
+# the canonical ordering would be visible.
+DIALECT_SCHEMA = OutputSchema(
+    text=(
+        '{"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema"'
+        ',"additionalProperties":false,"properties":{}}'
+    ),
+    path=Path("/schemas/reply.json"),
+)
+
+
 class TestAgentBackendInterface:
     def test_claude_name(self) -> None:
         assert ClaudeBackend().name == "claude"
@@ -535,6 +547,30 @@ class TestClaudeRunTurn:
         result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
         assert result.structured == {"verdict": "pass"}
         assert result.reply == "see structured_output"
+
+    def test_the_dialect_keyword_is_dropped_from_the_inline_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--json-schema` is checked by a draft-07 ajv: a `$schema` naming a
+        newer dialect makes the CLI exit 1 before the turn runs."""
+        backend = ClaudeBackend()
+        payload = json.dumps(
+            {"session_id": "s1", "result": "{}", "structured_output": {}}
+        )
+        seen: list[str] = []
+
+        def fake_run(args, **kwargs):
+            seen.append(args[args.index(CLAUDE_SCHEMA_FLAG) + 1])
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        backend.run_turn("hello", None, tmp_path, schema=DIALECT_SCHEMA)
+        backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+
+        assert seen == [
+            '{"additionalProperties":false,"properties":{},"type":"object"}',
+            SCHEMA.text,
+        ]
 
     def test_structured_falls_back_to_parsing_the_result_text(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
