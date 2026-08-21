@@ -79,7 +79,12 @@ verify-regression:
 # Without --max-children mutmut forks os.cpu_count() children, ignoring the
 # budget entirely. Its own pytest runs -n0 (see pyproject), so these children
 # are the whole of this gate's parallelism.
+# mutmut re-runs a mutant when its source changed but not when the tests did,
+# so a test-only edit is served from cache and the score never moves. Clear it
+# first when the selected tests no longer hash the same.
 mutation:
+	mkdir -p reports
+	uv run python tools/mutation_cache.py
 	uv run mutmut run --max-children $(CI_JOBS)
 	uv run mutmut export-cicd-stats
 	uv run python tools/mutation_gate.py

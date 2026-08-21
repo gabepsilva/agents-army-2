@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import tools.coverage_gate as coverage_gate
+import tools.mutation_cache as mutation_cache
 import tools.mutation_gate as mutation_gate
 import tools.ratchet_gate as ratchet_gate
 import tools.test_integrity as test_integrity
@@ -647,3 +648,105 @@ class TestBanditScope:
         )
         assert proc.returncode == 1
         assert "B301:blacklist" in proc.stdout
+
+
+class TestMutationCache:
+    """mutmut reuses a mutant's verdict when only the tests changed, so the
+    score it reports was reached by a suite that no longer exists."""
+
+    @staticmethod
+    def _project(root: Path, selection: list[str]) -> Path:
+        pyproject = root / "pyproject.toml"
+        entries = ", ".join(f'"{name}"' for name in selection)
+        pyproject.write_text(
+            f"[tool.mutmut]\npytest_add_cli_args_test_selection = [{entries}]\n",
+            encoding="utf-8",
+        )
+        return pyproject
+
+    @staticmethod
+    def _wire(monkeypatch: pytest.MonkeyPatch, root: Path, pyproject: Path) -> Path:
+        monkeypatch.setattr(mutation_cache, "PYPROJECT_PATH", pyproject)
+        monkeypatch.setattr(mutation_cache, "MUTANTS_DIR", root / "mutants")
+        digest_path = root / "reports" / "mutation-test-inputs.sha256"
+        monkeypatch.setattr(mutation_cache, "DIGEST_PATH", digest_path)
+        return digest_path
+
+    def test_changed_tests_drop_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        (tmp_path / "test_a.py").write_text("assert True\n", encoding="utf-8")
+        pyproject = self._project(tmp_path, [str(tmp_path / "test_a.py")])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+
+        # No digest recorded: the cache cannot be shown to match these tests,
+        # so it is not trusted.
+        assert mutation_cache.main() == 0
+        assert not cache.exists()
+        capsys.readouterr()
+
+        # Same tests as the recorded digest: the fast path survives.
+        cache.mkdir()
+        assert mutation_cache.main() == 0
+        assert cache.exists()
+        assert "reusing cached mutant results" in capsys.readouterr().out
+
+        # A planted assertion change must invalidate the cached verdicts.
+        (tmp_path / "test_a.py").write_text("assert False\n", encoding="utf-8")
+        assert mutation_cache.main() == 0
+        assert not cache.exists()
+        assert "tests changed since the cached run" in capsys.readouterr().out
+
+    def test_a_first_run_with_no_cache_only_records_the_digest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A fresh checkout has nothing to invalidate: record and stay quiet."""
+        (tmp_path / "test_a.py").write_text("assert True\n", encoding="utf-8")
+        pyproject = self._project(tmp_path, [str(tmp_path / "test_a.py")])
+        digest_path = self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main() == 0
+        assert capsys.readouterr().out == ""
+        assert digest_path.read_text(encoding="utf-8").strip() == mutation_cache.digest(
+            [tmp_path / "test_a.py"]
+        )
+
+    def test_digest_covers_the_selection_not_only_its_contents(
+        self, tmp_path: Path
+    ) -> None:
+        first = tmp_path / "test_a.py"
+        second = tmp_path / "test_b.py"
+        first.write_text("same\n", encoding="utf-8")
+        second.write_text("same\n", encoding="utf-8")
+
+        assert mutation_cache.digest([first]) != mutation_cache.digest([second])
+        assert mutation_cache.digest([first, second]) != mutation_cache.digest([first])
+
+    def test_selection_is_read_from_pyproject(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pyproject = self._project(tmp_path, ["tests/b.py", "tests/a.py"])
+        monkeypatch.setattr(mutation_cache, "PYPROJECT_PATH", pyproject)
+
+        assert mutation_cache.selected_tests(pyproject) == [
+            Path("tests/a.py"),
+            Path("tests/b.py"),
+        ]
+
+    def test_an_unreadable_selection_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        pyproject = self._project(tmp_path, [str(tmp_path / "absent.py")])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main() == 1
+        assert "cannot hash the mutmut test selection" in capsys.readouterr().out
+
+    def test_the_real_makefile_clears_the_cache_before_measuring(self) -> None:
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert "tools/mutation_cache.py" in mutation
+        assert mutation.index("tools/mutation_cache.py") < mutation.index("mutmut run")

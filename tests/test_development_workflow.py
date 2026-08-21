@@ -1768,3 +1768,60 @@ def test_a_blocked_stage_names_the_checkpoint_to_delete(
         f"{tmp_path / 'state' / 'artifacts' / 'repair-implementation-2.json'} "
         f"to ask again" in [record.getMessage() for record in caplog.records]
     )
+
+
+def test_ci_signature_ignores_run_to_run_noise_but_not_a_moved_score() -> None:
+    """`make -j` interleaves differently every run, so comparing the evidence
+    itself never reports a stall on a repair that achieved nothing."""
+    failure = (
+        "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%\n"
+        "make: *** [Makefile:85: mutation] Error 1\n"
+    )
+    noisier = f"unrelated gate chatter\n{failure}"
+    moved = failure.replace("95.4", "96.1").replace("1671", "1685")
+
+    signature = gdw._ci_signature({"returncode": 2, "output": failure})
+
+    assert signature == gdw._ci_signature({"returncode": 2, "output": noisier})
+    assert signature != gdw._ci_signature({"returncode": 2, "output": moved})
+    assert json.loads(signature) == {
+        "returncode": 2,
+        "failed_targets": ["mutation"],
+        "verdicts": [
+            "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%"
+        ],
+    }
+    assert json.loads(gdw._ci_signature({"returncode": 0})) == {
+        "returncode": 0,
+        "failed_targets": [],
+        "verdicts": [],
+    }
+
+
+def test_a_ci_failure_that_never_moves_is_reported_as_stalled(
+    tmp_path: Path,
+) -> None:
+    """The loop this replaces ran forever: the agent reworded its repair every
+    round, so the compared state never repeated even though CI never moved."""
+    failure = (
+        "mutation score 95.4% (1671 killed, 78 survived, 1751 mutants) floor 98.0%\n"
+        "make: *** [Makefile:85: mutation] Error 1\n"
+    )
+    repository = FakeRepository(
+        [
+            gdw.CommandResult(2, f"first ordering\n{failure}"),
+            gdw.CommandResult(2, f"second ordering, other gates chatter\n{failure}"),
+        ]
+    )
+    repairs = [
+        _implementation() | {"summary": "tightened the assertions"},
+        _implementation() | {"summary": "rewrote them again, differently"},
+    ]
+    workflow, _github, _repository, agents = _workflow(
+        tmp_path, repairs, {"repository": repository}
+    )
+
+    with pytest.raises(gdw.WorkflowStopped, match="CI repair stalled"):
+        workflow.stabilize(_specification())
+
+    assert len(agents.calls) == 2

@@ -34,6 +34,14 @@ GITHUB_TOKEN_NAMES = (
 CI_EVIDENCE_CHARS = 20_000
 # The braille block, which every spinner this project's gates print draws from.
 SPINNER_FRAME = re.compile(r"^[\u2800-\u28ff]+\s*")
+# `make: *** [Makefile:85: mutation] Error 1` — which gate failed, not where.
+FAILED_TARGET = re.compile(r"^make: \*\*\* \[[^\]]*: (\S+)\] Error", re.MULTILINE)
+# The numbers a gate reports when it refuses: a score that has not moved is a
+# repair that achieved nothing, however differently the agent described it.
+GATE_VERDICT = re.compile(
+    r"^(?:mutation score .*|.*Coverage failure.*|Found \d+ (?:error|diagnostic)s?\.)$",
+    re.MULTILINE,
+)
 DEFAULT_AGENT_TIMEOUT = 3_600
 DEFAULT_CI_TIMEOUT = 7_200
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(message)s"
@@ -203,6 +211,26 @@ def _tail(text: str, lines: int = LOG_TAIL_LINES) -> str:
     """The last few lines of long evidence, for a readable failure log."""
 
     return "\n".join(text.splitlines()[-lines:])
+
+
+def _ci_signature(result: Mapping[str, object]) -> str:
+    """What a CI failure is, stripped of everything that varies between runs.
+
+    `make -j` interleaves its gates differently every time, so two runs of one
+    unchanged failure differ by thousands of characters and comparing the
+    evidence itself never reports a stall. Which targets failed, and the
+    numbers they refused on, do not vary — and when those repeat, the repair
+    between them changed nothing that CI can see.
+    """
+
+    output = str(result.get("output", ""))
+    return _json(
+        {
+            "returncode": result.get("returncode"),
+            "failed_targets": sorted(set(FAILED_TARGET.findall(output))),
+            "verdicts": sorted(set(GATE_VERDICT.findall(output))),
+        }
+    )
 
 
 def _outcome(result: Mapping[str, object]) -> str:
@@ -956,7 +984,8 @@ class DevelopmentWorkflow:
                 )
             )
             self._require_complete(repair, "CI repair", f"repair-{prefix}-{attempt}")
-            unresolved = _json({"ci": result, "repair": repair})
+            unresolved = _ci_signature(result)
+            LOGGER.info("ci: %s unresolved as %s", prefix, unresolved)
             self._require_progress(previous_unresolved, unresolved, "CI repair")
             previous_unresolved = unresolved
             attempt += 1
