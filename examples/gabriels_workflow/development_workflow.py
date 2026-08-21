@@ -160,7 +160,13 @@ class GitHubService(Protocol):
     def adopt_markers(self, markers: set[str]) -> None: ...
 
     def comment_once(
-        self, number: int, key: str, title: str, payload: object
+        self,
+        number: int,
+        key: str,
+        title: str,
+        payload: object,
+        *,
+        attribution: str = "",
     ) -> None: ...
 
     def collect_markers(self, number: int) -> None: ...
@@ -189,6 +195,8 @@ class RepositoryService(Protocol):
 
 
 class AgentService(Protocol):
+    def options(self, role: str) -> RoleOptions: ...
+
     def ask(
         self,
         *,
@@ -437,8 +445,23 @@ def _markdown(value: object, heading_level: int = 3) -> str:
     return _markdown_scalar(value)
 
 
-def _render_comment(marker: str, title: str, payload: object) -> str:
-    return f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
+def _attribution(options: RoleOptions) -> str:
+    def field(value: str | None) -> str:
+        return f"`{value}`" if value and value.strip() else "_unset_"
+
+    return (
+        "\n---\n\n"
+        f"backend: {field(options.backend)}  \n"
+        f"model: {field(options.model)}  \n"
+        f"reasoning_effort: {field(options.reasoning_effort)}\n"
+    )
+
+
+def _render_comment(
+    marker: str, title: str, payload: object, attribution: str = ""
+) -> str:
+    rendered = f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
+    return rendered + attribution if attribution else rendered
 
 
 def _pull_request_number(url: str) -> int:
@@ -745,14 +768,22 @@ class GitHub:
         payload = self._json_call("issue", "view", str(number), "--json", "comments")
         self.markers |= _comment_markers(payload.get("comments", []))
 
-    def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
+    def comment_once(
+        self,
+        number: int,
+        key: str,
+        title: str,
+        payload: object,
+        *,
+        attribution: str = "",
+    ) -> None:
         marker = f"<!-- gdw:{number}:{key} -->"
         if marker in self.markers:
             LOGGER.info("github: comment '%s' already posted, skipping", key)
             return
         LOGGER.info("github: commenting '%s' on #%s", key, number)
         self._body_call(
-            _render_comment(marker, title, payload),
+            _render_comment(marker, title, payload, attribution),
             "issue",
             "comment",
             str(number),
@@ -838,6 +869,12 @@ class AgentGateway:
         self.validations = example_root / "validations"
         self._run_process = run
 
+    def options(self, role: str) -> RoleOptions:
+        role_options = self.roles.get(role)
+        if role_options is None:
+            raise WorkflowError(f"agent role '{role}' is not configured")
+        return role_options
+
     def ask(
         self,
         *,
@@ -849,9 +886,7 @@ class AgentGateway:
     ) -> dict:
         prompt = self._prompt(prompt_name, values)
         schema = self.validations / f"{schema_name}.json"
-        role_options = self.roles.get(role)
-        if role_options is None:
-            raise WorkflowError(f"agent role '{role}' is not configured")
+        role_options = self.options(role)
         backend = role_options.backend
         model = role_options.model
         reasoning_effort = role_options.reasoning_effort
@@ -1243,6 +1278,7 @@ class DevelopmentWorkflow:
             self.store.save(key, result)
             # The log itself stays local: it is checkpointed and handed to the
             # repair agent, while the pull request gets the verdict it can act on.
+            # This checklist is driver-authored output, not agent output.
             self.github.comment_once(
                 self._comment_number(),
                 key,
@@ -1370,7 +1406,11 @@ class DevelopmentWorkflow:
         self.store.save(stage.key, result)
         role_github = self.role_github.get(stage.role, self.github)
         role_github.comment_once(
-            self._comment_number(stage.role), stage.key, stage.title, result
+            self._comment_number(stage.role),
+            stage.key,
+            stage.title,
+            result,
+            attribution=_attribution(self.agents.options(stage.role)),
         )
         return result
 

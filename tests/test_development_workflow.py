@@ -368,6 +368,7 @@ def _review(verdict: str = "approve", needs_another_round: bool | None = None) -
 class FakeGitHub:
     def __init__(self, pr_url: str = "https://example.test/pr/1") -> None:
         self.comments: list[tuple] = []
+        self.attributions: list[str] = []
         self.pr_calls: list[dict] = []
         self.pr_updates: list[dict] = []
         self.collected_markers: list[int] = []
@@ -383,10 +384,19 @@ class FakeGitHub:
     def collect_markers(self, number: int) -> None:
         self.collected_markers.append(number)
 
-    def comment_once(self, number: int, key: str, title: str, payload: object) -> None:
+    def comment_once(
+        self,
+        number: int,
+        key: str,
+        title: str,
+        payload: object,
+        *,
+        attribution: str = "",
+    ) -> None:
         if key in self.markers:
             return
         self.comments.append((number, key, title, payload))
+        self.attributions.append(attribution)
         self.markers.add(key)
 
     def create_pr(
@@ -475,9 +485,20 @@ class EntryWorkflow:
 
 
 class FakeAgents:
-    def __init__(self, replies: list[dict]) -> None:
+    def __init__(
+        self,
+        replies: list[dict],
+        roles: Mapping[str, gdw.RoleOptions] | None = None,
+    ) -> None:
         self.replies = deque(replies)
         self.calls: list[dict] = []
+        self.roles = dict(roles or {})
+        self.default_options = gdw._StaticRoleOptions(
+            "fake-backend", "fake-model", "fake-effort"
+        )
+
+    def options(self, role: str) -> gdw.RoleOptions:
+        return self.roles.get(role, self.default_options)
 
     def ask(
         self,
@@ -508,13 +529,14 @@ def _workflow(
     settings = {
         "github": None,
         "repository": None,
+        "agent_roles": None,
     }
     settings.update(overrides or {})
     store = gdw.ArtifactStore(tmp_path / "state")
     store.initialize(42, "feature", "base-sha")
     github = settings["github"] or FakeGitHub()
     repository = settings["repository"] or FakeRepository()
-    agents = FakeAgents(agent_replies)
+    agents = FakeAgents(agent_replies, settings["agent_roles"])
     workflow = gdw.DevelopmentWorkflow(
         gdw.WorkflowOptions(
             42,
@@ -562,6 +584,47 @@ def test_helpers_render_and_bound() -> None:
         "output": "bad",
         "gates": [],
     }
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (
+            gdw._StaticRoleOptions("grok", "grok-4.6", "high"),
+            "\n---\n\nbackend: `grok`  \nmodel: `grok-4.6`  \nreasoning_effort: `high`\n",
+        ),
+        (
+            gdw._StaticRoleOptions("claude", None, "high"),
+            "\n---\n\nbackend: `claude`  \nmodel: _unset_  \nreasoning_effort: `high`\n",
+        ),
+        (
+            gdw._StaticRoleOptions("codex"),
+            "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_\n",
+        ),
+    ],
+)
+def test_attribution_renders_each_configured_field_exactly(
+    options: gdw.RoleOptions, expected: str
+) -> None:
+    attribution = gdw._attribution(options)
+
+    assert attribution == expected
+    assert "`_unset_`" not in attribution
+    assert "default" not in attribution
+
+
+def test_render_comment_only_appends_a_nonempty_attribution() -> None:
+    base = "<!-- marker -->\n## GDW — Title\n\n### Answer\n\n1\n"
+    footer = (
+        "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_\n"
+    )
+
+    assert gdw._render_comment("<!-- marker -->", "Title", {"answer": 1}) == base
+    assert gdw._render_comment("<!-- marker -->", "Title", {"answer": 1}, "") == base
+    assert (
+        gdw._render_comment("<!-- marker -->", "Title", {"answer": 1}, footer)
+        == base + footer
+    )
 
 
 def test_artifact_store_round_trip_resume_and_errors(tmp_path: Path) -> None:
@@ -722,11 +785,18 @@ def test_github_owns_markdown_comments_and_pull_requests(tmp_path: Path) -> None
     assert github.issue(9)["number"] == 9
     github.comment_once(9, "existing", "Skipped", {})
     assert bodies == []
-    github.comment_once(9, "new", "New", {"answer": 1})
+    github.comment_once(
+        9,
+        "new",
+        "New",
+        {"answer": 1},
+        attribution="\n---\n\nbackend: `grok`\n",
+    )
     github.comment_once(9, "new", "New", {"answer": 1})
     assert len(bodies) == 1
     assert "<!-- gdw:9:new -->" in bodies[0]
     assert "### Answer\n\n1" in bodies[0]
+    assert "backend: `grok`" in bodies[0]
     assert "```json" not in bodies[0]
     assert (
         github.create_pr(
@@ -884,11 +954,18 @@ def test_github_app_client_owns_app_auth_comments_and_pull_requests(
 
     client.comment_once(9, "existing", "Skipped", {})
     issue.create_comment.assert_not_called()
-    client.comment_once(9, "new", "New", {"answer": 1})
+    client.comment_once(
+        9,
+        "new",
+        "New",
+        {"answer": 1},
+        attribution="\n---\n\nbackend: `grok`\n",
+    )
     client.comment_once(9, "new", "New", {"answer": 1})
     posted = issue.create_comment.call_args.args[0]
     assert "<!-- gdw:9:new -->" in posted
     assert "### Answer\n\n1" in posted
+    assert "backend: `grok`" in posted
     assert issue.create_comment.call_count == 1
 
     assert (
@@ -1246,6 +1323,9 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         example_root=Path(gdw.__file__).parent,
         run=fake_run,
     )
+    assert gateway.options("expander") is configured
+    with pytest.raises(gdw.WorkflowError, match="role 'missing' is not configured"):
+        gateway.options("missing")
     gateway.ask(
         role="expander",
         prompt_name="expand",
@@ -1355,7 +1435,15 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         _review(),
         _review(),
     ]
-    workflow, driver_github, _repository, _agents = _workflow(tmp_path, replies)
+    roles = {
+        role: gdw._StaticRoleOptions(
+            f"backend-{role}", f"model-{role}", f"effort-{role}"
+        )
+        for role in REQUIRED_ROLES
+    }
+    workflow, driver_github, _repository, _agents = _workflow(
+        tmp_path, replies, {"agent_roles": roles}
+    )
     role_github = {role: FakeGitHub() for role in REQUIRED_ROLES}
     workflow.role_github = cast(dict[str, gdw.GitHubService], role_github)
 
@@ -1373,6 +1461,9 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         role: client.comments[0][1] for role, client in role_github.items()
     } == expected_keys
     assert all(len(client.comments) == 1 for client in role_github.values())
+    assert {role: client.attributions[0] for role, client in role_github.items()} == {
+        role: gdw._attribution(options) for role, options in roles.items()
+    }
     issue_roles = gdw.ISSUE_COMMENT_ROLES
     for role, client in role_github.items():
         number = client.comments[0][0]
@@ -1382,6 +1473,7 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
             assert number == 1
     assert {comment[1] for comment in driver_github.comments} == {"ci-implementation-1"}
     assert driver_github.comments[0][0] == 1
+    assert driver_github.attributions == [""]
 
 
 def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
@@ -1964,7 +2056,7 @@ def test_workflow_logs_progress_checkpoint_reuse_and_ci_failures(
 def test_cached_stage_logs_that_it_reused_the_checkpoint(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    workflow, _github, _repository, agents = _workflow(tmp_path, [])
+    workflow, github, _repository, agents = _workflow(tmp_path, [])
     workflow.store.save("specification", _specification())
     stage = gdw.Stage("specification", "Specification", "specifier", "specify", "s", {})
 
@@ -1976,6 +2068,8 @@ def test_cached_stage_logs_that_it_reused_the_checkpoint(
         "stage specification: reusing checkpoint from specifier (no outcome fields)"
         in [record.getMessage() for record in caplog.records]
     )
+    assert github.comments == []
+    assert github.attributions == []
 
 
 def test_simple_entrypoint_reports_a_stopped_workflow_and_how_to_resume(

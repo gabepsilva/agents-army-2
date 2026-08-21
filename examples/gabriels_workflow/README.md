@@ -68,6 +68,10 @@ last bot comment there. The implementer app then opens a draft pull request and
 posts implementation, CI, and review there. The same app commits, pushes, and
 updates that pull request when the work is done.
 
+Each stage comment ends with the `backend`, `model`, and `reasoning_effort` that
+produced it. An unset model or effort is shown as `_unset_`, meaning the
+backend CLI selected its default.
+
 CI is reported as a checklist rather than a log: one ✅, ❌ or ⚪ per gate that
 `make ci` runs, a failing gate carrying a one-line reason. The gate list comes
 from `make ci-gates`, and a gate that never started when an earlier one failed
