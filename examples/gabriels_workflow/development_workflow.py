@@ -72,6 +72,7 @@ AGENT_ROLES = frozenset(
         "griller",
         "specifier",
         "implementer",
+        "documenter",
         "reviewer-specification",
         "reviewer-quality",
     }
@@ -204,6 +205,7 @@ class AgentService(Protocol):
         prompt_name: str,
         schema_name: str,
         values: Mapping[str, str],
+        skills: Sequence[str] = (),
         timeout: int = DEFAULT_AGENT_TIMEOUT,
     ) -> dict: ...
 
@@ -251,6 +253,7 @@ class Stage:
     prompt: str
     schema: str
     values: Mapping[str, str]
+    skills: Sequence[str] = ()
 
 
 def _json(value: object) -> str:
@@ -882,6 +885,7 @@ class AgentGateway:
         prompt_name: str,
         schema_name: str,
         values: Mapping[str, str],
+        skills: Sequence[str] = (),
         timeout: int = DEFAULT_AGENT_TIMEOUT,
     ) -> dict:
         prompt = self._prompt(prompt_name, values)
@@ -892,18 +896,21 @@ class AgentGateway:
         reasoning_effort = role_options.reasoning_effort
         agent_name = f"gdw-{self.issue}-{role}"
         LOGGER.info(
-            "agent %s: using '%s' (backend=%s model=%s effort=%s)",
+            "agent %s: using '%s' (backend=%s model=%s effort=%s skills=%s)",
             role,
             agent_name,
             backend,
             model,
             reasoning_effort,
+            ",".join(skills) or "-",
         )
         turn_args = ["talk", agent_name, "--backend", backend]
         if model is not None:
             turn_args += ["--model", model]
         if reasoning_effort is not None:
             turn_args += ["--reasoning-effort", reasoning_effort]
+        if skills:
+            turn_args += ["--skill", ",".join(skills)]
         LOGGER.info(
             "agent %s: turn starting (prompt=%s '%s' of %s chars, schema=%s, "
             "timeout=%ss)",
@@ -1133,9 +1140,21 @@ class DevelopmentWorkflow:
                 "implement",
                 "implementation",
                 {"SPECIFICATION_JSON": _json(specification)},
+                skills=("code-simplification",),
             )
         )
         self._require_complete(implementation, "implementation", "implementation")
+        documentation = self._stage(
+            Stage(
+                "documentation",
+                "Documentation update",
+                "documenter",
+                "document",
+                "documentation",
+                {"SPECIFICATION_JSON": _json(specification)},
+            )
+        )
+        self._require_complete(documentation, "documentation", "documentation")
         return implementation
 
     def stabilize(self, specification: dict) -> dict:
@@ -1301,6 +1320,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(result),
                     },
+                    skills=("code-simplification",),
                 )
             )
             self._require_complete(repair, "CI repair", f"repair-{prefix}-{attempt}")
@@ -1319,19 +1339,23 @@ class DevelopmentWorkflow:
         while True:
             LOGGER.info("review: round %s", round_number)
             final = {}
+            review_skills = {
+                "specification": (),
+                "quality": ("code-review-and-quality", "code-simplification"),
+            }
             for kind in ("specification", "quality"):
                 final[kind] = self._stage(
                     Stage(
                         f"review-{round_number}-{kind}",
                         f"{kind.title()} review round {round_number}",
                         f"reviewer-{kind}",
-                        "review",
+                        f"review-{kind}",
                         "review",
                         {
-                            "REVIEW_KIND": kind,
                             "SPECIFICATION_JSON": _json(specification),
                             "CI_SUMMARY": _json(ci_summary),
                         },
+                        skills=review_skills[kind],
                     )
                 )
             if all(
@@ -1363,6 +1387,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(final),
                     },
+                    skills=("code-simplification",),
                 )
             )
             self._require_complete(
@@ -1388,6 +1413,7 @@ class DevelopmentWorkflow:
             prompt_name=stage.prompt,
             schema_name=stage.schema,
             values=stage.values,
+            skills=stage.skills,
         )
         LOGGER.info(
             "stage %s: %s answered in %.1fs (%s)",

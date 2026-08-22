@@ -9,7 +9,7 @@ import runpy
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,6 +113,15 @@ def _implementation(status: str = "complete") -> dict:
         "summary": "implemented",
         "files_changed": ["feature.py"],
         "tests_run": ["pytest"],
+        "blockers": [] if status == "complete" else ["missing decision"],
+    }
+
+
+def _documentation(status: str = "complete") -> dict:
+    return {
+        "status": status,
+        "summary": "documented",
+        "files_changed": ["README.md"],
         "blockers": [] if status == "complete" else ["missing decision"],
     }
 
@@ -507,6 +516,7 @@ class FakeAgents:
         prompt_name: str,
         schema_name: str,
         values: Mapping[str, str],
+        skills: Sequence[str] = (),
         timeout: int = gdw.DEFAULT_AGENT_TIMEOUT,
     ) -> dict:
         self.calls.append(
@@ -515,6 +525,7 @@ class FakeAgents:
                 "prompt_name": prompt_name,
                 "schema_name": schema_name,
                 "values": values,
+                "skills": skills,
                 "timeout": timeout,
             }
         )
@@ -1347,9 +1358,56 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         )
 
 
+def test_agent_gateway_attaches_skills_only_when_given(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs):
+        calls.append(args)
+        return _completed(
+            args,
+            stdout=f"[gdw-7-implementer session=s1]\n{json.dumps(_implementation())}\n",
+        )
+
+    gateway = gdw.AgentGateway(
+        roles={
+            "implementer": SimpleNamespace(
+                backend="codex", model=None, reasoning_effort=None
+            )
+        },
+        issue=7,
+        state_file=tmp_path / "agents.json",
+        example_root=Path(gdw.__file__).parent,
+        run=fake_run,
+    )
+    gateway.ask(
+        role="implementer",
+        prompt_name="implement",
+        schema_name="implementation",
+        values={"SPECIFICATION_JSON": "{}"},
+        skills=("code-simplification",),
+    )
+    assert "--skill" in calls[0]
+    assert calls[0][calls[0].index("--skill") + 1] == "code-simplification"
+
+    gateway.ask(
+        role="implementer",
+        prompt_name="implement",
+        schema_name="implementation",
+        values={"SPECIFICATION_JSON": "{}"},
+    )
+    assert "--skill" not in calls[1]
+
+
 def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> None:
     example_root = Path(gdw.__file__).parent
-    schema_names = ("expansion", "grill", "specification", "implementation", "review")
+    schema_names = (
+        "expansion",
+        "grill",
+        "specification",
+        "implementation",
+        "documentation",
+        "review",
+    )
     for name in schema_names:
         schema = load_schema(example_root / "validations" / f"{name}.json")
         assert schema.path.is_absolute()
@@ -1367,7 +1425,6 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         "GRILL_JSON": "{}",
         "SPECIFICATION_JSON": "{}",
         "FAILURE_EVIDENCE": "{}",
-        "REVIEW_KIND": "quality",
         "CI_SUMMARY": "{}",
     }
     prompt_names = (
@@ -1377,7 +1434,9 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         "specify",
         "implement",
         "repair",
-        "review",
+        "document",
+        "review-specification",
+        "review-quality",
     )
     for name in prompt_names:
         prompt = gateway._prompt(name, values)
@@ -1393,6 +1452,7 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _review(),
         _review(),
     ]
@@ -1416,9 +1476,9 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     assert "### Problem Statement\n\nproblem" in pr_body
     assert "### Specification\n\n#### Verdict\n\napprove" in pr_body
     assert "```json" not in pr_body
-    assert len(agents.calls) == 6
+    assert len(agents.calls) == 7
     assert workflow.run() == "https://example.test/pr/1"
-    assert len(agents.calls) == 6
+    assert len(agents.calls) == 7
 
 
 def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> None:
@@ -1427,6 +1487,7 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _review(),
         _review(),
     ]
@@ -1449,6 +1510,7 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         "griller": "grill-1",
         "specifier": "specification",
         "implementer": "implementation",
+        "documenter": "documentation",
         "reviewer-specification": "review-1-specification",
         "reviewer-quality": "review-1-quality",
     }
@@ -1479,6 +1541,7 @@ def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _review(),
         _review(),
     ]
@@ -1493,6 +1556,7 @@ def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
     assert issue_keys == ["expansion-1", "grill-1", "specification"]
     assert pr_keys == [
         "implementation",
+        "documentation",
         "ci-implementation-1",
         "review-1-specification",
         "review-1-quality",
@@ -1598,6 +1662,7 @@ def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _implementation(),
         _review("changes_requested"),
         _review(),
@@ -1619,7 +1684,8 @@ def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
     prompts = [call["prompt_name"] for call in agents.calls]
     assert prompts.count("revise") == 1
     assert prompts.count("repair") == 2
-    assert prompts.count("review") == 4
+    assert prompts.count("review-specification") == 2
+    assert prompts.count("review-quality") == 2
 
 
 def test_clarification_continues_until_both_agents_report_convergence(
@@ -1664,11 +1730,11 @@ def test_review_continues_until_every_reviewer_reports_convergence(
     result = workflow.review(_specification(), {"returncode": 0, "output": "green"})
     assert all(not review["needs_another_round"] for review in result.values())
     assert [call["prompt_name"] for call in agents.calls] == [
-        "review",
-        "review",
+        "review-specification",
+        "review-quality",
         "repair",
-        "review",
-        "review",
+        "review-specification",
+        "review-quality",
     ]
     assert repository.ci == deque()
 
@@ -1734,6 +1800,7 @@ def test_workflow_stops_on_blocked_repairs_and_empty_pr_url(tmp_path: Path) -> N
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _implementation("blocked"),
     ]
     workflow, *_ = _workflow(
@@ -1749,6 +1816,7 @@ def test_workflow_stops_on_blocked_repairs_and_empty_pr_url(tmp_path: Path) -> N
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _review("changes_requested"),
         _review(),
         _implementation("blocked"),
@@ -1762,6 +1830,7 @@ def test_workflow_stops_on_blocked_repairs_and_empty_pr_url(tmp_path: Path) -> N
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _review(),
         _review(),
     ]
@@ -2006,6 +2075,7 @@ def test_workflow_logs_progress_checkpoint_reuse_and_ci_failures(
         _grill(),
         _specification(),
         _implementation(),
+        _documentation(),
         _implementation(),
         _review(),
         _review(),
