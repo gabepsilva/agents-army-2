@@ -1,6 +1,6 @@
 """Load a reply schema, and check a reply against it.
 
-`--validate-schema` has to mean the same thing on all three CLIs. Two of them
+`--schema` has to mean the same thing on all three CLIs. Two of them
 (claude, grok) take any JSON Schema and accept a lax one; codex rejects a
 schema that is not in OpenAI's strict structured-outputs dialect with an HTTP
 400 before the turn runs. A schema that works on two backends and 400s on the

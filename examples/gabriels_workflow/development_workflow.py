@@ -899,7 +899,7 @@ class AgentGateway:
             model,
             reasoning_effort,
         )
-        turn_args = ["--agent", agent_name, "--backend", backend]
+        turn_args = ["talk", agent_name, "--backend", backend]
         if model is not None:
             turn_args += ["--model", model]
         if reasoning_effort is not None:
@@ -918,7 +918,7 @@ class AgentGateway:
         started = time.monotonic()
         with self._without_github_access() as environment:
             turn_args += [
-                "--validate-schema",
+                "--schema",
                 str(schema),
                 "--timeout",
                 str(timeout),

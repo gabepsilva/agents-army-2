@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import pytest
+
+import orchestrator
+from backends.base import AgentBackend, TurnResult
+from backends.registry import register_backend
+
+
+class RecordingBackend(AgentBackend):
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    def run_turn(
+        self,
+        prompt: str,
+        session_id: str | None,
+        cwd: Path,
+        timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
+        schema=None,
+    ) -> TurnResult:
+        return TurnResult(session_id="sid", reply=f"reply:{prompt}", raw="")
+
+
+@pytest.fixture(autouse=True)
+def recording_backend() -> None:
+    register_backend("recording", RecordingBackend)
+
+
+def test_prompt_flag_and_separator_forward_identical_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+
+    orchestrator.main(["talk", "a", "-p", "same prompt"])
+    flag_output = capsys.readouterr().out
+    orchestrator.main(["talk", "a", "--", "same", "prompt"])
+    tail_output = capsys.readouterr().out
+
+    assert flag_output.endswith("reply:same prompt\n")
+    assert tail_output.endswith("reply:same prompt\n")
+
+
+def test_talk_forwards_schema_retries_timeout_and_short_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeAgent:
+        name = "a"
+        backend = type(
+            "Backend",
+            (),
+            {"name": "recording", "model": "model", "reasoning_effort": "high"},
+        )()
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def ensure(self, *args, **kwargs):
+            return FakeAgent(), False
+
+        def talk(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return TurnResult(
+                session_id="sid",
+                reply="raw",
+                raw="",
+                structured={"ok": True},
+            )
+
+    schema_path = tmp_path / "out.json"
+    schema_path.write_text(
+        '{"type":"object","additionalProperties":false,"properties":{},"required":[]}',
+        encoding="utf-8",
+    )
+    fake = FakeOrchestrator()
+    monkeypatch.setattr(orchestrator, "Orchestrator", lambda: fake)
+    monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "skills")
+
+    orchestrator.main(
+        [
+            "talk",
+            "a",
+            "-b",
+            "recording",
+            "-m",
+            "model",
+            "-e",
+            "high",
+            "--schema",
+            str(schema_path),
+            "--retries",
+            "2",
+            "--timeout",
+            "30",
+            "-p",
+            "question",
+        ]
+    )
+
+    assert fake.calls[0][0] == ("a", "question")
+    assert fake.calls[0][1]["schema"].path == schema_path.resolve()
+    assert fake.calls[0][1]["retries"] == 2
+    assert fake.calls[0][1]["timeout"] == 30
+    assert capsys.readouterr().out.endswith('{\n  "ok": true\n}\n')
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["talk", "a", "hi", "--timeout", "5"],
+        ["talk", "a"],
+        ["talk", "a", "--"],
+        ["talk", "a", "-p", " \t"],
+        ["talk", "a", "-p", "one", "--", "two"],
+        ["create", "a", "--", "foo"],
+        ["list", "--", "foo"],
+        ["delete", "a", "--", "foo"],
+        ["doctor", "--", "foo"],
+        ["doctor", "ignored"],
+        ["--agent", "a"],
+        ["--list", "agents"],
+        ["--validate-schema", "out.json"],
+        ["--validation-retries", "2"],
+        ["--dependency-check"],
+        ["--verbose2", "list"],
+    ],
+)
+def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail() -> None:
+        raise AssertionError("invalid CLI input constructed Orchestrator")
+
+    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(argv)
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--version"],
+        ["--version", "ignored"],
+        ["talk", "--version"],
+        ["talk", "a", "-p", "hi", "--version"],
+    ],
+)
+def test_version_exits_before_constructing_orchestrator(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "Orchestrator",
+        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(argv)
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out == "0.1.0\n"
+
+
+def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "orchestrator_state.json").write_text("{", encoding="utf-8")
+    called = False
+
+    def report() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        orchestrator, "STATE_FILE", tmp_path / "orchestrator_state.json"
+    )
+    monkeypatch.setattr(orchestrator, "_print_dependency_check", report)
+    monkeypatch.setattr(
+        orchestrator,
+        "Orchestrator",
+        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+    )
+
+    orchestrator.main(["-v", "doctor"])
+    assert called is True
+
+
+def test_missing_skills_directory_has_one_stderr_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["list", "skills"])
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 1
+    assert captured.err == f"skills directory not found: {tmp_path / 'missing'}\n"
+    assert captured.out == ""
+
+
+@pytest.mark.parametrize(
+    ("argv", "level"),
+    [
+        (["-v", "list"], logging.DEBUG),
+        (["-vv", "list"], orchestrator.TRACE),
+        (["-vvv", "list"], orchestrator.TRACE),
+        (["-v", "talk", "-v", "a", "-p", "x"], orchestrator.TRACE),
+    ],
+)
+def test_verbosity_counts_before_and_after_verb(
+    argv: list[str], level: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeOrchestrator:
+        def list_agents(self) -> list[str]:
+            return []
+
+        def ensure(self, *args, **kwargs):
+            return type(
+                "Agent",
+                (),
+                {
+                    "backend": type(
+                        "Backend",
+                        (),
+                        {
+                            "name": "recording",
+                            "model": None,
+                            "reasoning_effort": None,
+                        },
+                    )()
+                },
+            )(), False
+
+        def talk(self, *args, **kwargs) -> TurnResult:
+            return TurnResult(session_id="sid", reply="reply", raw="")
+
+    monkeypatch.setattr(orchestrator, "Orchestrator", FakeOrchestrator)
+    for logger_name in orchestrator.OWN_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.NOTSET)
+    orchestrator.main(argv)
+    assert logging.getLogger("orchestrator").level == level
+    assert logging.getLogger("backends").level == level

@@ -1073,11 +1073,11 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
     assert result == _expansion()
     assert calls[0][0][:10] == [
         "orchestrator",
-        "--agent",
+        "talk",
         "gdw-3-expander",
         "--backend",
         "codex",
-        "--validate-schema",
+        "--schema",
         str(root / "validations" / "expansion.json"),
         "--timeout",
         "17",
@@ -1323,7 +1323,7 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
     expected_prompt = gateway._prompt("expand", {"ISSUE_CONTEXT_JSON": "{}"})
     assert calls[0] == [
         "orchestrator",
-        "--agent",
+        "talk",
         "gdw-5-expander",
         "--backend",
         "grok",
@@ -1331,7 +1331,7 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         "grok-code-test",
         "--reasoning-effort",
         "xhigh",
-        "--validate-schema",
+        "--schema",
         str(Path(gdw.__file__).parent / "validations" / "expansion.json"),
         "--timeout",
         str(gdw.DEFAULT_AGENT_TIMEOUT),
