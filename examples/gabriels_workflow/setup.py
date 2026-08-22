@@ -54,8 +54,14 @@ def prepare_workflow(issue_number: int, config: WorkflowConfig) -> DevelopmentWo
     }
     github = role_github["implementer"]
 
-    store = ArtifactStore(repository_root / ".git" / "gdw" / f"issue-{issue_number}")
-    repository = GitRepository(repository_root)
+    issue_root = repository_root / ".git" / "gdw" / f"issue-{issue_number}"
+    worktree_path = issue_root / "worktree"
+    GitRepository(repository_root).ensure_issue_worktree(
+        f"gdw/issue-{issue_number}", github.default_branch, worktree_path
+    )
+
+    store = ArtifactStore(issue_root)
+    repository = GitRepository(worktree_path)
     LOGGER.info("setup: connected %s GitHub App installation(s)", len(role_github))
     branch, base_sha = repository.prepare(github.default_branch, store.initialized)
     store.initialize(issue_number, branch, base_sha)
