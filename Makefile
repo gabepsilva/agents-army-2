@@ -19,8 +19,17 @@ CI_JOBS := $(shell jobs=$$(( $(CPU_CORES) * 4 / 5 )); test "$$jobs" -ge 1 || job
 else
 CI_JOBS := $(CPU_CORES)
 endif
+# run-docs is a foreground dev server, not a gate: it never exits on its own,
+# and under -j/--output-sync (below) make withholds a target's entire output
+# until its recipe finishes, so nothing would print before you hit Ctrl+C.
+ifneq ($(filter run-docs,$(MAKECMDGOALS)),)
+RUN_DOCS_GOAL := 1
+endif
+
 JOBS ?= $(CI_JOBS)
+ifndef RUN_DOCS_GOAL
 MAKEFLAGS += -j$(JOBS)
+endif
 
 VERIFY_QUICK := format-check lint types test-integrity ratchet
 VERIFY_COVERAGE := test-coverage
@@ -44,7 +53,9 @@ gate = @printf '\n=== gate: %s ===\n' $@
 # gate's announcement are that gate's own. Guarded because it arrived in GNU
 # Make 4.0 and the 3.81 that macOS ships would reject the flag outright.
 ifneq ($(filter output-sync,$(.FEATURES)),)
+ifndef RUN_DOCS_GOAL
 MAKEFLAGS += --output-sync=target
+endif
 endif
 
 # Lines this change touches must be tested even where the file's own floor is
@@ -60,13 +71,19 @@ RATCHET_BASE ?= origin/master
 	verify-regression mutation semgrep security-static secrets \
 	test-integrity ratchet workflows verify-quick \
 	verify-coverage verify-mutation verify-security verify ci ci-gates ci-hosted \
-	hooks hook-check dev
+	hooks hook-check dev run-docs
 
 # Editable installs now link the orchestrator/ and backends/ packages, so an
 # edit is what `uv run orchestrator` executes. Re-sync after a fresh clone
 # or a lockfile change.
 dev:
 	uv sync --locked --all-groups
+
+# Serves docs/ with live reload on save. PYTHONUNBUFFERED so mkdocs' log
+# lines stream out as they happen instead of sitting in a pipe buffer.
+run-docs:
+	@printf 'Docs: http://127.0.0.1:8000\n'
+	@PYTHONUNBUFFERED=1 uv run --group docs mkdocs serve
 
 format:
 	uv run ruff format .

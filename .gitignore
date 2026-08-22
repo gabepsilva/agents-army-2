@@ -18,6 +18,7 @@ coverage.xml
 coverage.json
 reports/
 mutants/
+site/
 
 # Runtime state
 agent_runs/

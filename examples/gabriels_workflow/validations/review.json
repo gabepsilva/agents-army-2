@@ -22,11 +22,20 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "title", "evidence", "required_change"],
+        "required": ["severity", "axis", "title", "evidence", "required_change"],
         "properties": {
           "severity": {
             "type": "string",
-            "enum": ["critical", "high", "medium", "low"]
+            "enum": ["critical", "required", "optional", "nit"]
+          },
+          "axis": {
+            "type": "string",
+            "enum": [
+              "specification",
+              "correctness",
+              "readability",
+              "architecture"
+            ]
           },
           "title": {"type": "string", "minLength": 1},
           "evidence": {"type": "string", "minLength": 1},
