@@ -53,7 +53,7 @@ Backend, model, and reasoning effort are fixed at creation (or at the first
 ```
 orchestrator talk NAME [-b/--backend ...] [-m/--model ...] [-e/--reasoning-effort ...]
                        [-s/--skill NAMES] [--schema PATH] [--retries N] [--timeout SECONDS]
-                       (-p/--prompt TEXT | -- PROMPT...)
+                       (-p/--prompt TEXT | --prompt-file PATH | -- PROMPT...)
 ```
 
 If `NAME` doesn't exist yet, `talk` creates it first (same as `create`) and
@@ -64,6 +64,7 @@ possibly-new agent without a separate `create` step.
 |---|---|
 | `name` | (positional) agent to talk to |
 | `-p`, `--prompt TEXT` | the prompt, as one flag argument |
+| `--prompt-file PATH` | the prompt, read as UTF-8 text from a file |
 | `-- PROMPT...` | the prompt, as everything after `--`, joined with spaces |
 | `-b`, `--backend` | must match the agent's existing backend if already created |
 | `-m`, `--model` | must match the agent's existing model if already created |
@@ -73,12 +74,15 @@ possibly-new agent without a separate `create` step.
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
 
-Exactly one of `-p/--prompt` or `-- PROMPT...` is required — passing both, or
-neither, is an error.
+Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
+passing more than one, or none, is an error.
 
 ```sh
 # -p form
 uv run orchestrator talk reviewer -p "what did we decide about issue #23?"
+
+# --prompt-file form: reads the file's UTF-8 text as the prompt
+uv run orchestrator talk reviewer --prompt-file ./prompts/issue-23-summary.txt
 
 # -- form: everything after -- is the prompt, so it can contain flag-like text
 uv run orchestrator talk reviewer -- summarise issue #23 --without spoilers
