@@ -1171,7 +1171,7 @@ class DevelopmentWorkflow:
                 "implement",
                 "implementation",
                 {"SPECIFICATION_JSON": _json(specification)},
-                skills=("code-simplification",),
+                skills=("code-simplification", "caveman"),
             )
         )
         self._require_complete(implementation, "implementation", "implementation")
@@ -1183,6 +1183,7 @@ class DevelopmentWorkflow:
                 "document",
                 "documentation",
                 {"SPECIFICATION_JSON": _json(specification)},
+                skills=("caveman",),
             )
         )
         self._require_complete(documentation, "documentation", "documentation")
@@ -1351,7 +1352,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(result),
                     },
-                    skills=("code-simplification",),
+                    skills=("code-simplification", "caveman"),
                 )
             )
             self._require_complete(repair, "CI repair", f"repair-{prefix}-{attempt}")
@@ -1418,7 +1419,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(final),
                     },
-                    skills=("code-simplification",),
+                    skills=("code-simplification", "caveman"),
                 )
             )
             self._require_complete(
