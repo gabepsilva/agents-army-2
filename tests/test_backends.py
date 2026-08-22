@@ -3197,7 +3197,8 @@ def test_parser_exposes_the_complete_new_surface() -> None:
 
     talk = subparsers.choices["talk"]
     assert (
-        "prompt source: orchestrator talk NAME [-p TEXT | -- PROMPT...]" in talk.epilog
+        "prompt source: orchestrator talk NAME "
+        "[-p TEXT | --prompt-file PATH | -- PROMPT...]" in talk.epilog
     )
     assert (
         talk.parse_args(
@@ -3279,6 +3280,7 @@ def test_project_version_rejects_a_non_string_version(
 
 
 def test_prompt_errors_have_exact_messages_and_strip_tail(
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     parser = orchestrator._build_parser()
@@ -3303,6 +3305,48 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
     options = parser.parse_args(["talk", "a"])
     orchestrator._resolve_talk_prompt(options, ["  one", "two  "], True)
     assert options.prompt == "one two"
+
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("  one\n two  \n", encoding="utf-8")
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_file)])
+    orchestrator._resolve_talk_prompt(options, [], False)
+    assert options.prompt == "one\n two"
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "binary", "empty"])
+def test_prompt_file_errors_are_exact_and_prevent_side_effects(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompt_file = tmp_path / "prompt.txt"
+    if kind == "directory":
+        prompt_file.mkdir()
+    elif kind == "binary":
+        prompt_file.write_bytes(b"\xff\xfe")
+    elif kind == "empty":
+        prompt_file.write_text(" \t\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "Orchestrator",
+        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        main(["talk", "a", "--prompt-file", str(prompt_file)])
+    assert excinfo.value.code == 2
+    error = capsys.readouterr().err
+    if kind == "empty":
+        assert "orchestrator talk: error: talk prompt must not be empty" in error
+    else:
+        try:
+            prompt_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            expected = f"cannot read prompt file {prompt_file.resolve()}: {exc}"
+        else:
+            raise AssertionError("expected prompt file read to fail")
+        assert expected in error
 
 
 def test_separator_error_and_cli_error_without_arguments_are_exact(
