@@ -692,7 +692,10 @@ def _build_parser() -> argparse.ArgumentParser:
     talk = _add_verb_parser(
         subparsers,
         "talk",
-        epilog="prompt source: orchestrator talk NAME [-p TEXT | -- PROMPT...]",
+        epilog=(
+            "prompt source: orchestrator talk NAME "
+            "[-p TEXT | --prompt-file PATH | -- PROMPT...]"
+        ),
     )
     _add_version_argument(talk)
     _add_verbosity_argument(talk, "verbosity_after")
@@ -705,6 +708,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     talk.add_argument("--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT)
     talk.add_argument("-p", "--prompt")
+    talk.add_argument("--prompt-file")
     talk.set_defaults(_parser=talk)
 
     list_parser = _add_verb_parser(subparsers, "list")
@@ -918,10 +922,22 @@ def _print_dependency_check() -> None:
 def _resolve_talk_prompt(
     opts: argparse.Namespace, tail: list[str], separator_present: bool
 ) -> None:
-    flag_prompt = opts.prompt is not None
-    if flag_prompt == separator_present:
+    prompt_sources = (
+        opts.prompt is not None,
+        opts.prompt_file is not None,
+        separator_present,
+    )
+    if sum(prompt_sources) != 1:
         opts._parser.error("talk requires exactly one prompt source")
-    prompt = " ".join(tail) if separator_present else opts.prompt
+
+    if opts.prompt_file is not None:
+        path = Path(opts.prompt_file)
+        try:
+            prompt = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            opts._parser.error(f"cannot read prompt file {path.resolve()}: {exc}")
+    else:
+        prompt = " ".join(tail) if separator_present else opts.prompt
     prompt = prompt.strip()
     if not prompt:
         opts._parser.error("talk prompt must not be empty")
