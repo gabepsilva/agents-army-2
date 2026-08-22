@@ -608,6 +608,37 @@ class GitRepository:
         )
         return branch, head
 
+    def ensure_issue_worktree(self, branch: str, base_branch: str, path: Path) -> None:
+        """Create or resume the linked worktree an issue develops in.
+
+        Prunes registrations for worktrees whose directory disappeared, then
+        resumes an already-registered worktree or an existing branch without
+        one, and only branches off `base_branch` when neither exists yet.
+        """
+
+        self._call("worktree", "prune")
+        registered = {
+            line.split(" ", 1)[1]
+            for line in self._call("worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ")
+        }
+        if str(path) in registered:
+            return
+        if path.exists():
+            raise WorkflowError(f"{path} exists but is not a registered git worktree")
+        verify = self._run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if verify.returncode == 0:
+            self._call("worktree", "add", str(path), branch)
+        else:
+            self._call("worktree", "add", "-b", branch, str(path), base_branch)
+
     def ci_gates(self) -> tuple[str, ...]:
         """The gates `make ci` will attempt, named by the Makefile itself.
 

@@ -760,6 +760,91 @@ def test_git_repository_opens_an_empty_commit_only_when_the_branch_matches_base(
     ]
 
 
+def test_ensure_issue_worktree_creates_branch_when_neither_exists(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "issue" / "worktree"
+    runner = ScriptedRun(
+        [
+            _completed([], stdout=""),
+            _completed(
+                [], stdout="worktree /repo\nHEAD abc\nbranch refs/heads/master\n"
+            ),
+            _completed([], returncode=1),
+            _completed([]),
+        ]
+    )
+    gdw.GitRepository(tmp_path, runner).ensure_issue_worktree(
+        "gdw/issue-9", "master", path
+    )
+    assert [call[0] for call in runner.calls] == [
+        ["git", "worktree", "prune"],
+        ["git", "worktree", "list", "--porcelain"],
+        ["git", "rev-parse", "--verify", "--quiet", "refs/heads/gdw/issue-9"],
+        ["git", "worktree", "add", "-b", "gdw/issue-9", str(path), "master"],
+    ]
+
+
+def test_ensure_issue_worktree_resumes_an_already_registered_worktree(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "issue" / "worktree"
+    runner = ScriptedRun(
+        [
+            _completed([], stdout=""),
+            _completed(
+                [],
+                stdout=f"worktree {path}\nHEAD abc\nbranch refs/heads/gdw/issue-9\n",
+            ),
+        ]
+    )
+    gdw.GitRepository(tmp_path, runner).ensure_issue_worktree(
+        "gdw/issue-9", "master", path
+    )
+    assert [call[0] for call in runner.calls] == [
+        ["git", "worktree", "prune"],
+        ["git", "worktree", "list", "--porcelain"],
+    ]
+
+
+def test_ensure_issue_worktree_resumes_an_existing_branch_without_a_worktree(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "issue" / "worktree"
+    runner = ScriptedRun(
+        [
+            _completed([], stdout=""),
+            _completed([], stdout=""),
+            _completed([], stdout="abc123\n"),
+            _completed([]),
+        ]
+    )
+    gdw.GitRepository(tmp_path, runner).ensure_issue_worktree(
+        "gdw/issue-9", "master", path
+    )
+    assert [call[0] for call in runner.calls] == [
+        ["git", "worktree", "prune"],
+        ["git", "worktree", "list", "--porcelain"],
+        ["git", "rev-parse", "--verify", "--quiet", "refs/heads/gdw/issue-9"],
+        ["git", "worktree", "add", str(path), "gdw/issue-9"],
+    ]
+
+
+def test_ensure_issue_worktree_rejects_an_unregistered_existing_path(
+    tmp_path: Path,
+) -> None:
+    runner = ScriptedRun(
+        [
+            _completed([], stdout=""),
+            _completed([], stdout=""),
+        ]
+    )
+    with pytest.raises(gdw.WorkflowError, match="not a registered git worktree"):
+        gdw.GitRepository(tmp_path, runner).ensure_issue_worktree(
+            "gdw/issue-9", "master", tmp_path
+        )
+
+
 def test_github_owns_markdown_comments_and_pull_requests(tmp_path: Path) -> None:
     bodies: list[str] = []
 
@@ -1934,10 +2019,16 @@ def test_prepare_simple_workflow_checks_tools_and_builds_services(
 
     class SetupRepository:
         def __init__(self, root: Path) -> None:
-            observed["repository_root"] = root
+            self.root = root
+            observed.setdefault("repository_roots", []).append(root)
+
+        def ensure_issue_worktree(
+            self, branch: str, base_branch: str, path: Path
+        ) -> None:
+            observed["ensure_issue_worktree"] = (self.root, branch, base_branch, path)
 
         def prepare(self, base: str, resuming: bool) -> tuple[str, str]:
-            observed["prepare"] = (base, resuming)
+            observed["prepare"] = (self.root, base, resuming)
             return "feature", "base-sha"
 
     class SetupWorkflow:
@@ -1969,12 +2060,22 @@ def test_prepare_simple_workflow_checks_tools_and_builds_services(
         )
         for role_config in config.roles.values()
     }
-    assert observed["prepare"] == ("trunk", False)
+    issue_root = tmp_path / ".git" / "gdw" / "issue-7"
+    worktree_path = issue_root / "worktree"
+    assert observed["repository_roots"] == [tmp_path, worktree_path]
+    assert observed["ensure_issue_worktree"] == (
+        tmp_path,
+        "gdw/issue-7",
+        "trunk",
+        worktree_path,
+    )
+    assert observed["prepare"] == (worktree_path, "trunk", False)
     assert observed["initialize"] == (7, "feature", "base-sha")
     assert workflow.options == gdw.WorkflowOptions(7, "trunk", "feature", False)
-    assert workflow.services.store.root == tmp_path / ".git" / "gdw" / "issue-7"
+    assert workflow.services.store.root == issue_root
     assert workflow.services.github is github
     assert workflow.services.repository.__class__ is SetupRepository
+    assert workflow.services.repository.root == worktree_path
     assert workflow.services.agents is gateway
     assert workflow.services.role_github == dict.fromkeys(REQUIRED_ROLES, github)
     gateway_factory.assert_called_once_with(

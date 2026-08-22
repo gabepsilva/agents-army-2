@@ -44,8 +44,11 @@ deadlocked interaction from looping forever.
 
 ## Run
 
-Start from a clean feature branch, populate the ignored `workflow.local`, and
-then run:
+The workflow manages its own git worktree per issue, so it can be run from
+the main checkout on any branch, including the default branch. For issue
+`<n>` it creates a linked worktree at `.git/gdw/issue-<n>/worktree` on branch
+`gdw/issue-<n>` if one doesn't exist yet, or resumes into the existing
+worktree/branch if it does. Populate the ignored `workflow.local`, then run:
 
 ```sh
 uv run python examples/gabriels_workflow/simple_development_workflow.py \
