@@ -43,9 +43,14 @@ def test_prompt_flag_and_separator_forward_identical_text(
     flag_output = capsys.readouterr().out
     orchestrator.main(["talk", "a", "--", "same", "prompt"])
     tail_output = capsys.readouterr().out
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("same prompt", encoding="utf-8")
+    orchestrator.main(["talk", "a", "--prompt-file", str(prompt_file)])
+    file_output = capsys.readouterr().out
 
     assert flag_output.endswith("reply:same prompt\n")
     assert tail_output.endswith("reply:same prompt\n")
+    assert file_output.endswith("reply:same prompt\n")
 
 
 def test_talk_forwards_schema_retries_timeout_and_short_options(
@@ -122,6 +127,9 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
         ["talk", "a", "--"],
         ["talk", "a", "-p", " \t"],
         ["talk", "a", "-p", "one", "--", "two"],
+        ["talk", "a", "-p", "x", "--prompt-file", "unused.txt"],
+        ["talk", "a", "--prompt-file", "unused.txt", "--", "two"],
+        ["talk", "a", "-p", "x", "--prompt-file", "unused.txt", "--", "two"],
         ["create", "a", "--", "foo"],
         ["list", "--", "foo"],
         ["delete", "a", "--", "foo"],
