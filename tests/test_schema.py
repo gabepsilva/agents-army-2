@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import itertools
 import json
@@ -21,7 +22,8 @@ from backends.base import (
 )
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
-from orchestrator import Orchestrator, cmd_invoke_skills, main
+from orchestrator import Orchestrator, main
+from orchestrator import cmd_talk as _cmd_talk
 from orchestrator.schema import (
     EXCERPT_CHARS,
     SCHEMA_INSTRUCTION,
@@ -33,6 +35,21 @@ from orchestrator.schema import (
     repair_prompt,
     validate_reply,
 )
+
+
+def test_load_document_requires_utf8_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str | None] = []
+
+    def read_text(_path: Path, *, encoding: str | None = None) -> str:
+        seen.append(encoding)
+        return "{}"
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert orchestrator.schema._load_document(tmp_path / "schema.json") == {}
+    assert seen == ["utf-8"]
+
 
 # The shape this repository keeps reaching for: a stage and a verdict, strict
 # the way codex demands, so a test about one rule is not also about another.
@@ -46,6 +63,15 @@ STRICT = {
     },
 }
 CONFORMING = {"stage": "build", "verdict": "pass"}
+
+
+def _talk_options(argv: list[str]) -> argparse.Namespace:
+    separator = argv.index("--") if "--" in argv else None
+    head = argv if separator is None else argv[:separator]
+    tail = [] if separator is None else argv[separator + 1 :]
+    options = orchestrator._build_parser().parse_args(head)
+    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    return options
 
 
 def _write(tmp_path: Path, document: object, name: str = "schema.json") -> Path:
@@ -759,7 +785,7 @@ class TestValidationLogging:
         assert _warnings(caplog)[-1] == "agent 'a': 1 validation retries exhausted"
 
 
-class TestCmdInvokeSkillsSchema:
+class TestTalkSchema:
     @pytest.fixture
     def orch(self, tmp_path: Path) -> Orchestrator:
         # Registered here so the agent can be spawned; each test re-registers
@@ -776,16 +802,18 @@ class TestCmdInvokeSkillsSchema:
     ) -> None:
         _scripted(['{"verdict":"pass","stage":"build"}'])
         schema_path = _write(tmp_path, STRICT)
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "a",
-                "--validate-schema",
-                str(schema_path),
-                "--prompt",
-                "go",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "a",
+                    "--schema",
+                    str(schema_path),
+                    "-p",
+                    "go",
+                ]
+            ),
         )
         out = capsys.readouterr().out
         assert out.startswith("[a session=sid-1]\n")
@@ -801,16 +829,18 @@ class TestCmdInvokeSkillsSchema:
         schema' from 'the agent failed' without reading the message."""
         lax = _write(tmp_path, {"type": "object", "properties": {}, "required": []})
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                [
-                    "--agent",
-                    "fresh",
-                    "--validate-schema",
-                    str(lax),
-                    "--prompt",
-                    "go",
-                ],
+                _talk_options(
+                    [
+                        "talk",
+                        "fresh",
+                        "--schema",
+                        str(lax),
+                        "-p",
+                        "go",
+                    ]
+                ),
             )
         captured = capsys.readouterr()
         assert '"additionalProperties": false' in captured.err
@@ -821,16 +851,18 @@ class TestCmdInvokeSkillsSchema:
         self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                [
-                    "--agent",
-                    "a",
-                    "--validate-schema",
-                    str(tmp_path / "absent.json"),
-                    "--prompt",
-                    "go",
-                ],
+                _talk_options(
+                    [
+                        "talk",
+                        "a",
+                        "--schema",
+                        str(tmp_path / "absent.json"),
+                        "-p",
+                        "go",
+                    ]
+                ),
             )
         assert "cannot read schema file" in capsys.readouterr().err
 
@@ -842,18 +874,20 @@ class TestCmdInvokeSkillsSchema:
         calls = _scripted([bad, bad])
         schema_path = _write(tmp_path, STRICT)
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                [
-                    "--agent",
-                    "a",
-                    "--validate-schema",
-                    str(schema_path),
-                    "--validation-retries",
-                    "1",
-                    "--prompt",
-                    "go",
-                ],
+                _talk_options(
+                    [
+                        "talk",
+                        "a",
+                        "--schema",
+                        str(schema_path),
+                        "--retries",
+                        "1",
+                        "-p",
+                        "go",
+                    ]
+                ),
             )
         captured = capsys.readouterr()
         assert "$.verdict" in captured.err
@@ -866,16 +900,18 @@ class TestCmdInvokeSkillsSchema:
         calls = _scripted(
             ['{"stage":"build","verdict":"banana"}', json.dumps(CONFORMING)]
         )
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "a",
-                "--validate-schema",
-                str(_write(tmp_path, STRICT)),
-                "--prompt",
-                "go",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "a",
+                    "--schema",
+                    str(_write(tmp_path, STRICT)),
+                    "-p",
+                    "go",
+                ]
+            ),
         )
         assert json.loads(capsys.readouterr().out.split("\n", 1)[1]) == CONFORMING
         assert len(calls) == 2
@@ -885,18 +921,20 @@ class TestCmdInvokeSkillsSchema:
     ) -> None:
         """Zero is "do not correct me", not a usage error."""
         calls = _scripted([json.dumps(CONFORMING)])
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "a",
-                "--validate-schema",
-                str(_write(tmp_path, STRICT)),
-                "--validation-retries",
-                "0",
-                "--prompt",
-                "go",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "a",
+                    "--schema",
+                    str(_write(tmp_path, STRICT)),
+                    "--retries",
+                    "0",
+                    "-p",
+                    "go",
+                ]
+            ),
         )
         assert json.loads(capsys.readouterr().out.split("\n", 1)[1]) == CONFORMING
         assert len(calls) == 1
@@ -905,18 +943,20 @@ class TestCmdInvokeSkillsSchema:
         self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         calls = _scripted([json.dumps(CONFORMING)])
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "a",
-                "--validate-schema",
-                str(_write(tmp_path, STRICT)),
-                "--timeout",
-                "17",
-                "--prompt",
-                "go",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "a",
+                    "--schema",
+                    str(_write(tmp_path, STRICT)),
+                    "--timeout",
+                    "17",
+                    "-p",
+                    "go",
+                ]
+            ),
         )
         capsys.readouterr()
         assert calls[0]["timeout"] == 17
@@ -925,19 +965,16 @@ class TestCmdInvokeSkillsSchema:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
-                orch,
-                ["--agent", "a", "--timeout", "0", "--prompt", "go"],
-            )
+            _talk_options(["talk", "a", "--timeout", "0", "-p", "go"])
         assert "expected 1 or more, got 0" in capsys.readouterr().err
 
     def test_one_second_is_a_valid_timeout(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         calls = _scripted(["plain reply"])
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            ["--agent", "a", "--timeout", "1", "--prompt", "go"],
+            _talk_options(["talk", "a", "--timeout", "1", "-p", "go"]),
         )
         capsys.readouterr()
         assert calls[0]["timeout"] == 1
@@ -946,21 +983,20 @@ class TestCmdInvokeSkillsSchema:
         self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
-                orch,
+            _talk_options(
                 [
-                    "--agent",
+                    "talk",
                     "a",
-                    "--validate-schema",
+                    "--schema",
                     str(_write(tmp_path, STRICT)),
-                    "--validation-retries",
+                    "--retries",
                     "-1",
-                    "--prompt",
+                    "-p",
                     "go",
-                ],
+                ]
             )
         err = capsys.readouterr().err
-        assert "--validation-retries" in err
+        assert "--retries" in err
         assert "expected 0 or more, got -1" in err
 
     def test_a_relative_schema_path_is_read_from_the_shell_directory(
@@ -973,9 +1009,9 @@ class TestCmdInvokeSkillsSchema:
         calls = _scripted([json.dumps(CONFORMING)])
         _write(tmp_path, STRICT)
         monkeypatch.chdir(tmp_path)
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            ["--agent", "a", "--validate-schema", "schema.json", "--prompt", "go"],
+            _talk_options(["talk", "a", "--schema", "schema.json", "-p", "go"]),
         )
         assert json.loads(capsys.readouterr().out.split("\n", 1)[1]) == CONFORMING
         assert calls[0]["schema"].path == (tmp_path / "schema.json").resolve()
@@ -1001,16 +1037,18 @@ class TestCmdInvokeSkillsSchema:
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                [
-                    "--agent",
-                    "b",
-                    "--validate-schema",
-                    str(_write(tmp_path, STRICT)),
-                    "--prompt",
-                    "go",
-                ],
+                _talk_options(
+                    [
+                        "talk",
+                        "b",
+                        "--schema",
+                        str(_write(tmp_path, STRICT)),
+                        "-p",
+                        "go",
+                    ]
+                ),
             )
         assert capsys.readouterr().err == "claude output was not JSON\n"
 
@@ -1026,18 +1064,20 @@ class TestCmdInvokeSkillsSchema:
         skills.mkdir(parents=True)
         (skills / "SKILL.md").write_text("# tdd\n", encoding="utf-8")
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "SKILLS")
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "a",
-                "--skill",
-                "tdd",
-                "--validate-schema",
-                str(_write(tmp_path, STRICT)),
-                "--prompt",
-                "go",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "a",
+                    "--skill",
+                    "tdd",
+                    "--schema",
+                    str(_write(tmp_path, STRICT)),
+                    "-p",
+                    "go",
+                ]
+            ),
         )
         prompt = calls[0]["prompt"]
         assert str((skills / "SKILL.md").resolve()) in prompt
@@ -1050,16 +1090,18 @@ class TestCmdInvokeSkillsSchema:
         _scripted([json.dumps(CONFORMING)])
         schema_path = _write(tmp_path, STRICT)
         with caplog.at_level("INFO", logger="orchestrator"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                [
-                    "--agent",
-                    "a",
-                    "--validate-schema",
-                    str(schema_path),
-                    "--prompt",
-                    "go",
-                ],
+                _talk_options(
+                    [
+                        "talk",
+                        "a",
+                        "--schema",
+                        str(schema_path),
+                        "-p",
+                        "go",
+                    ]
+                ),
             )
         assert f"agent 'a': validating the reply against {schema_path}" in _messages(
             caplog
@@ -1076,9 +1118,9 @@ class TestCmdInvokeSkillsSchema:
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "scripted")
         main(
             [
-                "--agent",
+                "talk",
                 "fresh",
-                "--validate-schema",
+                "--schema",
                 str(_write(tmp_path, STRICT)),
                 "--prompt",
                 "go",
@@ -1090,7 +1132,7 @@ class TestCmdInvokeSkillsSchema:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(orch, ["--agent", "a", "--prompt", "   "])
+            _talk_options(["talk", "a", "-p", "   "])
         err = capsys.readouterr().err
-        assert "--validate-schema PATH" in err
-        assert "--validation-retries N" in err
+        assert "--schema SCHEMA" in err
+        assert "--retries RETRIES" in err

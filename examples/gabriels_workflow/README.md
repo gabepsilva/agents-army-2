@@ -24,7 +24,7 @@ The supporting modules own the details:
 - `prompts/` and `validations/` contain the agent prompts and JSON Schemas.
 
 This example deliberately exercises the public CLI boundary. For every role it
-runs one schema-validated `orchestrator --agent ... --prompt ...` call per turn,
+runs one schema-validated `orchestrator talk ... --prompt ...` call per turn,
 passing the configured backend/model/effort so the call creates or asserts the
 agent before running the turn. The example does not import or construct the
 Python `Orchestrator` API. The orchestrator CLI then invokes the selected

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 import orchestrator
+import orchestrator.skills as skills_module
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -18,11 +21,13 @@ from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
 from orchestrator import (
     Orchestrator,
-    cmd_flag_list,
-    cmd_invoke_skills,
-    cmd_list,
-    cmd_talk,
     main,
+)
+from orchestrator import (
+    cmd_list as _cmd_list,
+)
+from orchestrator import (
+    cmd_talk as _cmd_talk,
 )
 from orchestrator.skills import (
     PROMPT_HEADER,
@@ -33,6 +38,19 @@ from orchestrator.skills import (
     parse_skill_names,
     resolve_skills,
 )
+
+
+def _talk_options(argv: list[str]) -> argparse.Namespace:
+    separator = argv.index("--") if "--" in argv else None
+    head = argv if separator is None else argv[:separator]
+    tail = [] if separator is None else argv[separator + 1 :]
+    options = orchestrator._build_parser().parse_args(head)
+    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    return options
+
+
+def _options(argv: list[str]) -> argparse.Namespace:
+    return orchestrator._build_parser().parse_args(argv)
 
 
 class EchoBackend(AgentBackend):
@@ -176,6 +194,31 @@ class TestIndexSkills:
 
 
 class TestResolveSkills:
+    def test_lookup_uses_an_empty_list_as_the_missing_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested_defaults: list[object] = []
+
+        class Catalog:
+            def __init__(self) -> None:
+                self.entries = {"foo": [skill]}
+
+            def get(
+                self, key: str, default: list[Path] | None = None
+            ) -> list[Path] | None:
+                requested_defaults.append(default)
+                return self.entries.get(key, default)
+
+            def __iter__(self) -> Iterator[str]:
+                return iter(self.entries)
+
+        skill = tmp_path / "SKILL.md"
+        catalog = Catalog()
+        monkeypatch.setattr(skills_module, "index_skills", lambda _: catalog)
+
+        assert resolve_skills(["foo"], tmp_path) == [("foo", skill)]
+        assert requested_defaults == [[]]
+
     def test_directory_skill_is_the_skill_md(self, skills_tree: Path) -> None:
         assert resolve_skills(["foo"], skills_tree) == [("foo", _foo_path(skills_tree))]
 
@@ -301,7 +344,7 @@ class TestFormatSkillListing:
         assert listing == f"{'clash':20} {hyphen}\n{'clash':20} {slash}"
 
 
-class TestCmdFlagList:
+class TestListCommand:
     @pytest.fixture
     def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
@@ -311,9 +354,9 @@ class TestCmdFlagList:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch.spawn("a", "echo")
-        cmd_list(orch, [])
+        _cmd_list(orch, _options(["list"]))
         via_command = capsys.readouterr().out
-        cmd_flag_list(orch, ["--list", "agents"])
+        _cmd_list(orch, _options(["list", "agents"]))
         via_flag = capsys.readouterr().out
         assert via_flag == via_command
         assert via_flag == "a                    backend=echo   session=-\n"
@@ -321,7 +364,7 @@ class TestCmdFlagList:
     def test_list_agents_empty(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cmd_flag_list(orch, ["--list", "agents"])
+        _cmd_list(orch, _options(["list", "agents"]))
         assert capsys.readouterr().out == "no agents\n"
 
     def test_list_skills_prints_catalog(
@@ -330,7 +373,7 @@ class TestCmdFlagList:
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        cmd_flag_list(orch, ["--list", "skills"])
+        _cmd_list(orch, _options(["list", "skills"]))
         assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
 
     def test_list_skills_empty_catalog(
@@ -340,7 +383,7 @@ class TestCmdFlagList:
         empty.mkdir()
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", empty)
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_flag_list(orch, ["--list", "skills"])
+        _cmd_list(orch, _options(["list", "skills"]))
         assert capsys.readouterr().out == "no skills\n"
 
     def test_list_skills_missing_dir(
@@ -350,25 +393,22 @@ class TestCmdFlagList:
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         with pytest.raises(SystemExit, match="1"):
-            cmd_flag_list(orch, ["--list", "skills"])
+            _cmd_list(orch, _options(["list", "skills"]))
         captured = capsys.readouterr()
         assert captured.err == f"skills directory not found: {missing}\n"
         assert captured.out == ""
 
-    def test_missing_list_flag_is_argparse_exit_2(
+    def test_list_without_target_defaults_to_agents(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        with pytest.raises(SystemExit, match="2"):
-            cmd_flag_list(orch, [])
-        err = capsys.readouterr().err
-        assert "usage: orchestrator" in err
-        assert "--list" in err
+        _cmd_list(orch, _options(["list"]))
+        assert capsys.readouterr().out == "no agents\n"
 
     def test_unknown_list_target_is_argparse_exit_2(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_flag_list(orch, ["--list", "bogus"])
+            _options(["list", "bogus"])
         err = capsys.readouterr().err
         assert "usage: orchestrator" in err
         assert "bogus" in err
@@ -377,18 +417,11 @@ class TestCmdFlagList:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_flag_list(orch, ["--list", "agents", "extra"])
+            _options(["list", "agents", "extra"])
         assert "usage: orchestrator" in capsys.readouterr().err
 
-    def test_only_list_tokens_are_the_list_invocation(self) -> None:
-        assert orchestrator._is_list_invocation(["--list", "agents"]) is True
-        assert orchestrator._is_list_invocation(["--list=skills"]) is True
-        assert orchestrator._is_list_invocation(["--agent", "a"]) is False
-        assert orchestrator._is_list_invocation(["list"]) is False
-        assert orchestrator._is_list_invocation(["--list-skills"]) is False
 
-
-class TestCmdInvokeSkills:
+class TestTalkSkills:
     @pytest.fixture
     def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
@@ -402,7 +435,7 @@ class TestCmdInvokeSkills:
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        cmd_invoke_skills(orch, ["--agent", "a", "--skill", "foo", "--prompt", "do it"])
+        _cmd_talk(orch, _talk_options(["talk", "a", "--skill", "foo", "-p", "do it"]))
         out = capsys.readouterr().out
         assert "session=echo-sid" in out
         assert f"- foo: {_foo_path(skills_tree)}" in out
@@ -416,9 +449,9 @@ class TestCmdInvokeSkills:
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            ["--agent", "a", "--skill", "bar, foo", "--prompt", "both"],
+            _talk_options(["talk", "a", "--skill", "bar, foo", "-p", "both"]),
         )
         out = capsys.readouterr().out
         assert out.index(f"- bar: {_bar_path(skills_tree)}") < out.index(
@@ -429,9 +462,7 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
-                orch, ["--agent", "a", "--skill", "nope", "--prompt", "x"]
-            )
+            _cmd_talk(orch, _talk_options(["talk", "a", "--skill", "nope", "-p", "x"]))
         captured = capsys.readouterr()
         assert "unknown skill 'nope'" in captured.err
         assert captured.out == ""
@@ -440,8 +471,8 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
-                orch, ["--agent", "missing", "--skill", "nope", "--prompt", "x"]
+            _cmd_talk(
+                orch, _talk_options(["talk", "missing", "--skill", "nope", "-p", "x"])
             )
         assert orch.list_agents() == ["a"]
 
@@ -452,9 +483,7 @@ class TestCmdInvokeSkills:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
-                orch, ["--agent", "a", "--skill", "clash", "--prompt", "x"]
-            )
+            _cmd_talk(orch, _talk_options(["talk", "a", "--skill", "clash", "-p", "x"]))
         captured = capsys.readouterr()
         assert "skill name 'clash' is not unique" in captured.err
         for path in _clash_paths(skills_tree):
@@ -465,9 +494,9 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            ["--agent", "missing", "--skill", "foo", "--prompt", "x"],
+            _talk_options(["talk", "missing", "--skill", "foo", "-p", "x"]),
         )
         captured = capsys.readouterr()
         assert captured.err == "created agent 'missing' backend=echo\n"
@@ -477,20 +506,22 @@ class TestCmdInvokeSkills:
     def test_config_flags_create_exact_agent_before_skill_turn(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "missing",
-                "-b",
-                "echo",
-                "--model",
-                "m",
-                "--reasoning-effort",
-                "high",
-                "--prompt",
-                "x",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "missing",
+                    "-b",
+                    "echo",
+                    "--model",
+                    "m",
+                    "--reasoning-effort",
+                    "high",
+                    "-p",
+                    "x",
+                ]
+            ),
         )
         assert capsys.readouterr().err == "created agent 'missing' backend=echo\n"
         agent = orch.agents["missing"]
@@ -508,20 +539,22 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch.spawn("configured", "echo", model="m", reasoning_effort="high")
-        cmd_invoke_skills(
+        _cmd_talk(
             orch,
-            [
-                "--agent",
-                "configured",
-                "-b",
-                "echo",
-                "--model",
-                "m",
-                "--reasoning-effort",
-                "high",
-                "--prompt",
-                "x",
-            ],
+            _talk_options(
+                [
+                    "talk",
+                    "configured",
+                    "-b",
+                    "echo",
+                    "--model",
+                    "m",
+                    "--reasoning-effort",
+                    "high",
+                    "-p",
+                    "x",
+                ]
+            ),
         )
         assert capsys.readouterr().err == ""
 
@@ -533,9 +566,9 @@ class TestCmdInvokeSkills:
             orchestrator.OrchestratorError,
             match=r"agent 'configured' already uses backend/model/effort \('echo', 'stored', 'high'\); configured \('codex', None, None\)",
         ):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                ["--agent", "configured", "-b", "codex", "--prompt", "x"],
+                _talk_options(["talk", "configured", "-b", "codex", "-p", "x"]),
             )
 
     def test_omitting_model_still_asserts_on_skill_invocation(
@@ -546,59 +579,50 @@ class TestCmdInvokeSkills:
             orchestrator.OrchestratorError,
             match=r"configured \('echo', None, None\)$",
         ):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                ["--agent", "configured", "-b", "echo", "--prompt", "x"],
+                _talk_options(["talk", "configured", "-b", "echo", "-p", "x"]),
             )
 
     def test_unknown_backend_is_argparse_exit_2(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
-                orch,
-                ["--agent", "missing", "-b", "unknown", "--prompt", "x"],
-            )
+            _talk_options(["talk", "missing", "-b", "unknown", "-p", "x"])
         assert "invalid choice" in capsys.readouterr().err
 
     def test_empty_prompt_exits_nonzero_like_talk(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(
-                orch, ["--agent", "a", "--skill", "foo", "--prompt", "   "]
-            )
+            _talk_options(["talk", "a", "--skill", "foo", "-p", "   "])
         captured = capsys.readouterr()
-        assert captured.err == (
-            "usage: orchestrator [-v|-vv] --agent NAME [-b BACKEND] [--model MODEL]\n"
-            "              [--reasoning-effort EFFORT] [--skill NAME[,NAME...]]\n"
-            "              [--validate-schema PATH [--validation-retries N]]\n"
-            "              [--timeout SECONDS] --prompt TEXT\n"
-        )
+        assert "usage: orchestrator talk " in captured.err
+        assert "talk prompt must not be empty" in captured.err
         assert captured.out == ""
 
     def test_missing_prompt_flag_is_argparse_exit_2(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(orch, ["--agent", "a", "--skill", "foo"])
+            _talk_options(["talk", "a", "--skill", "foo"])
         err = capsys.readouterr().err
         assert "usage: orchestrator" in err
-        assert "--prompt" in err
+        assert "talk requires exactly one prompt source" in err
 
-    def test_missing_agent_flag_is_argparse_exit_2(
+    def test_missing_talk_name_is_argparse_exit_2(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="2"):
-            cmd_invoke_skills(orch, ["--skill", "foo", "--prompt", "x"])
+            main(["talk", "--skill", "foo", "--prompt", "x"])
         err = capsys.readouterr().err
-        assert "usage: orchestrator" in err
-        assert "--agent" in err
+        assert "usage: orchestrator talk" in err
+        assert "required: name" in err
 
     def test_missing_skill_flag_talks_without_attaching_any_skill(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        cmd_invoke_skills(orch, ["--agent", "a", "--prompt", "x"])
+        _cmd_talk(orch, _talk_options(["talk", "a", "-p", "x"]))
         out = capsys.readouterr().out
         assert "session=echo-sid" in out
         assert out.strip().endswith("x")
@@ -608,9 +632,9 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                ["--agent", "a", "--skill", "foo,foo", "--prompt", "x"],
+                _talk_options(["talk", "a", "--skill", "foo,foo", "-p", "x"]),
             )
         assert "duplicate skill name 'foo'" in capsys.readouterr().err
 
@@ -635,7 +659,7 @@ class TestCmdInvokeSkills:
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
         with pytest.raises(SystemExit, match="1"):
-            cmd_invoke_skills(orch, ["--agent", "b", "--skill", "foo", "--prompt", "x"])
+            _cmd_talk(orch, _talk_options(["talk", "b", "--skill", "foo", "-p", "x"]))
         captured = capsys.readouterr()
         assert captured.err == "claude output was not JSON\n"
         assert captured.out == ""
@@ -644,9 +668,9 @@ class TestCmdInvokeSkills:
         self, orch: Orchestrator, caplog: pytest.LogCaptureFixture
     ) -> None:
         with caplog.at_level("INFO", logger="orchestrator"):
-            cmd_invoke_skills(
+            _cmd_talk(
                 orch,
-                ["--agent", "a", "--skill", "foo,bar", "--prompt", "x"],
+                _talk_options(["talk", "a", "--skill", "foo,bar", "-p", "x"]),
             )
         assert "agent 'a': attaching skill(s) foo, bar" in [
             r.getMessage() for r in caplog.records
@@ -672,7 +696,7 @@ class TestMainSkillInvocation:
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        main(["--agent", "a", "--skill", "foo", "--prompt", "do it"])
+        main(["talk", "a", "--skill", "foo", "--prompt", "do it"])
         out = capsys.readouterr().out
         assert "session=echo-sid" in out
         assert f"- foo: {_foo_path(skills_tree)}" in out
@@ -685,27 +709,25 @@ class TestMainSkillInvocation:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level("DEBUG", logger="orchestrator"):
-            main(["-v", "--agent", "a", "--skill", "foo", "--prompt", "do it"])
+            main(["-v", "talk", "a", "--skill", "foo", "--prompt", "do it"])
         assert "session=echo-sid" in capsys.readouterr().out
-        assert "cli: dispatching skill invocation" in [
-            r.getMessage() for r in caplog.records
-        ]
+        assert "cli: dispatching 'talk'" in [r.getMessage() for r in caplog.records]
 
     def test_prompt_token_equal_to_a_verbose_flag_is_kept(
         self,
         isolated: Orchestrator,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        main(["--agent", "a", "--skill", "foo", "--prompt", "add -v please"])
+        main(["talk", "a", "--skill", "foo", "--prompt", "add -v please"])
         assert "add -v please" in capsys.readouterr().out
         assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
 
-    def test_talk_positional_form_is_unchanged(
+    def test_talk_separator_form_is_unchanged(
         self,
         isolated: Orchestrator,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        cmd_talk(isolated, ["a", "hello", "there"])
+        _cmd_talk(isolated, _talk_options(["talk", "a", "--", "hello", "there"]))
         assert "echo:hello there" in capsys.readouterr().out
 
     def test_talk_via_main_is_unchanged(
@@ -713,7 +735,7 @@ class TestMainSkillInvocation:
         isolated: Orchestrator,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        main(["talk", "a", "plain"])
+        main(["talk", "a", "-p", "plain"])
         out = capsys.readouterr().out
         assert "echo:plain" in out
         assert PROMPT_HEADER not in out
@@ -721,7 +743,7 @@ class TestMainSkillInvocation:
     def test_list_agents_via_main(
         self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        main(["--list", "agents"])
+        main(["list", "agents"])
         assert (
             capsys.readouterr().out == "a                    backend=echo   session=-\n"
         )
@@ -732,17 +754,18 @@ class TestMainSkillInvocation:
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        main(["--list", "skills"])
+        main(["list", "skills"])
         assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
 
-    def test_list_equals_form_is_accepted(
+    def test_removed_list_equals_form_is_rejected(
         self,
         isolated: Orchestrator,
         skills_tree: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        main(["--list=skills"])
-        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+        with pytest.raises(SystemExit, match="2"):
+            main(["--list=skills"])
+        assert capsys.readouterr().out == ""
 
     def test_list_command_is_unchanged(
         self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
@@ -759,11 +782,11 @@ class TestMainSkillInvocation:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level("DEBUG", logger="orchestrator"):
-            main(["-v", "--list", "agents"])
+            main(["-v", "list", "agents"])
         assert (
             capsys.readouterr().out == "a                    backend=echo   session=-\n"
         )
-        assert "cli: dispatching --list" in [r.getMessage() for r in caplog.records]
+        assert "cli: dispatching 'list'" in [r.getMessage() for r in caplog.records]
 
     def test_missing_skills_dir_exits(
         self,
@@ -777,7 +800,7 @@ class TestMainSkillInvocation:
         missing = tmp_path / "absent"
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         with pytest.raises(SystemExit, match="1"):
-            main(["--agent", "a", "--skill", "foo", "--prompt", "x"])
+            main(["talk", "a", "--skill", "foo", "--prompt", "x"])
         captured = capsys.readouterr()
         assert captured.err == f"skills directory not found: {missing}\n"
         assert captured.out == ""

@@ -41,27 +41,27 @@ uv run orchestrator create builder -b grok
 
 # Create or verify an agent's configuration as part of a turn
 uv run orchestrator talk -b codex --model gpt-5 --reasoning-effort high \
-  reviewer "what did we decide about issue #23?"
+  reviewer -p "what did we decide about issue #23?"
 
 # Talk to an agent (resumes its session, prints the reply)
-uv run orchestrator talk reviewer "what did we decide about issue #23?"
+uv run orchestrator talk reviewer -p "what did we decide about issue #23?"
 
 # Talk with one or more skills: each name is resolved to a markdown file
 # under SKILLS/ (any subfolder) and that path is prepended to the prompt
-uv run orchestrator --agent reviewer --skill tdd,code-review --prompt "add a test for X"
+uv run orchestrator talk reviewer --skill tdd,code-review --prompt "add a test for X"
 
 # Require the reply to be JSON matching a schema, and print the object
-uv run orchestrator --agent reviewer --validate-schema verdict.json --prompt "is it ready?"
+uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 
 # Set the wall-clock turn limit for a flag-style invocation
-uv run orchestrator --agent reviewer --timeout 900 --prompt "review the change"
+uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
 # List all agents and their session ids
 uv run orchestrator list
 
-# Same agent listing, or the SKILLS/ catalog, via flags (`list` stays)
-uv run orchestrator --list agents
-uv run orchestrator --list skills
+# Same agent listing, or the SKILLS/ catalog
+uv run orchestrator list agents
+uv run orchestrator list skills
 
 # Delete an agent
 uv run orchestrator delete reviewer
@@ -73,9 +73,9 @@ uv run orchestrator --help
 uv run orchestrator --version
 ```
 
-### Structured replies: `--validate-schema`
+### Structured replies: `--schema`
 
-`--validate-schema PATH` constrains a turn's reply to a JSON Schema and prints
+`--schema PATH` constrains a turn's reply to a JSON Schema and prints
 the validated object instead of the raw text. It composes with `--skill`, and
 it works the same way on all three backends:
 
@@ -93,7 +93,7 @@ cat > verdict.json <<'JSON'
 }
 JSON
 
-uv run orchestrator --agent reviewer --validate-schema verdict.json \
+uv run orchestrator talk reviewer --schema verdict.json \
   --prompt "did the build pass? stage is 'build'"
 # [reviewer session=22f8bfee-...]
 # {
@@ -117,7 +117,7 @@ one of its properties, and `oneOf`, `allOf` and `not` are refused. `anyOf`,
 `$ref` and `$defs` are fine: those were measured working on all three.
 
 ```sh
-uv run orchestrator --agent reviewer --validate-schema lax.json --prompt "..."
+uv run orchestrator talk reviewer --schema lax.json --prompt "..."
 # /abs/lax.json: $.properties.detail must set "additionalProperties": false
 # (codex rejects it; one schema has to mean the same thing on every backend)
 # exit 2 — nothing ran, and no agent was created
@@ -125,7 +125,7 @@ uv run orchestrator --agent reviewer --validate-schema lax.json --prompt "..."
 
 **A reply that misses the schema is retried**, on the same session, with the
 validation error appended so the agent can correct itself.
-`--validation-retries N` sets how many corrections are allowed (default 2); a
+`--retries N` sets how many corrections are allowed (default 2); a
 reply that is not JSON at all counts as a miss and is retried too. The whole
 loop is bounded by one turn's wall-clock budget, so a validated call can never
 cost more time than a plain turn.
@@ -145,10 +145,10 @@ output. Two flags say what is happening meanwhile:
 
 ```sh
 # -v / --verbose: each step and how long it took
-uv run orchestrator -v talk reviewer "summarise the auth module"
+uv run orchestrator -v talk reviewer -p "summarise the auth module"
 
-# -vv / --verbose2: the above, plus the full prompt sent and reply received
-uv run orchestrator -vv talk reviewer "summarise the auth module"
+# -vv: the above, plus the full prompt sent and reply received
+uv run orchestrator -vv talk reviewer -p "summarise the auth module"
 ```
 
 ```
@@ -176,11 +176,11 @@ unaffected. Two things worth knowing:
 uv run orchestrator create reviewer -b claude
 # created agent 'reviewer' backend=claude
 
-uv run orchestrator talk reviewer "reply with only: first"
+uv run orchestrator talk reviewer -p "reply with only: first"
 # [reviewer session=22f8bfee-...]
 # first
 
-uv run orchestrator talk reviewer "what did you just reply?"
+uv run orchestrator talk reviewer -p "what did you just reply?"
 # [reviewer session=22f8bfee-...]   <-- same session, conversation continued
 # you replied "first"
 ```
@@ -200,7 +200,7 @@ has to implement `name` and
 `run_turn(prompt, session_id, cwd, timeout, schema)`. `run_turn` starts a
 fresh CLI session when `session_id` is `None` and resumes it otherwise,
 returning a `TurnResult` with the reply and the session id for the next turn.
-`schema` is `None` unless `--validate-schema` was used; when it is set the
+`schema` is `None` unless `--schema` was used; when it is set the
 backend passes it to its CLI in whichever form that CLI wants and fills
 `TurnResult.structured`. Failures raise a `TurnError` subclass so `talk` can
 print the message without knowing which CLI ran.
@@ -264,7 +264,7 @@ backends/          # AgentBackend interface + implementations (claude, codex, gr
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (create / talk / list / delete)
-  schema.py        # --validate-schema loading, strict-subset checks, reply validation
+  schema.py        # --schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
 tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-integrity)

@@ -101,7 +101,7 @@ def compose_skill_prompt(resolved: list[tuple[str, Path]], prompt: str) -> str:
 
 
 def format_skill_listing(catalog: dict[str, list[Path]]) -> str:
-    """Render the catalog for `--list skills`: one line per file, name then path.
+    """Render the catalog for `list skills`: one line per file, name then path.
 
     Duplicate names are listed once per colliding file so a conflict is visible
     before `--skill` rejects it.

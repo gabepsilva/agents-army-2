@@ -21,9 +21,10 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
+from typing import Any, NoReturn, cast
 
 from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
 from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
@@ -425,29 +426,20 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 
 
-def _agent_config_parser(prog: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=prog)
-    parser.add_argument("name")
-    _add_agent_config_options(parser)
-    return parser
-
-
 def _add_agent_config_options(parser: argparse.ArgumentParser) -> None:
     # No argparse default: leaving this None lets create() and ensure() resolve
     # DEFAULT_BACKEND, which is what that constant documents itself as. A
     # literal here would pin them to claude however DEFAULT_BACKEND changed.
     parser.add_argument("--backend", "-b", choices=list_backends())
-    parser.add_argument("--model")
-    parser.add_argument("--reasoning-effort")
+    parser.add_argument("--model", "-m")
+    parser.add_argument("--reasoning-effort", "-e")
 
 
 def _agent_config(agent: Agent) -> tuple[str, str | None, str | None]:
     return agent.backend.name, agent.backend.model, agent.backend.reasoning_effort
 
 
-def cmd_create(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = _agent_config_parser("create")
-    opts = parser.parse_args(args)
+def cmd_create(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     agent = orchestrator.spawn(
         opts.name,
         opts.backend,
@@ -497,22 +489,35 @@ def _ensure_agent(
         )
 
 
-def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="talk")
-    _add_agent_config_options(parser)
-    parser.add_argument("name")
-    parser.add_argument("prompt", nargs=argparse.REMAINDER)
-    opts = parser.parse_args(args)
-    prompt = " ".join(opts.prompt).strip()
-    if not prompt:
-        # Exit 2 like argparse does for a bad invocation: a caller under
-        # `set -e` must not read "nothing ran" as a turn that succeeded.
-        print(
-            "usage: talk [-b BACKEND] [--model MODEL] "
-            "[--reasoning-effort EFFORT] <agent> <prompt>",
-            file=sys.stderr,
+def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+    prompt = opts.prompt
+    composed = prompt
+    if opts.skill is not None:
+        try:
+            names = parse_skill_names(opts.skill)
+            resolved = resolve_skills(names, SKILLS_DIR)
+        except SkillError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from None
+        composed = compose_skill_prompt(resolved, prompt)
+        log.info(
+            "agent '%s': attaching skill(s) %s",
+            opts.name,
+            ", ".join(name for name, _path in resolved),
         )
-        raise SystemExit(2)
+    schema = None
+    if opts.schema is not None:
+        try:
+            schema = load_schema(Path(opts.schema))
+        except SchemaLoadError as exc:
+            # Exit 2, not 1: the schema file is a bad argument, the same class
+            # of mistake argparse exits 2 for. A caller can tell "fix your
+            # schema" from "the agent failed" without reading the message.
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from None
+        log.info("agent '%s': validating the reply against %s", opts.name, schema.path)
+    # After the skills and the schema resolve, so a bad argument exits without
+    # having left a new agent behind for a turn that never ran.
     _ensure_agent(
         orchestrator,
         opts.name,
@@ -521,12 +526,23 @@ def cmd_talk(orchestrator: Orchestrator, args: list[str]) -> None:
         opts.reasoning_effort,
     )
     try:
-        result = orchestrator.talk(opts.name, prompt)
-    except TurnError as exc:
+        result = orchestrator.talk(
+            opts.name,
+            composed,
+            schema=schema,
+            retries=opts.retries,
+            timeout=opts.timeout,
+        )
+    except (TurnError, ReplyValidationError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
     print(f"[{opts.name} session={result.session_id}]")
-    print(result.reply)
+    if schema is None:
+        print(result.reply)
+        return
+    # The validated object rather than the reply text: same content, but
+    # parsed once here so a caller piping this gets one canonical spelling.
+    print(json.dumps(result.structured, indent=2, sort_keys=True))
 
 
 def _print_agents(orchestrator: Orchestrator) -> None:
@@ -540,22 +556,25 @@ def _print_agents(orchestrator: Orchestrator) -> None:
         print(f"{name:20} backend={agent.backend.name:6} session={sid}")
 
 
-def cmd_list(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="list")
-    parser.parse_args(args)
-    _print_agents(orchestrator)
+def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+    if opts.target == "agents":
+        _print_agents(orchestrator)
+        return
+    try:
+        catalog = index_skills(SKILLS_DIR)
+    except SkillError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(format_skill_listing(catalog))
 
 
-def cmd_delete(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="delete")
-    parser.add_argument("name")
-    opts = parser.parse_args(args)
+def cmd_delete(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     agent = orchestrator.delete(opts.name)
     print(f"deleted agent '{agent.name}' backend={agent.backend.name}")
 
 
 def _retry_count(raw: str) -> int:
-    """--validation-retries as a count, rejecting a negative one.
+    """--retries as a count, rejecting a negative one.
 
     argparse turns the raised error into its own exit 2. Without this, -1
     would mean "no attempts at all", which is not a thing this command can do.
@@ -573,110 +592,7 @@ def _positive_seconds(raw: str) -> int:
     return value
 
 
-def cmd_invoke_skills(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="orchestrator")
-    parser.add_argument("--agent", required=True)
-    _add_agent_config_options(parser)
-    parser.add_argument("--skill")
-    parser.add_argument("--validate-schema")
-    parser.add_argument(
-        "--validation-retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
-    )
-    parser.add_argument(
-        "--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT
-    )
-    parser.add_argument("--prompt", required=True)
-    opts = parser.parse_args(args)
-    prompt = opts.prompt.strip()
-    if not prompt:
-        print(USAGE_SKILL_INVOCATION, file=sys.stderr)
-        raise SystemExit(2)
-    composed = prompt
-    if opts.skill is not None:
-        try:
-            names = parse_skill_names(opts.skill)
-            resolved = resolve_skills(names, SKILLS_DIR)
-        except SkillError as exc:
-            print(str(exc), file=sys.stderr)
-            raise SystemExit(1) from None
-        composed = compose_skill_prompt(resolved, prompt)
-        log.info(
-            "agent '%s': attaching skill(s) %s",
-            opts.agent,
-            ", ".join(name for name, _path in resolved),
-        )
-    schema = None
-    if opts.validate_schema is not None:
-        try:
-            schema = load_schema(Path(opts.validate_schema))
-        except SchemaLoadError as exc:
-            # Exit 2, not 1: the schema file is a bad argument, the same class
-            # of mistake argparse exits 2 for. A caller can tell "fix your
-            # schema" from "the agent failed" without reading the message.
-            print(str(exc), file=sys.stderr)
-            raise SystemExit(2) from None
-        log.info("agent '%s': validating the reply against %s", opts.agent, schema.path)
-    # After the skills and the schema resolve, so a bad argument exits without
-    # having left a new agent behind for a turn that never ran.
-    _ensure_agent(
-        orchestrator,
-        opts.agent,
-        opts.backend,
-        opts.model,
-        opts.reasoning_effort,
-    )
-    try:
-        result = orchestrator.talk(
-            opts.agent,
-            composed,
-            schema=schema,
-            retries=opts.validation_retries,
-            timeout=opts.timeout,
-        )
-    except (TurnError, ReplyValidationError) as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1) from None
-    print(f"[{opts.agent} session={result.session_id}]")
-    if schema is None:
-        print(result.reply)
-        return
-    # The validated object rather than the reply text: same content, but
-    # parsed once here so a caller piping this gets one canonical spelling.
-    print(json.dumps(result.structured, indent=2, sort_keys=True))
-
-
-def cmd_flag_list(orchestrator: Orchestrator, args: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="orchestrator")
-    parser.add_argument("--list", required=True, choices=("agents", "skills"))
-    opts = parser.parse_args(args)
-    if opts.list == "agents":
-        _print_agents(orchestrator)
-        return
-    try:
-        catalog = index_skills(SKILLS_DIR)
-    except SkillError as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1) from None
-    print(format_skill_listing(catalog))
-
-
-def _is_list_invocation(argv: list[str]) -> bool:
-    token = argv[0]
-    return token == "--list" or token.startswith("--list=")
-
-
-COMMANDS: dict[str, Callable[[Orchestrator, list[str]], None]] = {
-    "create": cmd_create,
-    "talk": cmd_talk,
-    "list": cmd_list,
-    "delete": cmd_delete,
-}
-
-
-# How loud each flag asks for. The highest one given wins, so `-v -vv` is -vv.
-VERBOSE_FLAGS = {"-v": 1, "--verbose": 1, "-vv": 2, "--verbose2": 2}
-
-# The level each verbosity selects, indexed by the count above.
+# The level each verbosity selects, indexed by the summed argparse counts.
 VERBOSITY_LEVELS = (logging.WARNING, logging.DEBUG, TRACE)
 
 # Raised by the verbose flags. Only this project's loggers are turned up:
@@ -685,35 +601,141 @@ VERBOSITY_LEVELS = (logging.WARNING, logging.DEBUG, TRACE)
 # noise.
 OWN_LOGGERS = ("orchestrator", "backends")
 
-# One spelling of the flag form, so the -h screen and the error a missing
-# prompt prints cannot drift apart. Its second line is indented past both
-# margins — "usage: " and the USAGE block's — so it reads as a continuation
-# of the form above it rather than as a third one.
-SKILL_INVOCATION_FORM = (
-    "orchestrator [-v|-vv] --agent NAME [-b BACKEND] [--model MODEL]\n"
-    "              [--reasoning-effort EFFORT] [--skill NAME[,NAME...]]\n"
-    "              [--validate-schema PATH [--validation-retries N]]\n"
-    "              [--timeout SECONDS] --prompt TEXT"
-)
-USAGE_SKILL_INVOCATION = f"usage: {SKILL_INVOCATION_FORM}"
 
-USAGE = (
-    "usage: orchestrator [-v|-vv] <command> [args...]\n"
-    f"       {SKILL_INVOCATION_FORM}\n"
-    "       orchestrator [-v|-vv] --list {agents,skills}\n"
-    "       orchestrator [-v|-vv] --version\n"
-    "       orchestrator [-v|-vv] --dependency-check\n"
-    "  -h, --help      show this message\n"
-    "  --version       show the installed version\n"
-    "  --dependency-check  report which agent CLIs and tools are installed\n"
-    "  -v, --verbose   log each step and how long it took\n"
-    "  -vv, --verbose2  also log full prompts and replies"
-)
+class _VersionAction(argparse.Action):
+    """Print the project version and stop before argparse validates the rest."""
 
-# Handled here rather than by a parser: every dash-led token that is not
-# --list belongs to the skill invocation, whose own parser knows nothing about
-# the commands, so -h there would advertise a third of the CLI.
-HELP_FLAGS = frozenset({"-h", "--help"})
+    def __init__(self, option_strings: list[str], dest: str, **kwargs: Any) -> None:
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        del namespace, values, option_string
+        _print_version()
+        parser.exit(0)
+
+
+class _CLIArgumentParser(argparse.ArgumentParser):
+    """Use the selected verb's usage line for leftover-argument errors."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._verb_parsers: dict[str, _CLIArgumentParser] = {}
+        self._error_parser: argparse.ArgumentParser | None = None
+
+    def error(self, message: str) -> NoReturn:
+        if self._error_parser is not None:
+            self._error_parser.error(message)
+        super().error(message)
+
+    def parse_args(
+        self,
+        args: Iterable[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        arguments = list(args) if args is not None else sys.argv[1:]
+        self._error_parser = None
+        for token in arguments:
+            if token in self._verb_parsers:
+                self._error_parser = self._verb_parsers[token]
+                break
+        return cast(argparse.Namespace, super().parse_args(arguments, namespace))
+
+
+def _add_version_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--version",
+        action=_VersionAction,
+        default=argparse.SUPPRESS,
+        help="show the installed version",
+    )
+
+
+def _add_verbosity_argument(parser: argparse.ArgumentParser, dest: str) -> None:
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        dest=dest,
+        help="log each step and how long it took; repeat for full prompts",
+    )
+
+
+def _add_verb_parser(
+    subparsers: argparse._SubParsersAction,
+    verb: str,
+    **kwargs: Any,
+) -> argparse.ArgumentParser:
+    kwargs["prog"] = f"orchestrator {verb}"
+    return subparsers.add_parser(verb, **kwargs)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _CLIArgumentParser(prog="orchestrator")
+    _add_version_argument(parser)
+    _add_verbosity_argument(parser, "verbosity")
+    subparsers = parser.add_subparsers(dest="verb", required=True, metavar="<verb>")
+
+    create = _add_verb_parser(subparsers, "create")
+    _add_version_argument(create)
+    _add_verbosity_argument(create, "verbosity_after")
+    create.add_argument("name")
+    _add_agent_config_options(create)
+    create.set_defaults(_parser=create)
+
+    talk = _add_verb_parser(
+        subparsers,
+        "talk",
+        epilog="prompt source: orchestrator talk NAME [-p TEXT | -- PROMPT...]",
+    )
+    _add_version_argument(talk)
+    _add_verbosity_argument(talk, "verbosity_after")
+    _add_agent_config_options(talk)
+    talk.add_argument("name")
+    talk.add_argument("-s", "--skill")
+    talk.add_argument("--schema")
+    talk.add_argument(
+        "--retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
+    )
+    talk.add_argument("--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT)
+    talk.add_argument("-p", "--prompt")
+    talk.set_defaults(_parser=talk)
+
+    list_parser = _add_verb_parser(subparsers, "list")
+    _add_version_argument(list_parser)
+    _add_verbosity_argument(list_parser, "verbosity_after")
+    list_parser.add_argument(
+        "target", nargs="?", choices=("agents", "skills"), default="agents"
+    )
+    list_parser.set_defaults(_parser=list_parser)
+
+    delete = _add_verb_parser(subparsers, "delete")
+    _add_version_argument(delete)
+    _add_verbosity_argument(delete, "verbosity_after")
+    delete.add_argument("name")
+    delete.set_defaults(_parser=delete)
+
+    doctor = _add_verb_parser(subparsers, "doctor")
+    _add_version_argument(doctor)
+    _add_verbosity_argument(doctor, "verbosity_after")
+    doctor.set_defaults(_parser=doctor)
+
+    parser._verb_parsers = subparsers.choices
+    return parser
+
+
+VERBS: dict[str, Callable[[Orchestrator, argparse.Namespace], None]] = {
+    "create": cmd_create,
+    "talk": cmd_talk,
+    "list": cmd_list,
+    "delete": cmd_delete,
+}
 
 
 def _configure_logging(verbosity: int) -> None:
@@ -726,25 +748,18 @@ def _configure_logging(verbosity: int) -> None:
             logging.getLogger(name).setLevel(VERBOSITY_LEVELS[verbosity])
 
 
-def _take_verbosity(argv: list[str]) -> tuple[int, list[str]]:
-    verbosity = 0
-    consumed = 0
-    for token in argv:
-        if token not in VERBOSE_FLAGS:
-            break
-        verbosity = max(verbosity, VERBOSE_FLAGS[token])
-        consumed += 1
-    return verbosity, argv[consumed:]
-
-
 def _project_version() -> str | None:
     """Read the version from the checkout containing this package, if valid."""
     project_file = Path(__file__).resolve().parent.parent / "pyproject.toml"
     try:
         with project_file.open("rb") as stream:
-            version = tomllib.load(stream).get("project", {}).get("version")
+            document = tomllib.load(stream)
     except (OSError, ValueError, AttributeError, TypeError):
         return None
+    project = document.get("project")
+    if not isinstance(project, dict):
+        return None
+    version = project.get("version")
     return version if isinstance(version, str) and version else None
 
 
@@ -777,7 +792,7 @@ def _print_version() -> None:
 # the checkout rather than on the interpreter actually executing this.
 MIN_PYTHON = (3, 11)
 
-# Every tool --dependency-check reports, in the order it prints them, paired
+# Every tool `doctor` reports, in the order it prints them, paired
 # with whether its absence is fine. Only jq is optional: the three agent CLIs
 # are listed separately rather than collapsed into one "at least one" line, so
 # the report says which backends this machine can actually run.
@@ -900,43 +915,49 @@ def _print_dependency_check() -> None:
         print(line)
 
 
-def main(argv: list[str] | None = None) -> None:
-    if argv is None:
-        argv = sys.argv[1:]
+def _resolve_talk_prompt(
+    opts: argparse.Namespace, tail: list[str], separator_present: bool
+) -> None:
+    flag_prompt = opts.prompt is not None
+    if flag_prompt == separator_present:
+        opts._parser.error("talk requires exactly one prompt source")
+    prompt = " ".join(tail) if separator_present else opts.prompt
+    prompt = prompt.strip()
+    if not prompt:
+        opts._parser.error("talk prompt must not be empty")
+    opts.prompt = prompt
 
-    verbosity, argv = _take_verbosity(argv)
-    if argv and argv[0] == "--version":
-        _print_version()
-        return
-    if argv and argv[0] == "--dependency-check":
+
+def main(argv: list[str] | None = None) -> None:
+    raw_argv = sys.argv[1:] if argv is None else argv
+    separator_index = raw_argv.index("--") if "--" in raw_argv else len(raw_argv)
+    separator_present = separator_index < len(raw_argv)
+    if separator_present:
+        head = raw_argv[:separator_index]
+        tail = raw_argv[separator_index + 1 :]
+    else:
+        head = raw_argv
+        tail = []
+
+    parser = _build_parser()
+    opts = parser.parse_args(head)
+    if separator_present and opts.verb != "talk":
+        opts._parser.error("the -- separator is only valid for talk")
+    if opts.verb == "doctor":
         _print_dependency_check()
         return
+
+    verbosity = min(opts.verbosity + opts.verbosity_after, len(VERBOSITY_LEVELS) - 1)
     _configure_logging(verbosity)
     # The prompt is one of these arguments, so log the shape and not the values.
-    log.debug("cli: %d argument(s) after flag removal", len(argv))
-
-    if argv and argv[0] in HELP_FLAGS:
-        print(USAGE)
-        print(f"commands: {', '.join(COMMANDS)}")
-        return
-
-    if not argv or (argv[0] not in COMMANDS and not argv[0].startswith("-")):
-        print(USAGE, file=sys.stderr)
-        print(f"commands: {', '.join(COMMANDS)}", file=sys.stderr)
-        raise SystemExit(2)
+    log.debug("cli: %d argument(s) after flag splitting", len(head) + len(tail))
+    if opts.verb == "talk":
+        _resolve_talk_prompt(opts, tail, separator_present)
 
     try:
         orch = Orchestrator()
-        if argv[0] in COMMANDS:
-            log.debug("cli: dispatching '%s'", argv[0])
-            COMMANDS[argv[0]](orch, argv[1:])
-            return
-        if _is_list_invocation(argv):
-            log.debug("cli: dispatching --list")
-            cmd_flag_list(orch, argv)
-            return
-        log.debug("cli: dispatching skill invocation")
-        cmd_invoke_skills(orch, argv)
+        log.debug("cli: dispatching '%s'", opts.verb)
+        VERBS[opts.verb](orch, opts)
     except _CLI_ERRORS as exc:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)
