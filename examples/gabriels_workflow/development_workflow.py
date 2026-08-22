@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 GITHUB_TOKEN_NAMES = (
     "GH_TOKEN",
@@ -894,11 +894,19 @@ class AgentGateway:
         issue: int,
         state_file: Path,
         example_root: Path,
+        workdir: Path,
         run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
         self.roles = dict(roles)
         self.issue = issue
         self.state_file = state_file
+        # Required rather than defaulted to the process's directory. That
+        # default is what sent every agent into the driver's own checkout
+        # while git and CI worked in the issue's worktree: the implementer
+        # edited one tree, `make ci` passed against the other because nothing
+        # in it had changed, and the run died at `commit` with "produced no
+        # commits". A caller that forgets this argument now fails to build.
+        self.workdir = workdir
         self.prompts = example_root / "prompts"
         self.validations = example_root / "validations"
         self._run_process = run
@@ -995,7 +1003,7 @@ class AgentGateway:
         try:
             result = self._run_process(
                 ["orchestrator", *args],
-                cwd=str(Path.cwd()),
+                cwd=str(self.workdir),
                 env=environment,
                 capture_output=True,
                 text=True,
@@ -1054,6 +1062,10 @@ class AgentGateway:
             sanitized = dict(original)
             sanitized["PATH"] = f"{isolation}{os.pathsep}{original.get('PATH', '')}"
             sanitized["GH_CONFIG_DIR"] = str(isolation / "empty-gh-config")
+            # cwd already points here, but the orchestrator only derives its
+            # working directory from cwd as a fallback. Saying it outright
+            # keeps the agents in the worktree even if that call changes.
+            sanitized["AGENTS_ARMY_HOME"] = str(self.workdir)
             sanitized["AGENTS_ARMY_STATE_FILE"] = str(self.state_file)
             for name in GITHUB_TOKEN_NAMES:
                 sanitized.pop(name, None)
@@ -1265,9 +1277,10 @@ class DevelopmentWorkflow:
                     "EXPANSION_JSON": _json(expansion),
                     "GRILL_JSON": _json(grill),
                 }
+            expansion_key = f"expansion-{round_number}"
             expansion = self._stage(
                 Stage(
-                    f"expansion-{round_number}",
+                    expansion_key,
                     f"Expansion round {round_number}",
                     "expander",
                     prompt,
@@ -1276,10 +1289,11 @@ class DevelopmentWorkflow:
                 )
             )
             if expansion["decision"] == "stop":
-                raise WorkflowStopped(str(expansion["summary"]))
+                self._refuse(expansion_key, "stop", expansion["summary"])
+            grill_key = f"grill-{round_number}"
             grill = self._stage(
                 Stage(
-                    f"grill-{round_number}",
+                    grill_key,
                     f"Ambiguity review round {round_number}",
                     "griller",
                     "grill",
@@ -1291,7 +1305,7 @@ class DevelopmentWorkflow:
                 )
             )
             if grill["verdict"] == "reject":
-                raise WorkflowStopped(str(grill["summary"]))
+                self._refuse(grill_key, "reject", grill["summary"])
             if (
                 not expansion["needs_another_round"]
                 and not grill["needs_another_round"]
@@ -1466,6 +1480,23 @@ class DevelopmentWorkflow:
         )
         return result
 
+    def _refuse(self, key: str, verdict: str, summary: object) -> NoReturn:
+        """End the run on a deliberate refusal, naming the checkpoint to delete.
+
+        The refusal is already checkpointed, so a plain resume replays it
+        instead of asking again — the trap `_require_complete` already warns
+        about, on the two stages that can refuse before any code is written.
+        Without this the run repeats a stale verdict forever and the operator
+        is told only to "rerun the same command to resume", which cannot work.
+        """
+        LOGGER.error(
+            "stage %s returned %r; delete %s to ask again",
+            key,
+            verdict,
+            self.store.artifact_path(key),
+        )
+        raise WorkflowStopped(str(summary))
+
     def _require_complete(self, result: dict, stage: str, key: str) -> None:
         if result["status"] != "complete":
             blockers = "; ".join(str(item) for item in result["blockers"])
@@ -1562,6 +1593,7 @@ def main(argv: list[str] | None = None) -> int:
         issue=opts.issue,
         state_file=store.root / "agents.json",
         example_root=example_root,
+        workdir=root,
     )
     workflow = DevelopmentWorkflow(
         WorkflowOptions(

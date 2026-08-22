@@ -70,6 +70,7 @@ def prepare_workflow(issue_number: int, config: WorkflowConfig) -> DevelopmentWo
         issue=issue_number,
         state_file=store.root / "agents.json",
         example_root=Path(__file__).resolve().parent,
+        workdir=worktree_path,
     )
     return DevelopmentWorkflow(
         WorkflowOptions(

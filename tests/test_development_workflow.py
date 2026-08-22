@@ -1157,6 +1157,7 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
         issue=3,
         state_file=tmp_path / "agents.json",
         example_root=root,
+        workdir=tmp_path,
         run=fake_run,
     )
     result = gateway.ask(
@@ -1182,8 +1183,58 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
     assert len(calls) == 1
     assert calls[0][1]["env"]["AGENTS_ARMY_STATE_FILE"] == str(tmp_path / "agents.json")
     assert calls[0][1]["timeout"] == 22
+    assert calls[0][1]["cwd"] == str(tmp_path)
+    assert calls[0][1]["env"]["AGENTS_ARMY_HOME"] == str(tmp_path)
     assert os.environ["GH_TOKEN"] == "secret"
     assert os.environ["PATH"] == original_path
+
+
+def test_agent_turns_run_in_the_worktree_not_the_directory_the_driver_started_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents develop in the tree git and CI use, whatever the process's cwd.
+
+    Regression: the gateway used to hand the orchestrator `Path.cwd()` and set
+    no AGENTS_ARMY_HOME, so every agent edited the checkout the driver was
+    started from while `make ci`, `git add` and `commit` ran in the issue
+    worktree. Nothing failed until `commit` found an unchanged tree.
+    """
+    driver_cwd = tmp_path / "checkout"
+    worktree = tmp_path / "checkout" / ".git" / "gdw" / "issue-3" / "worktree"
+    worktree.mkdir(parents=True)
+    monkeypatch.chdir(driver_cwd)
+    calls: list[dict] = []
+
+    def fake_run(args: list[str], **kwargs):
+        calls.append(kwargs)
+        return _completed(
+            args,
+            stdout=f"[gdw-3-expander session=s1]\n{json.dumps(_expansion())}\n",
+        )
+
+    gateway = gdw.AgentGateway(
+        roles={
+            "expander": SimpleNamespace(
+                backend="codex", model=None, reasoning_effort=None
+            )
+        },
+        issue=3,
+        state_file=worktree.parent / "agents.json",
+        example_root=Path(gdw.__file__).parent,
+        workdir=worktree,
+        run=fake_run,
+    )
+    gateway.ask(
+        role="expander",
+        prompt_name="expand",
+        schema_name="expansion",
+        values={"ISSUE_CONTEXT_JSON": "{}"},
+    )
+
+    assert calls[0]["cwd"] == str(worktree)
+    assert calls[0]["env"]["AGENTS_ARMY_HOME"] == str(worktree)
+    assert calls[0]["cwd"] != str(driver_cwd)
+    assert calls[0]["env"]["AGENTS_ARMY_HOME"] != str(driver_cwd)
 
 
 def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> None:
@@ -1213,6 +1264,7 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
         issue=1,
         state_file=tmp_path / "state.json",
         example_root=example_root,
+        workdir=tmp_path,
         run=fake_run,
     )
     with pytest.raises(gdw.WorkflowError, match="cannot read prompt"):
@@ -1266,6 +1318,7 @@ def test_agent_gateway_fills_prompts_with_brace_bearing_values(tmp_path: Path) -
         issue=28,
         state_file=tmp_path / "state.json",
         example_root=example_root,
+        workdir=tmp_path,
         run=fake_run,
     )
 
@@ -1297,6 +1350,7 @@ def test_agent_gateway_names_the_placeholder_no_value_was_given_for(
         issue=28,
         state_file=tmp_path / "state.json",
         example_root=example_root,
+        workdir=tmp_path,
         run=lambda args, **_kwargs: _completed(args),
     )
 
@@ -1340,6 +1394,7 @@ def test_agent_gateway_rejects_malformed_cli_output(
         issue=1,
         state_file=tmp_path / "state.json",
         example_root=Path(gdw.__file__).parent,
+        workdir=tmp_path,
         run=fake_run,
     )
     with pytest.raises(gdw.WorkflowError, match=message):
@@ -1366,6 +1421,7 @@ def test_agent_gateway_reports_cli_launch_failures(
         issue=1,
         state_file=tmp_path / "state.json",
         example_root=Path(gdw.__file__).parent,
+        workdir=tmp_path,
         run=failing_run,
     )
     with pytest.raises(gdw.WorkflowError, match="orchestrator CLI failed"):
@@ -1378,6 +1434,7 @@ def test_agent_gateway_reports_cli_exit_without_stderr(tmp_path: Path) -> None:
         issue=1,
         state_file=tmp_path / "state.json",
         example_root=Path(gdw.__file__).parent,
+        workdir=tmp_path,
         run=lambda args, **_kwargs: _completed(args, returncode=9),
     )
     with pytest.raises(gdw.WorkflowError, match="exited 9"):
@@ -1405,6 +1462,7 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         issue=5,
         state_file=tmp_path / "agents.json",
         example_root=Path(gdw.__file__).parent,
+        workdir=tmp_path,
         run=fake_run,
     )
     assert gateway.options("expander") is configured
@@ -1462,6 +1520,7 @@ def test_agent_gateway_attaches_skills_only_when_given(tmp_path: Path) -> None:
         issue=7,
         state_file=tmp_path / "agents.json",
         example_root=Path(gdw.__file__).parent,
+        workdir=tmp_path,
         run=fake_run,
     )
     gateway.ask(
@@ -1502,6 +1561,7 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         issue=1,
         state_file=tmp_path / "agents.json",
         example_root=example_root,
+        workdir=tmp_path,
     )
     values = {
         "ISSUE_CONTEXT_JSON": "{}",
@@ -2094,6 +2154,9 @@ def test_prepare_simple_workflow_checks_tools_and_builds_services(
         issue=7,
         state_file=tmp_path / ".git" / "gdw" / "issue-7" / "agents.json",
         example_root=Path(simple_setup.__file__).resolve().parent,
+        # The agents develop in the same tree git and CI use. Asserting the
+        # repository root here instead is what let them diverge.
+        workdir=worktree_path,
     )
 
 
@@ -2370,6 +2433,41 @@ def test_a_blocked_stage_names_the_checkpoint_to_delete(
         f"stage repair-implementation-2 reported itself blocked; delete "
         f"{tmp_path / 'state' / 'artifacts' / 'repair-implementation-2.json'} "
         f"to ask again" in [record.getMessage() for record in caplog.records]
+    )
+
+
+@pytest.mark.parametrize(
+    ("replies", "key", "verdict"),
+    [
+        ([_expansion("stop")], "expansion-1", "stop"),
+        ([_expansion(), _grill("reject")], "grill-1", "reject"),
+    ],
+)
+def test_a_refusing_stage_names_the_checkpoint_to_delete(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    replies: list[dict],
+    key: str,
+    verdict: str,
+) -> None:
+    """A refusal is checkpointed too, so a plain resume replays it forever.
+
+    Regression: `stop` and `reject` raised without naming the artifact, so the
+    operator was told only to rerun the command — which replays the same
+    refusal and can never move the run forward.
+    """
+    workflow, _github, _repository, _agents = _workflow(tmp_path, replies)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="gdw"),
+        pytest.raises(gdw.WorkflowStopped),
+    ):
+        workflow.run()
+
+    assert (
+        f"stage {key} returned '{verdict}'; delete "
+        f"{tmp_path / 'state' / 'artifacts' / key}.json to ask again"
+        in [record.getMessage() for record in caplog.records]
     )
 
 
