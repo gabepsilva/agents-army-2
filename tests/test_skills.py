@@ -470,9 +470,96 @@ class TestCmdInvokeSkills:
             ["--agent", "missing", "--skill", "foo", "--prompt", "x"],
         )
         captured = capsys.readouterr()
-        assert captured.err == "spawned agent 'missing' backend=echo\n"
+        assert captured.err == "created agent 'missing' backend=echo\n"
         assert "session=echo-sid" in captured.out
         assert orch.list_agents() == ["a", "missing"]
+
+    def test_config_flags_create_exact_agent_before_skill_turn(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        cmd_invoke_skills(
+            orch,
+            [
+                "--agent",
+                "missing",
+                "-b",
+                "echo",
+                "--model",
+                "m",
+                "--reasoning-effort",
+                "high",
+                "--prompt",
+                "x",
+            ],
+        )
+        assert capsys.readouterr().err == "created agent 'missing' backend=echo\n"
+        agent = orch.agents["missing"]
+        assert (
+            agent.backend.name,
+            agent.backend.model,
+            agent.backend.reasoning_effort,
+        ) == (
+            "echo",
+            "m",
+            "high",
+        )
+
+    def test_matching_config_flags_reuse_silently(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch.spawn("configured", "echo", model="m", reasoning_effort="high")
+        cmd_invoke_skills(
+            orch,
+            [
+                "--agent",
+                "configured",
+                "-b",
+                "echo",
+                "--model",
+                "m",
+                "--reasoning-effort",
+                "high",
+                "--prompt",
+                "x",
+            ],
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_mismatched_config_flags_fail_before_skill_turn(
+        self, orch: Orchestrator
+    ) -> None:
+        orch.spawn("configured", "echo", model="stored", reasoning_effort="high")
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match=r"agent 'configured' already uses backend/model/effort \('echo', 'stored', 'high'\); configured \('codex', None, None\)",
+        ):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "configured", "-b", "codex", "--prompt", "x"],
+            )
+
+    def test_omitting_model_still_asserts_on_skill_invocation(
+        self, orch: Orchestrator
+    ) -> None:
+        orch.spawn("configured", "echo", model="stored")
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match=r"configured \('echo', None, None\)$",
+        ):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "configured", "-b", "echo", "--prompt", "x"],
+            )
+
+    def test_unknown_backend_is_argparse_exit_2(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            cmd_invoke_skills(
+                orch,
+                ["--agent", "missing", "-b", "unknown", "--prompt", "x"],
+            )
+        assert "invalid choice" in capsys.readouterr().err
 
     def test_empty_prompt_exits_nonzero_like_talk(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
@@ -483,7 +570,8 @@ class TestCmdInvokeSkills:
             )
         captured = capsys.readouterr()
         assert captured.err == (
-            "usage: orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+            "usage: orchestrator [-v|-vv] --agent NAME [-b BACKEND] [--model MODEL]\n"
+            "              [--reasoning-effort EFFORT] [--skill NAME[,NAME...]]\n"
             "              [--validate-schema PATH [--validation-retries N]]\n"
             "              [--timeout SECONDS] --prompt TEXT\n"
         )

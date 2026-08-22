@@ -24,11 +24,11 @@ The supporting modules own the details:
 - `prompts/` and `validations/` contain the agent prompts and JSON Schemas.
 
 This example deliberately exercises the public CLI boundary. For every role it
-runs `orchestrator ensure ...` with the configured backend/model/effort, then
-runs a schema-validated `orchestrator --agent ... --prompt ...` turn through
-`subprocess.run`. The example does not import or construct the Python
-`Orchestrator` API. The orchestrator CLI then invokes the selected `claude`,
-`codex`, or `grok` backend CLI.
+runs one schema-validated `orchestrator --agent ... --prompt ...` call per turn,
+passing the configured backend/model/effort so the call creates or asserts the
+agent before running the turn. The example does not import or construct the
+Python `Orchestrator` API. The orchestrator CLI then invokes the selected
+`claude`, `codex`, or `grok` backend CLI.
 
 The issue body is sent only for the initial expansion. Later clarification and
 specification turns receive the five latest non-workflow comments, preserving

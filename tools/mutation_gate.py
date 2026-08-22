@@ -17,7 +17,7 @@ detect them — or boundary mutants whose difference is unobservable:
     Orchestrator._persist): codec names are case-insensitive; None falls
     back to UTF-8 wherever this runs.
   * `default="claude"` -> `default="CLAUDE"` (Orchestrator.spawn,
-    cmd_spawn's --backend flag): get_backend() lower()s the name.
+    cmd_create's --backend flag): get_backend() lower()s the name.
   * `catalog.get(name, [])` -> `catalog.get(name, None)` (orchestrator.skills.resolve_skills):
     a missing name still hits `if not matches`.
   * `self.agents = {}` -> `None` in Orchestrator.__init__: `_reload()`

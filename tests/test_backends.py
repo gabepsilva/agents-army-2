@@ -54,10 +54,9 @@ from backends.registry import (
 )
 from orchestrator import (
     Orchestrator,
+    cmd_create,
     cmd_delete,
-    cmd_ensure,
     cmd_list,
-    cmd_spawn,
     cmd_talk,
     main,
 )
@@ -1956,11 +1955,11 @@ class TestOrchestrator:
 class TestCLI:
     """cmd_* dispatch and printed output, backed by a fake CLI-free backend."""
 
-    def test_cmd_spawn_prints_confirmation(
+    def test_cmd_create_prints_confirmation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_spawn(
+        cmd_create(
             orch,
             [
                 "a",
@@ -1972,83 +1971,40 @@ class TestCLI:
                 "high",
             ],
         )
-        assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+        assert capsys.readouterr().out == "created agent 'a' backend=echo\n"
         assert orch.agents["a"].backend.model == "test-model"
         assert orch.agents["a"].backend.reasoning_effort == "high"
 
-    def test_cmd_ensure_creates_and_reuses_the_same_configuration(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_cmd_create_defaults_to_claude_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        args = ["a", "-b", "echo", "--model", "m", "--reasoning-effort", "high"]
-        cmd_ensure(orch, args)
-        cmd_ensure(orch, args)
-        assert capsys.readouterr().out.splitlines() == [
-            "created agent 'a' backend=echo",
-            "reused agent 'a' backend=echo",
-        ]
-        assert orch.agents["a"].backend.model == "m"
-        assert orch.agents["a"].backend.reasoning_effort == "high"
-
-    def test_cmd_ensure_rejects_an_existing_configuration_mismatch(
-        self, tmp_path: Path
-    ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_ensure(orch, ["a", "-b", "echo", "--model", "first"])
-        with pytest.raises(
-            orchestrator.OrchestratorError,
-            match="already uses backend/model/effort",
-        ):
-            cmd_ensure(orch, ["a", "-b", "echo", "--model", "second"])
-
-    def test_cmd_ensure_uses_the_default_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_ensure(orch, ["a"])
+        cmd_create(orch, ["a"])
         assert orch.agents["a"].backend.name == "claude"
 
-    def test_cmd_ensure_rejects_unknown_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
-        with pytest.raises(SystemExit, match="2"):
-            cmd_ensure(orch, ["a", "-b", "not-a-backend"])
-
-    def test_cmd_ensure_missing_name_reports_its_own_prog(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
-        with pytest.raises(SystemExit, match="2"):
-            cmd_ensure(orch, [])
-        assert capsys.readouterr().err.startswith("usage: ensure ")
-
-    def test_cmd_spawn_defaults_to_claude_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_spawn(orch, ["a"])
-        assert orch.agents["a"].backend.name == "claude"
-
-    def test_cmd_spawn_follows_default_backend(
+    def test_cmd_create_follows_default_backend(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DEFAULT_BACKEND documents itself as the one `spawn` uses.
+        """DEFAULT_BACKEND documents itself as the one `create` uses.
 
-        An argparse default of its own would leave `spawn` on claude however
+        An argparse default of its own would leave `create` on claude however
         that constant changed, so the two would silently disagree.
         """
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "codex")
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_spawn(orch, ["a"])
+        cmd_create(orch, ["a"])
         assert orch.agents["a"].backend.name == "codex"
 
-    def test_cmd_spawn_rejects_unknown_backend(self, tmp_path: Path) -> None:
+    def test_cmd_create_rejects_unknown_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         with pytest.raises(SystemExit, match="2"):
-            cmd_spawn(orch, ["a", "-b", "not-a-backend"])
+            cmd_create(orch, ["a", "-b", "not-a-backend"])
 
-    def test_cmd_spawn_missing_name_reports_its_own_prog(
+    def test_cmd_create_missing_name_reports_its_own_prog(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         with pytest.raises(SystemExit, match="2"):
-            cmd_spawn(orch, [])
-        assert capsys.readouterr().err.startswith("usage: spawn ")
+            cmd_create(orch, [])
+        assert capsys.readouterr().err.startswith("usage: create ")
 
     def test_cmd_talk_prints_reply(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -2072,7 +2028,7 @@ class TestCLI:
         orch = Orchestrator(state_file=state_file)
         cmd_talk(orch, ["fresh", "hello"])
         captured = capsys.readouterr()
-        assert captured.err == "spawned agent 'fresh' backend=echo\n"
+        assert captured.err == "created agent 'fresh' backend=echo\n"
         assert "echo:hello" in captured.out
         assert Orchestrator(state_file=state_file).list_agents() == ["fresh"]
 
@@ -2083,6 +2039,83 @@ class TestCLI:
         orch.spawn("a", "echo")
         cmd_talk(orch, ["a", "hello"])
         assert capsys.readouterr().err == ""
+
+    def test_cmd_talk_flags_create_exact_configuration(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_talk(
+            orch,
+            [
+                "-b",
+                "echo",
+                "--model",
+                "m",
+                "--reasoning-effort",
+                "high",
+                "fresh",
+                "hello",
+            ],
+        )
+        assert capsys.readouterr().err == "created agent 'fresh' backend=echo\n"
+        assert orchestrator._agent_config(orch.agents["fresh"]) == ("echo", "m", "high")
+
+    def test_cmd_talk_matching_flags_reuse_silently(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo", model="m", reasoning_effort="high")
+        cmd_talk(
+            orch,
+            ["-b", "echo", "--model", "m", "--reasoning-effort", "high", "a", "hi"],
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_cmd_talk_mismatch_reports_the_exact_configuration_tuple(
+        self, tmp_path: Path
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo", model="first", reasoning_effort="high")
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match=r"agent 'a' already uses backend/model/effort \('echo', 'first', 'high'\); configured \('codex', None, None\)",
+        ):
+            cmd_talk(orch, ["-b", "codex", "a", "hi"])
+
+    def test_cmd_talk_omitting_model_still_asserts_the_exact_tuple(
+        self, tmp_path: Path
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo", model="stored")
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match=r"configured \('echo', None, None\)$",
+        ):
+            cmd_talk(orch, ["-b", "echo", "a", "hi"])
+
+    def test_cmd_talk_without_config_flags_reuses_any_stored_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("a", "echo", model="stored", reasoning_effort="high")
+        cmd_talk(orch, ["a", "hi"])
+        assert capsys.readouterr().err == ""
+
+    def test_cmd_talk_rejects_unknown_backend(self, tmp_path: Path) -> None:
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        with pytest.raises(SystemExit, match="2"):
+            cmd_talk(orch, ["-b", "unknown", "a", "hi"])
+
+    def test_cmd_talk_flags_after_name_are_literal_prompt_text(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        cmd_talk(orch, ["a", "-b", "codex", "hello"])
+        assert capsys.readouterr().out.endswith("echo:-b codex hello\n")
 
     def test_cmd_talk_empty_prompt_creates_nothing(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -2103,7 +2136,10 @@ class TestCLI:
         with pytest.raises(SystemExit, match="2"):
             cmd_talk(orch, ["a", "   "])
         captured = capsys.readouterr()
-        assert captured.err == "usage: talk <agent> <prompt>\n"
+        assert captured.err == (
+            "usage: talk [-b BACKEND] [--model MODEL] "
+            "[--reasoning-effort EFFORT] <agent> <prompt>\n"
+        )
         assert captured.out == ""
 
     def test_cmd_talk_missing_name_reports_its_own_prog(
@@ -2220,12 +2256,12 @@ class TestCLI:
             cmd_talk(orch, ["g", "hi"])
         assert capsys.readouterr().err == "grok did not report a sessionId\n"
 
-    def test_cmd_spawn_accepts_grok(
+    def test_cmd_create_accepts_grok(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        cmd_spawn(orch, ["a", "-b", "grok"])
-        assert "spawned agent 'a' backend=grok" in capsys.readouterr().out
+        cmd_create(orch, ["a", "-b", "grok"])
+        assert capsys.readouterr().out == "created agent 'a' backend=grok\n"
         assert orch.agents["a"].backend.name == "grok"
 
     def test_cmd_list_empty(
@@ -2278,7 +2314,8 @@ class TestCLI:
         captured = capsys.readouterr()
         assert captured.err == (
             "usage: orchestrator [-v|-vv] <command> [args...]\n"
-            "       orchestrator [-v|-vv] --agent NAME [--skill NAME[,NAME...]]\n"
+            "       orchestrator [-v|-vv] --agent NAME [-b BACKEND] [--model MODEL]\n"
+            "              [--reasoning-effort EFFORT] [--skill NAME[,NAME...]]\n"
             "              [--validate-schema PATH [--validation-retries N]]\n"
             "              [--timeout SECONDS] --prompt TEXT\n"
             "       orchestrator [-v|-vv] --list {agents,skills}\n"
@@ -2289,7 +2326,7 @@ class TestCLI:
             "  --dependency-check  report which agent CLIs and tools are installed\n"
             "  -v, --verbose   log each step and how long it took\n"
             "  -vv, --verbose2  also log full prompts and replies\n"
-            "commands: spawn, ensure, talk, list, delete\n"
+            "commands: create, talk, list, delete\n"
         )
         assert captured.out == ""
 
@@ -2656,20 +2693,30 @@ class TestCLI:
             main(["bogus"])
         assert "usage: orchestrator [-v|-vv] <command>" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("removed", ["spawn", "ensure"])
+    def test_removed_lifecycle_commands_are_not_dispatchable(
+        self, removed: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="2"):
+            main([removed])
+        captured = capsys.readouterr()
+        assert "unrecognized" not in captured.err
+        assert "commands: create, talk, list, delete" in captured.err
+
     def test_main_dispatches_using_sys_argv_when_none_given(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr("sys.argv", ["orchestrator", "spawn", "a", "-b", "echo"])
+        monkeypatch.setattr("sys.argv", ["orchestrator", "create", "a", "-b", "echo"])
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
             lambda: Orchestrator(state_file=tmp_path / "s.json"),
         )
         main()
-        assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+        assert "created agent 'a' backend=echo" in capsys.readouterr().out
 
     def test_main_dispatches_to_command(
         self,
@@ -2683,8 +2730,8 @@ class TestCLI:
             "Orchestrator",
             lambda: Orchestrator(state_file=tmp_path / "s.json"),
         )
-        main(["spawn", "a", "-b", "echo"])
-        assert "spawned agent 'a' backend=echo" in capsys.readouterr().out
+        main(["create", "a", "-b", "echo"])
+        assert "created agent 'a' backend=echo" in capsys.readouterr().out
 
     def test_main_talk_creates_a_missing_agent(
         self,
@@ -2692,25 +2739,25 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """`talk <new-name>` is a spawn plus a turn, not an error."""
+        """`talk <new-name>` creates it and runs the turn, not an error."""
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         main(["talk", "nope", "hi"])
         captured = capsys.readouterr()
-        assert captured.err == "spawned agent 'nope' backend=echo\n"
+        assert captured.err == "created agent 'nope' backend=echo\n"
         assert "echo:hi" in captured.out
 
-    def test_main_duplicate_spawn_is_one_line(
+    def test_main_duplicate_create_is_one_line(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
-        main(["spawn", "a", "-b", "echo"])
+        main(["create", "a", "-b", "echo"])
         capsys.readouterr()
         with pytest.raises(SystemExit, match="1"):
-            main(["spawn", "a", "-b", "echo"])
+            main(["create", "a", "-b", "echo"])
         captured = capsys.readouterr()
         assert captured.err == "agent 'a' already exists\n"
         assert "Traceback" not in captured.err
@@ -2735,7 +2782,7 @@ class TestCLI:
         captured = capsys.readouterr()
         assert (
             captured.out
-            == f"{orchestrator.USAGE}\ncommands: spawn, ensure, talk, list, delete\n"
+            == f"{orchestrator.USAGE}\ncommands: create, talk, list, delete\n"
         )
         assert "--skill" in captured.out
         assert captured.err == ""
@@ -2765,7 +2812,7 @@ class TestCLI:
 
         register_backend("buggy", BuggyBackend)
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
-        main(["spawn", "b", "-b", "buggy"])
+        main(["create", "b", "-b", "buggy"])
         capsys.readouterr()
         with pytest.raises(KeyError, match="some internal dict key"):
             main(["talk", "b", "hi"])
@@ -3023,11 +3070,11 @@ class TestStepLogging:
             lambda: Orchestrator(state_file=tmp_path / "s.json"),
         )
         with caplog.at_level("DEBUG", logger="orchestrator"):
-            main(["-v", "spawn", "a", "-b", "echo"])
+            main(["-v", "create", "a", "-b", "echo"])
         messages = _messages(caplog)
         # Four arguments remain once -v is stripped.
         assert "cli: 4 argument(s) after flag removal" in messages
-        assert "cli: dispatching 'spawn'" in messages
+        assert "cli: dispatching 'create'" in messages
 
 
 class TestLoggingConfiguration:

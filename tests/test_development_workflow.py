@@ -1044,8 +1044,6 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
         assert environment["GH_CONFIG_DIR"].endswith("empty-gh-config")
         blocker = Path(environment["PATH"].split(os.pathsep)[0]) / "gh"
         assert "owned by the GDW driver" in blocker.read_text(encoding="utf-8")
-        if args[1] == "ensure":
-            return _completed(args, stdout="created agent\n")
         return _completed(
             args,
             stdout=f"[gdw-3-expander session=s1]\n{json.dumps(_expansion())}\n",
@@ -1073,25 +1071,21 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
         timeout=17,
     )
     assert result == _expansion()
-    assert calls[0][0] == [
-        "orchestrator",
-        "ensure",
-        "gdw-3-expander",
-        "--backend",
-        "codex",
-    ]
-    assert calls[1][0][:8] == [
+    assert calls[0][0][:10] == [
         "orchestrator",
         "--agent",
         "gdw-3-expander",
+        "--backend",
+        "codex",
         "--validate-schema",
         str(root / "validations" / "expansion.json"),
         "--timeout",
         "17",
         "--prompt",
     ]
+    assert len(calls) == 1
     assert calls[0][1]["env"]["AGENTS_ARMY_STATE_FILE"] == str(tmp_path / "agents.json")
-    assert calls[1][1]["timeout"] == 22
+    assert calls[0][1]["timeout"] == 22
     assert os.environ["GH_TOKEN"] == "secret"
     assert os.environ["PATH"] == original_path
 
@@ -1108,7 +1102,6 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
     replies = deque(
         [
             _completed([], returncode=1, stderr="already uses backend/model/effort"),
-            _completed([], stdout="reused agent\n"),
             _completed([], stdout="[gdw-1-role session=s1]\nnull\n"),
         ]
     )
@@ -1167,8 +1160,6 @@ def test_agent_gateway_fills_prompts_with_brace_bearing_values(tmp_path: Path) -
     sent: list[str] = []
 
     def fake_run(args: list[str], **_kwargs):
-        if args[1] == "ensure":
-            return _completed(args, stdout="reused agent\n")
         sent.append(args[-1])
         return _completed(args, stdout='[gdw-28-role session=s1]\n{"ok": true}\n')
 
@@ -1236,7 +1227,6 @@ def test_agent_gateway_rejects_malformed_cli_output(
 ) -> None:
     replies = deque(
         [
-            _completed([], stdout="reused agent\n"),
             _completed([], stdout=turn_stdout),
         ]
     )
@@ -1309,8 +1299,6 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
 
     def fake_run(args: list[str], **_kwargs):
         calls.append(args)
-        if args[1] == "ensure":
-            return _completed(args, stdout="created agent\n")
         return _completed(
             args,
             stdout=f"[gdw-5-expander session=s1]\n{json.dumps(_expansion())}\n",
@@ -1332,9 +1320,10 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         schema_name="expansion",
         values={"ISSUE_CONTEXT_JSON": "{}"},
     )
+    expected_prompt = gateway._prompt("expand", {"ISSUE_CONTEXT_JSON": "{}"})
     assert calls[0] == [
         "orchestrator",
-        "ensure",
+        "--agent",
         "gdw-5-expander",
         "--backend",
         "grok",
@@ -1342,6 +1331,12 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         "grok-code-test",
         "--reasoning-effort",
         "xhigh",
+        "--validate-schema",
+        str(Path(gdw.__file__).parent / "validations" / "expansion.json"),
+        "--timeout",
+        str(gdw.DEFAULT_AGENT_TIMEOUT),
+        "--prompt",
+        expected_prompt,
     ]
     with pytest.raises(gdw.WorkflowError, match="role 'missing' is not configured"):
         gateway.ask(
