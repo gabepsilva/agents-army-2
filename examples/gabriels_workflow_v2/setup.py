@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from examples.gabriels_workflow_v2.config import WorkflowConfig
+from examples.gabriels_workflow_v2.config import RetentionConfig, WorkflowConfig
 from examples.gabriels_workflow_v2.contracts import CheckpointStore
 from examples.gabriels_workflow_v2.errors import LOGGER, WorkflowError
 from examples.gabriels_workflow_v2.publisher import GitHubPublisher
+from examples.gabriels_workflow_v2.retention import prune_issue_state
 from examples.gabriels_workflow_v2.workflow import (
     DevelopmentWorkflowV2,
     RelayAgentGateway,
@@ -45,6 +47,7 @@ def prepare_workflow(
     issue_root = checkout.common_git_dir() / "gdw-v2" / f"issue-{issue_number}"
     worktree = issue_root / "worktree"
     branch = f"gdwv2/issue-{issue_number}"
+    _prune_stale_issue_state(checkout, issue_root, config.retention)
     checkout.ensure_issue_worktree(branch, base_branch, worktree)
 
     store = CheckpointStore(issue_root)
@@ -78,6 +81,39 @@ def prepare_workflow(
         ),
         WorkflowServices(store, publisher, repository, agents),
     )
+
+
+def _prune_stale_issue_state(
+    checkout: RelayRepository, issue_root: Path, retention: RetentionConfig
+) -> None:
+    """Reclaim the other issues' expired state before this run allocates its own.
+
+    Retention runs on every run because a state directory only a hand-run
+    command deletes is one nobody deletes, and each run is the moment the
+    disk it fills is about to be needed. `issue_root` is excluded: re-running
+    an issue whose own state is already past a threshold must resume that
+    tree, not delete it out from under the setup that is preparing it.
+    Reclaiming disk is housekeeping, so a prune that fails is logged and
+    stepped over — it must never be the reason someone cannot work on their
+    issue.
+    """
+
+    try:
+        removed = prune_issue_state(
+            issue_root.parent,
+            retention,
+            checkout,
+            now=datetime.now(UTC),
+            skip=issue_root,
+        )
+    except (WorkflowError, OSError) as exc:
+        LOGGER.warning("setup: retention prune failed, continuing: %s", exc)
+        return
+    if removed:
+        LOGGER.info(
+            "setup: retention reclaimed %s",
+            ", ".join(str(path) for path in removed),
+        )
 
 
 def _require_commands(config: WorkflowConfig) -> None:

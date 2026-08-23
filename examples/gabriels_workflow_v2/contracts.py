@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -144,6 +144,26 @@ class CheckpointStore:
             raise WorkflowError("GitHub returned an issue that was not an object")
         self._write(self.issue_path, issue)
         return issue
+
+    def discard_for_new_issue(self, keys: Iterable[str]) -> None:
+        """Forget the cached issue and the checkpoints derived from it.
+
+        Escalation hands a run back to a human, who answers on the issue
+        itself. Keeping the snapshot would replay the next run against text
+        that predates the answer, and keeping checkpoints whose recorded
+        inputs still hash that text would fail `load_checkpoint`'s stale-input
+        rule rather than resume past it. Checkpoints go first: interrupted
+        after them, the next run merely re-does clarification, while the
+        reverse order would leave exactly the stale pair this avoids.
+
+        Metadata is deliberately untouched. The turns already paid for still
+        count against the budget, so a run that keeps escalating runs out
+        rather than buying itself unlimited rounds.
+        """
+
+        for key in keys:
+            self.checkpoint_path(key).unlink(missing_ok=True)
+        self.issue_path.unlink(missing_ok=True)
 
     def load_checkpoint(self, key: str, input_sha256: str) -> Checkpoint | None:
         path = self.checkpoint_path(key)

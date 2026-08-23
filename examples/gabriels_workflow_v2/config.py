@@ -98,6 +98,23 @@ class BudgetConfig(BaseModel):
     ci_timeout: int = Field(default=7_200, ge=60, le=14_400)
 
 
+class RetentionConfig(BaseModel):
+    """How long a per-issue state directory survives after its run ends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    completed_retention_days: int = Field(default=7, ge=0, le=365)
+    max_retention_days: int = Field(default=30, ge=1, le=365)
+
+    @model_validator(mode="after")
+    def max_covers_completed(self) -> Self:
+        if self.max_retention_days < self.completed_retention_days:
+            raise ValueError(
+                "max_retention_days must be at least completed_retention_days"
+            )
+        return self
+
+
 class WorkflowConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,6 +122,7 @@ class WorkflowConfig(BaseModel):
     github_app: GitHubAppConfig
     draft: bool = True
     budgets: BudgetConfig = Field(default_factory=BudgetConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     roles: dict[str, RoleConfig]
 
     @field_validator("repository")

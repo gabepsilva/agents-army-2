@@ -60,7 +60,31 @@ Two comments, both driver-authored from validated schema fields:
 2. **Final implementation summary** on the pull request, after publication.
 
 Plus the pull request itself, whose body is assembled from the specification,
-the two work summaries, and the CI and review verdicts.
+the two work summaries, the CI and review verdicts, and any scope the specifier
+deferred.
+
+### Scope, and who narrowed it
+
+From `_specify` onward the specification is ground truth, so a bullet the
+specifier drops is indistinguishable downstream from work the issue never
+asked for. Every `out_of_scope` entry therefore carries its own provenance:
+
+```json
+{
+  "item": "no scheduling of prune into the Makefile target",
+  "source": "specifier_reduction",
+  "justification": "wiring is a follow-up the issue did not ask for"
+}
+```
+
+`source` is `issue_declared` only when the issue's own text excludes the item,
+and the justification quotes that text. Anything the specifier decides to drop
+or defer is a `specifier_reduction` and must say why. The pull-request body
+renders the reductions under **Scope the specifier deferred** — and only the
+reductions, since an `issue_declared` entry is already written on the issue the
+body links to. The section is omitted when there are none, so its presence is
+itself the signal. The specification reviewer audits the same field against the
+canonical issue.
 
 ### Seeing which agents ran
 
@@ -162,6 +186,10 @@ github_app:
 budgets:
   max_agent_turns: 24
 
+retention:
+  completed_retention_days: 7
+  max_retention_days: 30
+
 roles:
   expander:               {backend: codex,  model: gpt-5.1-codex, reasoning_effort: high}
   griller:                {backend: claude}
@@ -174,7 +202,10 @@ roles:
 ```
 
 All eight roles must be named explicitly; an unknown or missing role is a
-configuration error, not a default. Never commit a populated configuration.
+configuration error, not a default. `retention` is optional and defaults to
+`completed_retention_days: 7` (when `complete` is `True`) and a hard ceiling
+`max_retention_days: 30` (any run); both are bounded 0–365 and 1–365 and
+`max` must be at least `completed`. Never commit a populated configuration.
 
 ## Run
 
@@ -185,6 +216,34 @@ uv run python -m examples.gabriels_workflow_v2.cli 42
 `-v` logs every prompt, reply, and subprocess. `--config path/to/workflow.yaml`
 selects another configuration. stdout is the pull-request URL and nothing else,
 so the run stays pipeable; progress goes to stderr.
+
+Every run reclaims disk for itself: setup prunes expired `issue-<n>`
+directories under `.git/gdw-v2/` before it creates or resumes its own
+worktree, so state cannot accumulate without anyone doing anything. The issue
+being prepared is never pruned, however old its state is, and a prune that
+fails is logged as a warning and stepped over — housekeeping never costs
+someone their run.
+
+`prune.py` remains for on-demand reclamation, for freeing disk between runs or
+seeing the candidates first:
+
+```sh
+uv run python -m examples.gabriels_workflow_v2.prune [--dry-run] [--config PATH] [-v]
+```
+
+Both paths use the same rule: an `issue-<n>` directory goes once a completed
+run is older than `retention.completed_retention_days` (default 7), or once
+any run, complete or not, is older than `retention.max_retention_days`
+(default 30). Age comes from `workflow.json`'s `completed_at` when present,
+otherwise the file's mtime for legacy runs. Before deleting, a registered
+`issue-<n>/worktree` is deregistered with `git worktree remove --force`; the
+directory itself is removed with `shutil.rmtree(..., onerror=_chmod_and_retry)`
+so mode-`000` overlay work directories do not need a preparatory `chmod -R`.
+One directory that refuses to be removed is logged and skipped rather than
+stopping the sweep, so a single wedged worktree cannot pin the rest on disk.
+`--dry-run` lists the same candidates without deleting anything or touching
+`git worktree`; `--config` defaults to `workflow.local` beside the config
+module and still requires a readable `github_app.private_key`.
 
 For issue `<n>` the workflow creates or resumes a linked worktree at
 `.git/gdw-v2/issue-<n>/worktree` on branch `gdwv2/issue-<n>`, so it can be run
@@ -224,5 +283,12 @@ mechanics without inheriting the decisions:
   installed GitHub App, and the markdown one comment is rendered from
 - [`contracts.py`](contracts.py) / [`config.py`](config.py) —
   the checkpoint store and handoff schema, and the workflow's own configuration
+  including `RetentionConfig` (`completed_retention_days`/`max_retention_days`)
+- [`retention.py`](retention.py) — `prune_issue_state` (with the `skip` that spares
+  the issue being prepared) and the `onerror=_chmod_and_retry` fail-safe that
+  clears mode-`000` overlay work directories during `rmtree`
+- [`prune.py`](prune.py) — standalone `prune` entry point (`--dry-run`, `--config`, `-v`)
+  that loads `RetentionConfig` and removes stale `issue-<n>` trees via `retention.py`,
+  for reclaiming disk between runs rather than at the start of one
 
 These were extracted from the V1 driver this replaced, which has been removed.
