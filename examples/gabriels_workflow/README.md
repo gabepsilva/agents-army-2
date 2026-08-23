@@ -73,13 +73,19 @@ last bot comment there. The implementer app then opens a draft pull request and
 posts implementation, CI, and review there. The same app commits, pushes, and
 updates that pull request when the work is done.
 
-Each stage comment ends with an attribution footer reporting the `backend`,
-`model`, `reasoning_effort`, and `skills` that produced it. `backend`, `model`,
-and `reasoning_effort` render as `` `value` `` or `_unset_` when the backend
-CLI chose its default; `skills` renders as a single backtick-wrapped,
-comma-joined list (e.g. `` `code-simplification, caveman` ``) or `_none_` when
-the stage explicitly requested no skills. The driver-authored CI checklist
-comment carries no attribution footer.
+Each newly generated agent-stage comment ends with a six-field attribution
+footer: `backend`, `model`, `reasoning_effort`, `task_duration`, `skills`, and
+`worktree`. `backend`, `model`, and `reasoning_effort` render as `` `value` ``
+or `_unset_` when the backend CLI chose its default. `task_duration` is the
+elapsed `self.agents.ask()` turn, formatted in seconds as `X.Ys`. `skills`
+renders as a single backtick-wrapped, comma-joined list (e.g.
+`` `code-simplification, caveman` ``) or `_none_` when the stage explicitly
+requested no skills. `worktree` renders the resolved basename plus resolved
+path, shortening the user's home directory to `~` (for example,
+`` `worktree` - `~/.git/gdw/issue-44/worktree` ``). A worktree outside the
+home directory uses its resolved absolute path. Cached stages reuse their
+checkpoint without a new comment or attribution metadata. The driver-authored
+CI checklist comment carries no attribution footer.
 
 CI is reported as a checklist rather than a log: one ✅, ❌ or ⚪ per gate that
 `make ci` runs, a failing gate carrying a one-line reason. The gate list comes

@@ -78,9 +78,15 @@ uv run orchestrator --help
 uv run orchestrator --version
 ```
 
-Stage comments include an attribution footer with `backend`, `model`,
-`reasoning_effort`, and `skills`. `_unset_` means the backend CLI chose its
-default; `_none_` means the stage explicitly requested no skills.
+Stage comments include an attribution footer with six fields: `backend`,
+`model`, `reasoning_effort`, `task_duration`, `skills`, and `worktree`.
+`task_duration` is the elapsed `self.agents.ask()` turn, formatted as seconds
+with one decimal place (`X.Ys`). `worktree` reports the resolved worktree
+basename plus its resolved path, shortening the user's home directory to `~`
+(for example, `` `worktree` - `~/.git/gdw/issue-44/worktree` ``). `_unset_`
+means the backend CLI chose its default; `_none_` means the stage explicitly
+requested no skills. Cached stages post no new comment or attribution metadata.
+Driver-authored CI checklist comments carry no attribution footer.
 
 ### Structured replies: `--schema`
 
