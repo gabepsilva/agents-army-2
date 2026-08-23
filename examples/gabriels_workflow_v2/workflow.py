@@ -772,8 +772,28 @@ class DevelopmentWorkflowV2:
         if self.store.milestone_complete("checks"):
             return
         self.store.mark_milestone("checks", "pending")
-        self.publisher.publish_checks(head_sha, self.ledger)
+        self.publisher.publish_checks(head_sha, self._published_ledger())
         self.store.mark_milestone("checks", "complete")
+
+    def _published_ledger(self) -> list[dict[str, Any]]:
+        """The ledger as check runs: a superseded stage is `neutral`.
+
+        Checks are published only after the run committed, pushed, and opened
+        its pull request, so every failure in the ledger is one the run went on
+        to repair — a red CI attempt that a later attempt replaced, or a
+        reviewer that a later round satisfied. Publishing those as `failure`
+        leaves the pull request permanently red for work that finished green,
+        which branch protection reads as a blocked merge. The stage's own row
+        keeps its real conclusion, and the check's title and summary still say
+        what happened; only the colour is corrected to match the run.
+        """
+
+        return [
+            entry
+            if entry.get("conclusion") != "failure"
+            else {**entry, "conclusion": "neutral"}
+            for entry in self.ledger
+        ]
 
     @staticmethod
     def _without_handoff(output: Mapping[str, Any]) -> dict[str, Any]:

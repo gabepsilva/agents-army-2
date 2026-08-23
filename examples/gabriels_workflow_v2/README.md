@@ -73,7 +73,12 @@ rather than reconstructed from eighteen stage comments:
   rows; they cost no agent turn.
 - **One GitHub check run per stage**, so the Checks tab on the pull request
   lists `gdw-v2 / expansion-1`, `gdw-v2 / grill-1`, … each with its duration
-  and conclusion. A reviewer asking for changes is `neutral`, not a failure.
+  and conclusion. A reviewer asking for changes is `neutral`, not a failure —
+  and so is a CI attempt a later attempt replaced. Checks are published only
+  after the pull request is open, so every red row in the ledger is one the run
+  went on to repair; publishing those as `failure` would leave a pull request
+  that finished green permanently red, and branch protection would read it as a
+  blocked merge. The ledger row keeps the real conclusion.
 
 Check runs need `checks:write` on the App and are published after the commit
 is pushed, since a check run has to attach to a commit — so they are a record

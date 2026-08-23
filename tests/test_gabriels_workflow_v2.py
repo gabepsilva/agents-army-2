@@ -1318,6 +1318,46 @@ def test_check_runs_are_published_once_per_stage_against_the_pushed_commit(
     assert len(publisher.checks) == 1
 
 
+def test_repaired_ci_attempt_publishes_neutral_not_failure(tmp_path: Path) -> None:
+    """A red attempt the run went on to fix must not leave the PR red.
+
+    Checks are published only after the pull request is open, so a `failure`
+    row is always one a later stage resolved. Publishing it as a failure blocks
+    merge on work that finished green; the ledger keeps the real conclusion.
+    """
+
+    repository = FakeRepository(
+        [CommandResult(1, "failed"), CommandResult(0, "green")],
+        ["before", "after", "after", "after", "after"],
+    )
+    workflow, publisher, _repository, _agents = _workflow(
+        tmp_path,
+        [
+            _proposal(),
+            _grill(),
+            _specification(),
+            _work(),
+            _work("documented"),
+            _work("repaired CI"),
+            _review(),
+            _review(),
+            _finalization(),
+        ],
+        repository=repository,
+    )
+
+    workflow.run()
+
+    ledger = {entry["stage"]: entry["conclusion"] for entry in workflow.ledger}
+    published = {
+        entry["stage"]: entry["conclusion"] for entry in publisher.checks[0][1]
+    }
+    failed = [stage for stage, verdict in ledger.items() if verdict == "failure"]
+    assert failed, "the run under test is meant to fail CI once"
+    assert all(published[stage] == "neutral" for stage in failed)
+    assert "failure" not in published.values()
+
+
 @pytest.mark.parametrize(
     ("output", "expected"),
     [
