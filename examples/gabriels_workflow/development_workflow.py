@@ -584,9 +584,13 @@ def _attribution(
 
 
 def _render_comment(
-    marker: str, title: str, payload: object, attribution: str = ""
+    marker: str,
+    title: str,
+    payload: object,
+    attribution: str = "",
+    heading: str = "GDW",
 ) -> str:
-    rendered = f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
+    rendered = f"{marker}\n## {heading} — {title}\n\n{_markdown(payload)}\n"
     return rendered + attribution if attribution else rendered
 
 

@@ -41,6 +41,15 @@ FLOORS: dict[str, float] = {
     "examples/gabriels_workflow/github_app_client.py": 90.0,
     "examples/gabriels_workflow/setup.py": 90.0,
     "examples/gabriels_workflow/simple_development_workflow.py": 90.0,
+    # V2 is the same class of user-facing software as V1 above, and its
+    # checkpoint, budget, and stop paths are what keep a run from spending
+    # more than it was allowed, so they are held to the same floor.
+    "examples/gabriels_workflow_v2/cli.py": 90.0,
+    "examples/gabriels_workflow_v2/config.py": 90.0,
+    "examples/gabriels_workflow_v2/contracts.py": 90.0,
+    "examples/gabriels_workflow_v2/publisher.py": 90.0,
+    "examples/gabriels_workflow_v2/setup.py": 90.0,
+    "examples/gabriels_workflow_v2/workflow.py": 90.0,
     # Gate utilities are themselves protected by planted violations. Requiring
     # every plumbing branch to run would add ceremony without more confidence.
     "tools/coverage_gate.py": 80.0,

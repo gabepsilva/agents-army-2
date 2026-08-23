@@ -19,6 +19,12 @@ LOGGER = logging.getLogger("gdw")
 class GitHubAppClient:
     """Read and update one repository as its installed GitHub App."""
 
+    # A subclass that publishes a different workflow's comments overrides
+    # these so its markers never collide with, and are never adopted by,
+    # another workflow reading the same issue.
+    marker_prefix = "gdw"
+    comment_heading = "GDW"
+
     def __init__(
         self,
         repository: Repository,
@@ -93,14 +99,15 @@ class GitHubAppClient:
         self.markers |= markers
 
     def collect_markers(self, number: int) -> None:
-        """Union gdw markers from comments on this issue or pull request."""
+        """Union this client's markers from comments on an issue or pull request."""
 
+        prefix = f"<!-- {self.marker_prefix}:"
         issue = self.repository.get_issue(number)
         self.markers |= {
             line
             for comment in issue.get_comments()
             for line in (comment.body or "").splitlines()
-            if line.startswith("<!-- gdw:")
+            if line.startswith(prefix)
         }
 
     def comment(self, number: int, body: str) -> None:
@@ -115,14 +122,19 @@ class GitHubAppClient:
         *,
         attribution: str = "",
     ) -> None:
-        marker = f"<!-- gdw:{number}:{key} -->"
+        marker = f"<!-- {self.marker_prefix}:{number}:{key} -->"
         if marker in self.markers:
             LOGGER.info("github-app: comment '%s' already posted, skipping", key)
             return
         from examples.gabriels_workflow.development_workflow import _render_comment
 
         LOGGER.info("github-app: commenting '%s' on #%s", key, number)
-        self.comment(number, _render_comment(marker, title, payload, attribution))
+        self.comment(
+            number,
+            _render_comment(
+                marker, title, payload, attribution, heading=self.comment_heading
+            ),
+        )
         self.markers.add(marker)
 
     def create_pr(

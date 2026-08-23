@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "problem_statement", "solution", "user_stories", "implementation_decisions", "testing_decisions", "acceptance_criteria", "out_of_scope", "handoff"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1},
+    "problem_statement": {"type": "string", "minLength": 1},
+    "solution": {"type": "string", "minLength": 1},
+    "user_stories": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength": 1}},
+    "implementation_decisions": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"type": "string", "minLength": 1}},
+    "testing_decisions": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "minLength": 1}},
+    "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": 30, "items": {"type": "string", "minLength": 1}},
+    "out_of_scope": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1}},
+    "handoff": {"$ref": "#/$defs/handoff"}
+  },
+  "$defs": {
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "decisions", "open_questions", "next_task", "relevant_files", "required_evidence"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "decisions": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1}},
+        "open_questions": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1}},
+        "next_task": {"type": "string", "minLength": 1},
+        "relevant_files": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1}},
+        "required_evidence": {"type": "array", "maxItems": 20, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}
