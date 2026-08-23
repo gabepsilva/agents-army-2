@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +12,7 @@ from typing import Any
 from examples.gabriels_workflow_v2.errors import WorkflowError
 
 FORMAT_VERSION = 1
+BLOCKING_SEVERITIES = frozenset({"critical", "required"})
 HANDOFF_FIELDS = frozenset(
     {
         "summary",
@@ -53,6 +54,41 @@ def validate_handoff(output: object) -> dict[str, Any]:
         ):
             raise WorkflowError(f"agent handoff {field} must be an array of strings")
     return output
+
+
+def blocking_findings(review: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The subset of a review's findings severe enough to require repair."""
+
+    return [
+        finding
+        for finding in review.get("findings", [])
+        if finding.get("severity") in BLOCKING_SEVERITIES
+    ]
+
+
+def check_review_consistency(kind: str, review: Mapping[str, Any]) -> None:
+    """Fail closed when a review's verdict disagrees with its own findings.
+
+    Only three combinations are rejected: an `approve` carrying a blocking
+    finding, a `changes_requested` carrying none, and a round that asks for
+    another pass without one either. Every other schema-valid combination —
+    including `changes_requested` with a blocking finding regardless of
+    `needs_another_round`, or `approve` with only non-blocking findings — is
+    accepted by construction and resolved by the verdict-based control flow
+    that follows this check.
+    """
+
+    blocking = bool(blocking_findings(review))
+    if review["verdict"] == "approve" and blocking:
+        raise WorkflowError(f"{kind} review approved with a blocking finding")
+    if review["verdict"] == "changes_requested" and not blocking:
+        raise WorkflowError(
+            f"{kind} review requested changes without a blocking finding"
+        )
+    if review["needs_another_round"] and not blocking:
+        raise WorkflowError(
+            f"{kind} review needs another round without a blocking finding"
+        )
 
 
 @dataclass(frozen=True)

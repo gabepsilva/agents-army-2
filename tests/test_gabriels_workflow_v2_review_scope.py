@@ -232,21 +232,34 @@ def test_changes_requested_still_repairs_reruns_ci_and_rereviews(
 def test_specification_review_approved_with_findings_is_still_rejected(
     tmp_path: Path,
 ) -> None:
+    """Inverted: an `optional` finding is a legitimate deferral, not a rejection.
+
+    Severity now decides whether a finding blocks approval, so an `optional`
+    finding no longer contradicts an `approve` verdict — the round returns
+    normally, with no implementer call and no second CI stage.
+    """
+
     drift = {
-        "severity": "required",
+        "severity": "optional",
         "axis": "specification",
         "title": "specification narrowed an issue acceptance criterion",
         "evidence": "issue: removed without manual intervention",
         "required_change": "restore the criterion or record the deferral",
     }
-    workflow, *_rest = _review_workflow(
+    workflow, _publisher, _repository, agents = _review_workflow(
         tmp_path, [_review(findings=[drift]), _review()]
     )
 
-    with pytest.raises(WorkflowError, match="specification review approved with"):
-        workflow._review_until_approved(
-            _specification(), GREEN, workflow._issue_snapshot()
-        )
+    reviews, ci = workflow._review_until_approved(
+        _specification(), GREEN, workflow._issue_snapshot()
+    )
+
+    assert reviews["specification"]["findings"] == [drift]
+    assert ci == GREEN
+    assert [call["role"] for call in agents.calls] == [
+        "reviewer-specification",
+        "reviewer-quality",
+    ]
 
 
 def test_scope_drift_findings_fit_the_review_schema_unchanged(tmp_path: Path) -> None:

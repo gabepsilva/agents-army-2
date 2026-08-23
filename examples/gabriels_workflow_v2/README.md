@@ -52,12 +52,26 @@ Reviewers are given the specification and the base commit to diff against, never
 the implementer's account of its own work. That is deliberate: a reviewer that
 reads only a summary reviews the summary.
 
+Every finding carries a `severity`: `critical` and `required` block approval and
+send the round to repair; `optional` and `nit` do not — a reviewer can approve
+while still listing them, for example a legitimate scope deferral. A verdict
+that disagrees with its own findings (an approval carrying a blocking finding,
+a request for changes carrying none, or another round asked for without one)
+fails the run closed before that reviewer's verdict is ever acted on.
+
 ## What GitHub gets
 
-Two comments, both driver-authored from validated schema fields:
+Two comments, both driver-authored from validated schema fields, plus a third
+that only fires when it applies:
 
 1. **Validated specification** on the issue, once clarification converges.
 2. **Final implementation summary** on the pull request, after publication.
+3. **A specification-review deferral**, posted only when the specification
+   reviewer approves while still listing a non-blocking finding, so a
+   legitimate deferral still reaches a human without costing a repair round
+   or an extra agent turn. The quality reviewer's non-blocking findings are
+   not posted this way; they stay in the checkpoint, the run ledger, and the
+   finalizer's context.
 
 Plus the pull request itself, whose body is assembled from the specification,
 the two work summaries, the CI and review verdicts, and any scope the specifier
