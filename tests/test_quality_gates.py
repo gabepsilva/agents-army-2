@@ -588,6 +588,59 @@ class TestRatchetGate:
         )
 
 
+def _footer_documentation_errors(documentation: str) -> tuple[str, ...]:
+    normalized = " ".join(documentation.split())
+    footer_fields = (
+        "backend",
+        "model",
+        "reasoning_effort",
+        "task_duration",
+        "skills",
+        "worktree",
+    )
+    missing = [field for field in footer_fields if f"`{field}`" not in documentation]
+    if "self.agents.ask()" not in normalized:
+        missing.append("self.agents.ask()")
+    if not {"elapsed", "seconds"}.issubset(normalized.split()):
+        missing.append("task_duration elapsed-seconds semantics")
+    if "X.Ys" not in normalized:
+        missing.append("X.Ys")
+    if not all(
+        phrase in normalized
+        for phrase in ("basename", "resolved path", "home directory", "`~`")
+    ):
+        missing.append("worktree basename/home-shortening semantics")
+    if not ("Cached stages" in normalized or "Cached stages reuse" in normalized):
+        missing.append("cached-stage semantics")
+    if "no attribution footer" not in normalized:
+        missing.append("no attribution footer")
+    return tuple(missing)
+
+
+def test_footer_documentation_lists_all_six_fields_and_semantics() -> None:
+    for relative in ("README.md", "examples/gabriels_workflow/README.md"):
+        documentation = (REPO / relative).read_text(encoding="utf-8")
+        assert _footer_documentation_errors(documentation) == ()
+
+
+def test_footer_documentation_checker_rejects_stale_readme_fixture(
+    tmp_path: Path,
+) -> None:
+    stale_readme = tmp_path / "README.md"
+    stale_readme.write_text(
+        """
+        Footer fields: `backend`, `model`, `reasoning_effort`, `task_duration`,
+        `skills`, and `worktree`.
+        task_duration is the elapsed self.agents.ask() turn in seconds as X.Ys.
+        Cached stages post no new metadata. Driver comments have no attribution footer.
+        """,
+        encoding="utf-8",
+    )
+
+    errors = _footer_documentation_errors(stale_readme.read_text(encoding="utf-8"))
+    assert "worktree basename/home-shortening semantics" in errors
+
+
 def _semgrep_image() -> str:
     match = re.search(
         r"^SEMGREP_IMAGE := (\S+)",
