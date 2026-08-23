@@ -30,7 +30,7 @@ from examples.gabriels_workflow.config import (
     WorkflowConfig,
     load_config,
 )
-from orchestrator.schema import load_schema
+from orchestrator.schema import ReplyValidationError, load_schema, validate_reply
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +123,20 @@ def _documentation(status: str = "complete") -> dict:
         "summary": "documented",
         "files_changed": ["README.md"],
         "blockers": [] if status == "complete" else ["missing decision"],
+    }
+
+
+def _finalization(status: str = "complete") -> dict:
+    return {
+        "status": status,
+        "blockers": [] if status == "complete" else ["missing evidence"],
+        "summary": "retrospective",
+        "agreements": ["evidence agrees"],
+        "disagreements": [],
+        "feedback_considered": ["review feedback considered"],
+        "implementation_errors": [],
+        "fixes_applied": [],
+        "opportunities_to_improve": ["improve evidence links"],
     }
 
 
@@ -393,6 +407,17 @@ class FakeGitHub:
     def collect_markers(self, number: int) -> None:
         self.collected_markers.append(number)
 
+    def pull_request_context(self, number: int) -> dict:
+        return {
+            "number": number,
+            "title": "Pull request",
+            "body": "",
+            "url": self.pr_url,
+            "comments": [],
+            "reviews": [],
+            "review_comments": [],
+        }
+
     def comment_once(
         self,
         number: int,
@@ -402,11 +427,12 @@ class FakeGitHub:
         *,
         attribution: str = "",
     ) -> None:
-        if key in self.markers:
+        marker = f"<!-- gdw:{number}:{key} -->"
+        if key in self.markers or marker in self.markers:
             return
         self.comments.append((number, key, title, payload))
         self.attributions.append(attribution)
-        self.markers.add(key)
+        self.markers.update({key, marker})
 
     def create_pr(
         self,
@@ -461,6 +487,14 @@ class EntryWorkflow:
         self.calls.append("completed")
         return self.completed
 
+    def _publication_complete(self) -> bool:
+        self.calls.append("publication")
+        return False
+
+    def finalize_from_checkpoints(self) -> str:
+        self.calls.append("finalize_from_checkpoints")
+        return "https://example.test/pulls/resumed"
+
     def load_issue(self) -> dict:
         self.calls.append("load")
         return {"issue": 1}
@@ -490,6 +524,10 @@ class EntryWorkflow:
 
     def publish(self, specification: dict, reviews: dict) -> str:
         self.calls.append(("publish", specification, reviews))
+        return "https://example.test/pulls/new"
+
+    def finalize(self, issue: dict) -> str:
+        self.calls.append(("finalize", issue))
         return "https://example.test/pulls/new"
 
 
@@ -1621,6 +1659,7 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         "implementation",
         "documentation",
         "review",
+        "finalization",
     )
     for name in schema_names:
         schema = load_schema(example_root / "validations" / f"{name}.json")
@@ -1641,6 +1680,8 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         "SPECIFICATION_JSON": "{}",
         "FAILURE_EVIDENCE": "{}",
         "CI_SUMMARY": "{}",
+        "PR_CONTEXT_JSON": "{}",
+        "ARTIFACTS_JSON": "{}",
     }
     prompt_names = (
         "expand",
@@ -1652,6 +1693,7 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> 
         "document",
         "review-specification",
         "review-quality",
+        "finalize",
     )
     for name in prompt_names:
         prompt = gateway._prompt(name, values)
@@ -1670,6 +1712,7 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
         _documentation(),
         _review(),
         _review(),
+        _finalization(),
     ]
     workflow, github, repository, agents = _workflow(tmp_path, replies)
     assert workflow.run() == "https://example.test/pr/1"
@@ -1691,9 +1734,9 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     assert "### Problem Statement\n\nproblem" in pr_body
     assert "### Specification\n\n#### Verdict\n\napprove" in pr_body
     assert "```json" not in pr_body
-    assert len(agents.calls) == 7
+    assert len(agents.calls) == 8
     assert workflow.run() == "https://example.test/pr/1"
-    assert len(agents.calls) == 7
+    assert len(agents.calls) == 8
 
 
 def test_each_stage_comments_as_its_configured_github_app(
@@ -1707,6 +1750,7 @@ def test_each_stage_comments_as_its_configured_github_app(
         _documentation(),
         _review(),
         _review(),
+        _finalization(),
     ]
     roles = {
         role: gdw._StaticRoleOptions(
@@ -1731,6 +1775,7 @@ def test_each_stage_comments_as_its_configured_github_app(
         "documenter": "documentation",
         "reviewer-specification": "review-1-specification",
         "reviewer-quality": "review-1-quality",
+        "finalizer": "finalization",
     }
     assert {
         role: client.comments[0][1] for role, client in role_github.items()
@@ -1744,6 +1789,7 @@ def test_each_stage_comments_as_its_configured_github_app(
         "documenter": ("caveman",),
         "reviewer-specification": (),
         "reviewer-quality": ("code-review-and-quality", "code-simplification"),
+        "finalizer": (),
     }
     assert {role: client.attributions[0] for role, client in role_github.items()} == {
         role: gdw._attribution(options, role_skills[role], 0.0, tmp_path / "worktree")
@@ -1772,6 +1818,7 @@ def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
         _documentation(),
         _review(),
         _review(),
+        _finalization(),
     ]
     workflow, github, _repository, _agents = _workflow(tmp_path, replies)
 
@@ -1788,6 +1835,7 @@ def test_specification_is_the_last_issue_comment_and_later_bots_post_on_the_pr(
         "ci-implementation-1",
         "review-1-specification",
         "review-1-quality",
+        "finalization",
     ]
 
 
@@ -1832,7 +1880,7 @@ def test_comment_number_stays_on_the_issue_until_a_pull_request_exists(
     assert workflow._comment_number() == 9
 
 
-def test_workflow_sends_the_body_once_and_only_five_latest_comments(
+def test_workflow_sends_bounded_issue_context_comments(
     tmp_path: Path,
 ) -> None:
     class ContextGitHub(FakeGitHub):
@@ -1867,19 +1915,20 @@ def test_workflow_sends_the_body_once_and_only_five_latest_comments(
     workflow.clarify(issue_context)
 
     assert [comment["body"] for comment in issue_context["latest_comments"]] == [
-        "comment-2",
-        "comment-3",
-        "comment-4",
-        "comment-5",
-        "comment-6",
+        f"comment-{index}" for index in range(2, 7)
     ]
+    assert [
+        comment["body"] for comment in issue_context["finalization"]["comments"]
+    ] == [f"comment-{index}" for index in range(7)]
     initial = agents.calls[0]["values"]
     assert "Original issue body" in initial["ISSUE_CONTEXT_JSON"]
     assert "comment-0" not in initial["ISSUE_CONTEXT_JSON"]
+    assert "comment-2" in initial["ISSUE_CONTEXT_JSON"]
     for call in agents.calls[1:]:
         serialized_values = json.dumps(call["values"])
-        assert "Original issue body" not in serialized_values
+        assert "comment-0" not in serialized_values
         assert "comment-2" in serialized_values
+        assert "comment-6" in serialized_values
 
 
 def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
@@ -1897,6 +1946,7 @@ def test_workflow_revises_repairs_ci_and_repairs_review(tmp_path: Path) -> None:
         _implementation(),
         _review(),
         _review(),
+        _finalization(),
     ]
     repository = FakeRepository(
         [
@@ -2267,6 +2317,7 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
     assert capsys.readouterr().out.strip() == "https://example.test/pulls/new"
     assert fresh.calls == [
         "completed",
+        "publication",
         "load",
         ("clarify", {"issue": 1}),
         ("specify", {"issue": 1}, {"proposal": 1}),
@@ -2275,6 +2326,7 @@ def test_simple_entrypoint_shows_the_main_flow_and_resumes_completed_work(
         ("stabilize", {"specification": 1}),
         ("review", {"specification": 1}, {"ci": "green"}),
         ("publish", {"specification": 1}, {"reviews": "approved"}),
+        ("finalize", {"issue": 1}),
     ]
 
     with pytest.raises(SystemExit) as resumed_exit:
@@ -2338,6 +2390,7 @@ def test_workflow_logs_progress_checkpoint_reuse_and_ci_failures(
         _implementation(),
         _review(),
         _review(),
+        _finalization(),
     ]
     repository = FakeRepository(
         [gdw.CommandResult(1, "boom\nfailing line"), gdw.CommandResult(0, "green")]
@@ -2925,3 +2978,586 @@ def test_both_github_clients_adopt_markers(tmp_path: Path) -> None:
 
     assert gh_cli.markers == {"already", "expansion-1"}
     assert app.markers == {"grill-1", "grill-2"}
+
+
+def test_finalization_schema_and_prompt_are_strict(tmp_path: Path) -> None:
+    example_root = Path(gdw.__file__).parent
+    schema = load_schema(example_root / "validations" / "finalization.json")
+    payload = _finalization()
+    assert validate_reply(json.dumps(payload), payload, schema) == payload
+    with pytest.raises(ReplyValidationError):
+        validate_reply(
+            json.dumps(
+                {key: value for key, value in payload.items() if key != "summary"}
+            ),
+            None,
+            schema,
+        )
+    with pytest.raises(ReplyValidationError):
+        validate_reply(json.dumps(payload | {"unexpected": True}), None, schema)
+
+    gateway = gdw.AgentGateway(
+        roles={},
+        issue=42,
+        state_file=tmp_path / "agents.json",
+        example_root=example_root,
+        workdir=tmp_path,
+    )
+    template = (example_root / "prompts" / "finalize.md").read_text(encoding="utf-8")
+    assert set(gdw.PLACEHOLDER_PATTERN.findall(template)) == {
+        "ISSUE_CONTEXT_JSON",
+        "PR_CONTEXT_JSON",
+        "ARTIFACTS_JSON",
+    }
+    prompt = gateway._prompt(
+        "finalize",
+        {
+            "ISSUE_CONTEXT_JSON": "issue",
+            "PR_CONTEXT_JSON": "pr",
+            "ARTIFACTS_JSON": "artifacts",
+        },
+    )
+    assert "gh" in prompt
+    assert "external services" in prompt
+    assert "Every claim must cite an evidence reference" in prompt
+    assert "Use empty arrays" in prompt
+
+
+def test_github_pull_request_context_normalizes_all_collections(tmp_path: Path) -> None:
+    def run(args: list[str], **_kwargs):
+        if args[1:3] == ["pr", "view"]:
+            return _completed(
+                args,
+                stdout=json.dumps(
+                    {
+                        "number": 9,
+                        "title": "Title",
+                        "body": "Body",
+                        "url": "https://example.test/pr/9",
+                        "comments": [
+                            {
+                                "author": {"login": "alice"},
+                                "body": "discussion",
+                                "createdAt": "2026-08-20T00:00:00Z",
+                                "url": "https://example.test/comment/1",
+                            }
+                        ],
+                        "reviews": [
+                            {
+                                "author": {"login": "bob"},
+                                "state": "APPROVED",
+                                "body": "review",
+                                "submittedAt": "2026-08-20T01:00:00Z",
+                                "url": "https://example.test/review/1",
+                            }
+                        ],
+                    }
+                ),
+            )
+        return _completed(
+            args,
+            stdout=json.dumps(
+                [
+                    {
+                        "user": {"login": "carol"},
+                        "body": "inline",
+                        "path": "main.py",
+                        "line": 12,
+                        "created_at": "2026-08-20T02:00:00Z",
+                        "html_url": "https://example.test/review-comment/1",
+                    }
+                ]
+            ),
+        )
+
+    context = gdw.GitHub(
+        tmp_path,
+        "owner/repo",
+        executable=Path("/gh"),
+        run=run,
+    ).pull_request_context(9)
+    assert context == {
+        "number": 9,
+        "title": "Title",
+        "body": "Body",
+        "url": "https://example.test/pr/9",
+        "comments": [
+            {
+                "author": "alice",
+                "body": "discussion",
+                "createdAt": "2026-08-20T00:00:00Z",
+                "url": "https://example.test/comment/1",
+            }
+        ],
+        "reviews": [
+            {
+                "author": "bob",
+                "state": "APPROVED",
+                "body": "review",
+                "submittedAt": "2026-08-20T01:00:00Z",
+                "url": "https://example.test/review/1",
+            }
+        ],
+        "review_comments": [
+            {
+                "author": "carol",
+                "body": "inline",
+                "path": "main.py",
+                "line": 12,
+                "createdAt": "2026-08-20T02:00:00Z",
+                "url": "https://example.test/review-comment/1",
+            }
+        ],
+    }
+
+
+def test_github_pull_request_context_rejects_non_array_inline_comments(
+    tmp_path: Path,
+) -> None:
+    def run(args: list[str], **_kwargs):
+        if args[1:3] == ["pr", "view"]:
+            return _completed(
+                args,
+                stdout=json.dumps(
+                    {
+                        "number": 9,
+                        "title": "Title",
+                        "body": "Body",
+                        "url": "https://example.test/pr/9",
+                        "comments": [],
+                        "reviews": [],
+                    }
+                ),
+            )
+        return _completed(args, stdout=json.dumps({"not": "an array"}))
+
+    github = gdw.GitHub(
+        tmp_path,
+        "owner/repo",
+        executable=Path("/gh"),
+        run=run,
+    )
+    with pytest.raises(gdw.WorkflowError, match=r"review comments.*array"):
+        github.pull_request_context(9)
+
+
+def test_github_app_pull_request_context_normalizes_empty_and_populated_sources() -> (
+    None
+):
+    created_at = datetime(2026, 8, 20, tzinfo=UTC)
+    issue = SimpleNamespace(
+        number=9,
+        title="Title",
+        body="Body",
+        get_comments=lambda: [
+            SimpleNamespace(
+                user=SimpleNamespace(login="alice"),
+                body="discussion",
+                created_at=created_at,
+                html_url="comment",
+            )
+        ],
+    )
+    pull = SimpleNamespace(
+        html_url="https://example.test/pr/9",
+        get_reviews=lambda: [
+            SimpleNamespace(
+                user=SimpleNamespace(login="bob"),
+                state="APPROVED",
+                body="review",
+                submitted_at=created_at,
+                html_url="review",
+            )
+        ],
+        get_review_comments=lambda: [
+            SimpleNamespace(
+                user=SimpleNamespace(login="carol"),
+                body="inline",
+                path="main.py",
+                line=12,
+                created_at=created_at,
+                html_url="inline",
+            )
+        ],
+    )
+    repository = SimpleNamespace(
+        get_issue=MagicMock(return_value=issue),
+        get_pull=MagicMock(return_value=pull),
+    )
+    context = app_github.GitHubAppClient(
+        cast(app_github.Repository, repository)
+    ).pull_request_context(9)
+    assert context["comments"][0]["author"] == "alice"
+    assert context["reviews"][0]["state"] == "APPROVED"
+    assert context["review_comments"][0]["line"] == 12
+
+
+def test_finalization_context_is_bounded_and_artifact_bundle_fails_closed(
+    tmp_path: Path,
+) -> None:
+    class ContextGitHub(FakeGitHub):
+        def issue(self, number: int) -> dict:
+            return {
+                "number": number,
+                "title": "Issue",
+                "body": "B" * 20_500,
+                "comments": [
+                    {
+                        "body": f"comment-{index}-" + "x" * 3_500,
+                        "createdAt": f"2026-08-20T{index:02d}:00:00Z",
+                    }
+                    for index in range(25)
+                ],
+            }
+
+        def pull_request_context(self, number: int) -> dict:
+            return {
+                "number": number,
+                "title": "PR",
+                "body": "P" * 20_500,
+                "url": self.pr_url,
+                "comments": [
+                    {"body": str(index), "createdAt": f"2026-08-20T{index:02d}:00:00Z"}
+                    for index in range(50)
+                ],
+                "reviews": [
+                    {
+                        "body": str(index),
+                        "submittedAt": f"2026-08-20T{index:02d}:00:00Z",
+                    }
+                    for index in range(50)
+                ],
+                "review_comments": [
+                    {"body": str(index), "createdAt": f"2026-08-20T{index:02d}:00:00Z"}
+                    for index in range(50)
+                ],
+            }
+
+    github = ContextGitHub()
+    workflow, _github, _repository, _agents = _workflow(
+        tmp_path, [], {"github": github}
+    )
+    issue = workflow.load_issue()
+    issue_payload = workflow._issue_context(issue)
+    pr_payload = workflow._bounded_pr_context(1)
+    assert len(issue_payload["comments"]) == 20
+    assert issue_payload["comments"][0]["body"].startswith("comment-5-")
+    assert issue_payload["comments"][-1]["body"].endswith("...[truncated]")
+    assert len(pr_payload["comments"]) == 40
+    assert len(pr_payload["reviews"]) == 40
+    assert len(pr_payload["review_comments"]) == 40
+    assert len(pr_payload["body"]) == 20_000
+
+    workflow.store.save("review-1-quality", {"evidence": "x"})
+    workflow.store.save("expansion-1", {"evidence": "x"})
+    assert list(workflow._bounded_artifacts()["artifacts"]) == [
+        "expansion-1.json",
+        "review-1-quality.json",
+    ]
+    workflow.store.save("large", {"evidence": "x" * 200_000})
+    with pytest.raises(gdw.WorkflowError, match="exceeds 200000"):
+        workflow._bounded_artifacts()
+
+
+def test_cached_finalization_reposts_without_agent_and_completion_requires_marker(
+    tmp_path: Path,
+) -> None:
+    workflow, github, _repository, agents = _workflow(tmp_path, [])
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    workflow.store.record_publication_complete()
+    workflow.store.save("specification", _specification())
+    workflow.store.save("review-1-quality", _review())
+    workflow.store.save("finalization", _finalization())
+
+    assert workflow.finalize_from_checkpoints() == "https://example.test/pr/1"
+    assert agents.calls == []
+    assert github.comments[-1][1] == "finalization"
+    assert workflow.store.metadata["finalization_comment_posted"] is True
+    assert workflow.completed_url() == "https://example.test/pr/1"
+
+
+def test_blocked_finalization_stops_without_completion_metadata(tmp_path: Path) -> None:
+    workflow, github, _repository, agents = _workflow(
+        tmp_path, [_finalization("blocked")]
+    )
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    workflow.store.record_publication_complete()
+
+    with pytest.raises(gdw.WorkflowStopped, match="finalization blocked"):
+        workflow.finalize_from_checkpoints()
+    assert agents.calls[0]["role"] == "finalizer"
+    assert agents.calls[0]["skills"] == ()
+    assert github.comments == []
+    assert workflow.store.metadata["finalization_comment_posted"] is False
+
+
+def test_context_boundaries_reject_bad_collections_and_records(tmp_path: Path) -> None:
+    workflow, _github, _repository, _agents = _workflow(tmp_path, [])
+
+    with pytest.raises(gdw.WorkflowError, match=r"collection.*array"):
+        gdw._bounded_latest("not an array", "createdAt", 20)
+    with pytest.raises(gdw.WorkflowError, match="invalid record"):
+        gdw._bounded_latest([None, {"body": "ok"}], "createdAt", 20)
+    with pytest.raises(gdw.WorkflowError, match="issue context is not an object"):
+        workflow._issue_context({"initial": None})
+
+    class InvalidPRGitHub(FakeGitHub):
+        def pull_request_context(self, number: int) -> dict:
+            return cast(dict, None)
+
+    invalid_workflow, _github, _repository, _agents = _workflow(
+        tmp_path / "invalid-pr", [], {"github": InvalidPRGitHub()}
+    )
+    with pytest.raises(gdw.WorkflowError, match="pull-request context"):
+        invalid_workflow._bounded_pr_context(1)
+
+
+def test_github_pull_request_normalizers_fail_closed(tmp_path: Path) -> None:
+    run = ScriptedRun([_completed([], stdout='{"nameWithOwner":"owner/repository"}')])
+    github = gdw.GitHub(tmp_path, executable=Path("/gh"), run=run)
+
+    assert (
+        github._pull_request_comments_endpoint(1)
+        == "repos/owner/repository/pulls/1/comments"
+    )
+    assert run.calls[0][0] == ["/gh", "repo", "view", "--json", "nameWithOwner"]
+    with pytest.raises(gdw.WorkflowError, match="invalid number"):
+        github._required_pr_value({"number": False}, "number", 1)
+    with pytest.raises(gdw.WorkflowError, match="invalid title"):
+        github._required_pr_value({"title": 1}, "title", "")
+    assert github._required_pr_value({"body": None}, "body", "fallback") == ""
+    with pytest.raises(gdw.WorkflowError, match="comments were not an array"):
+        github._normalized_collection(None, "comments")
+    with pytest.raises(gdw.WorkflowError, match="invalid item"):
+        github._normalized_collection(["comment"], "comments")
+    assert github._normalize_author({"name": "alice"}) == "alice"
+    with pytest.raises(gdw.WorkflowError, match="invalid author"):
+        github._normalize_author(1)
+    assert github._normalize_text(None, "body") == ""
+    with pytest.raises(gdw.WorkflowError, match="invalid body"):
+        github._normalize_text(1, "body")
+    assert github._normalize_line(None) is None
+    with pytest.raises(gdw.WorkflowError, match="invalid review comment line"):
+        github._normalize_line("12")
+
+
+def test_github_json_value_call_flattens_paginated_arrays_only(tmp_path: Path) -> None:
+    run = ScriptedRun(
+        [
+            _completed([], stdout='[]\n[{"id": 1}]\n'),
+            _completed([], stdout="[] 1"),
+            _completed([], stdout="not-json"),
+            _completed([], stdout="[]"),
+        ]
+    )
+    github = gdw.GitHub(tmp_path, executable=Path("/gh"), run=run)
+    assert github._json_value_call("api", "comments") == [{"id": 1}]
+    with pytest.raises(gdw.WorkflowError, match="invalid JSON"):
+        github._json_value_call("api", "mixed")
+    with pytest.raises(gdw.WorkflowError, match="invalid JSON"):
+        github._json_value_call("api", "broken")
+    with pytest.raises(gdw.WorkflowError, match="not an object"):
+        github._json_call("api", "array")
+
+
+def test_resume_enters_finalization_without_repeating_publication(
+    tmp_path: Path,
+) -> None:
+    workflow, github, repository, agents = _workflow(tmp_path, [_finalization()])
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    workflow.store.record_publication_complete()
+    workflow.store.save("specification", _specification())
+    workflow.store.save("review-1-quality", _review())
+
+    assert workflow.run() == "https://example.test/pr/1"
+    assert agents.calls[0]["role"] == "finalizer"
+    assert repository.commits == []
+    assert repository.pushes == []
+    assert github.pr_updates == []
+
+
+def test_completion_requires_confirmed_finalization_marker(tmp_path: Path) -> None:
+    workflow, github, _repository, _agents = _workflow(tmp_path, [])
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    workflow.store.record_publication_complete()
+    workflow.store.save("finalization", _finalization())
+    workflow.store.record_finalization_complete("https://example.test/pr/1")
+
+    assert workflow.completed_url() is None
+    github.markers.add("<!-- gdw:1:finalization -->")
+    assert workflow.finalize(workflow.load_issue()) == "https://example.test/pr/1"
+    assert workflow.completed_url() == "https://example.test/pr/1"
+
+
+def test_legacy_checkpoints_are_publication_complete(tmp_path: Path) -> None:
+    workflow, _github, _repository, _agents = _workflow(tmp_path, [])
+    metadata = workflow.store.metadata
+    metadata.pop("publication_complete")
+    metadata.pop("finalization_comment_posted")
+    workflow.store._write(workflow.store.metadata_path, metadata)
+
+    assert workflow._publication_complete() is False
+    metadata["pr_url"] = "https://example.test/pr/legacy"
+    workflow.store._write(workflow.store.metadata_path, metadata)
+    assert workflow._publication_complete() is False
+    workflow.store.save("specification", _specification())
+    workflow.store.save("review-1-quality", _review())
+    assert workflow._publication_complete() is True
+    metadata.pop("pr_url")
+    workflow.store._write(workflow.store.metadata_path, metadata)
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    assert workflow._publication_complete() is True
+
+    current, _github, _repository, _agents = _workflow(tmp_path / "current", [])
+    current.store.record_development_pr(1, "https://example.test/pr/1")
+    current.store.save("specification", _specification())
+    current.store.save("review-1-quality", _review())
+    assert current.store.metadata["publication_complete"] is False
+    assert current._publication_complete() is False
+
+
+def test_finalization_rejects_invalid_payloads_and_missing_pr(tmp_path: Path) -> None:
+    workflow, _github, _repository, _agents = _workflow(tmp_path, [])
+    with pytest.raises(gdw.WorkflowError, match="before publication"):
+        workflow.finalize_from_checkpoints()
+    with pytest.raises(gdw.WorkflowError, match="without a pull-request URL"):
+        workflow.finalize({"initial": {}, "latest_comments": []})
+    invalid_payloads = [
+        {},
+        {**_finalization(), "status": "unknown"},
+        {**_finalization(), "summary": ""},
+        {**_finalization(), "agreements": [""]},
+    ]
+    for payload in invalid_payloads:
+        with pytest.raises(gdw.WorkflowError):
+            workflow._ordered_finalization(payload)
+
+
+def test_finalization_falls_back_to_url_number_and_fails_closed_on_unconfirmed_marker(
+    tmp_path: Path,
+) -> None:
+    workflow, github, _repository, _agents = _workflow(tmp_path, [_finalization()])
+    workflow.store.record_development_pr(1, "https://example.test/pr/1")
+    workflow.store.record_publication_complete()
+    metadata = workflow.store.metadata
+    metadata["pr_number"] = None
+    workflow.store._write(workflow.store.metadata_path, metadata)
+    assert workflow.finalize(workflow.load_issue()) == "https://example.test/pr/1"
+    assert "<!-- gdw:1:finalization -->" in github.markers
+
+    class NoMarkerGitHub(FakeGitHub):
+        def comment_once(
+            self,
+            number: int,
+            key: str,
+            title: str,
+            payload: object,
+            *,
+            attribution: str = "",
+        ) -> None:
+            self.comments.append((number, key, title, payload, attribution))
+
+    no_marker = NoMarkerGitHub()
+    other, _unused_github, _repo, _agents = _workflow(
+        tmp_path / "no-marker", [_finalization()], {"github": no_marker}
+    )
+    other.store.record_development_pr(1, no_marker.pr_url)
+    other.store.record_publication_complete()
+    with pytest.raises(gdw.WorkflowError, match="marker was not confirmed"):
+        other.finalize(other.load_issue())
+
+
+def test_simple_entrypoint_resumes_and_finalizes_after_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ResumeEntry(EntryWorkflow):
+        def _publication_complete(self) -> bool:
+            self.calls.append("publication")
+            return True
+
+        def finalize_from_checkpoints(self) -> str:
+            self.calls.append("finalize_from_checkpoints")
+            return "https://example.test/pr/resumed"
+
+    class FreshEntry(EntryWorkflow):
+        def finalize(self, issue: dict) -> str:
+            self.calls.append(("finalize", issue))
+            return "https://example.test/pr/fresh"
+
+    resumed, fresh = ResumeEntry(None), FreshEntry(None)
+    monkeypatch.setattr(
+        simple_entrypoint,
+        "prepare_workflow",
+        MagicMock(side_effect=[resumed, fresh]),
+    )
+    monkeypatch.setattr(
+        simple_entrypoint,
+        "load_config",
+        MagicMock(return_value=_workflow_config()),
+    )
+
+    assert simple_entrypoint.main(["42"]) == 0
+    assert resumed.calls == ["completed", "publication", "finalize_from_checkpoints"]
+    assert simple_entrypoint.main(["42"]) == 0
+    assert fresh.calls[-1] == ("finalize", {"issue": 1})
+
+
+def test_github_app_pull_request_context_wraps_read_failures() -> None:
+    repository = SimpleNamespace(
+        get_issue=MagicMock(side_effect=RuntimeError("unreadable")),
+        get_pull=MagicMock(),
+    )
+    client = app_github.GitHubAppClient(cast(app_github.Repository, repository))
+    with pytest.raises(gdw.WorkflowError, match="cannot read pull-request context"):
+        client.pull_request_context(9)
+
+
+def test_github_app_pull_request_context_rejects_malformed_scalar_fields() -> None:
+    assert app_github.GitHubAppClient._author(None) is None
+    with pytest.raises(gdw.WorkflowError, match="invalid pull-request author"):
+        app_github.GitHubAppClient._author(SimpleNamespace(login=9))
+
+    assert app_github.GitHubAppClient._text(None, "body", allow_none=True) == ""
+    with pytest.raises(gdw.WorkflowError, match="invalid body"):
+        app_github.GitHubAppClient._text(9, "body")
+
+    with pytest.raises(gdw.WorkflowError, match="invalid timestamp"):
+        app_github.GitHubAppClient._timestamp(None, "timestamp")
+    with pytest.raises(gdw.WorkflowError, match="invalid timestamp"):
+        app_github.GitHubAppClient._timestamp(
+            SimpleNamespace(isoformat=lambda: ""), "timestamp"
+        )
+    with pytest.raises(gdw.WorkflowError, match="invalid review comment line"):
+        app_github.GitHubAppClient._line(True)
+
+
+@pytest.mark.parametrize(
+    ("issue_number", "title", "url"),
+    [
+        (True, "Title", "https://example.test/pr/9"),
+        (9, "", "https://example.test/pr/9"),
+        (9, "Title", "https://example.test/pr/10"),
+    ],
+)
+def test_github_app_pull_request_context_rejects_mismatched_identity(
+    issue_number: object, title: str, url: str
+) -> None:
+    issue = SimpleNamespace(
+        number=issue_number,
+        title=title,
+        body="Body",
+        get_comments=lambda: [],
+    )
+    pull = SimpleNamespace(
+        html_url=url,
+        get_reviews=lambda: [],
+        get_review_comments=lambda: [],
+    )
+    repository = SimpleNamespace(
+        get_issue=MagicMock(return_value=issue),
+        get_pull=MagicMock(return_value=pull),
+    )
+    client = app_github.GitHubAppClient(cast(app_github.Repository, repository))
+
+    with pytest.raises(gdw.WorkflowError, match="cannot read pull-request context"):
+        client.pull_request_context(9)

@@ -50,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
 
         pull_request_url = workflow.completed_url()
 
+        if pull_request_url is None and workflow._publication_complete():
+            pull_request_url = workflow.finalize_from_checkpoints()
+
         if pull_request_url is None:
             issue = workflow.load_issue()
             proposal = workflow.clarify(issue)
@@ -59,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             passing_ci = workflow.stabilize(specification)
             approvals = workflow.review(specification, passing_ci)
             pull_request_url = workflow.publish(specification, approvals)
+            pull_request_url = workflow.finalize(issue)
     except WorkflowError as exc:
         LOGGER.error(
             "workflow: stopped after %.1fs: %s", time.monotonic() - started, exc
