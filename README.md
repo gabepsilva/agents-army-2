@@ -78,6 +78,10 @@ uv run orchestrator --help
 uv run orchestrator --version
 ```
 
+Stage comments include an attribution footer with `backend`, `model`,
+`reasoning_effort`, and `skills`. `_unset_` means the backend CLI chose its
+default; `_none_` means the stage explicitly requested no skills.
+
 ### Structured replies: `--schema`
 
 `--schema PATH` constrains a turn's reply to a JSON Schema and prints
