@@ -37,9 +37,12 @@ def remove_overlay_workdirs(tmp_path: Path):
     """
 
     yield
-    for workdir in tmp_path.glob("**/home/*/work"):
-        for entry in workdir.iterdir():
-            entry.chmod(0o700)
+    # A fixed-depth glob, not a recursive one: `work/work` is mode 000, and
+    # walking into it is itself what raises during interpreter shutdown.
+    for workdir in tmp_path.glob("agents/home/*/*/work"):
+        inner = workdir / "work"
+        if inner.is_dir():
+            inner.chmod(0o700)
         shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -52,8 +55,11 @@ def _run_sandboxed(
     worktree.mkdir(parents=True, exist_ok=True)
     state_dir = tmp_path / "agents"
     agent_home = state_dir / "home" / agent
-    for part in ("upper", "work", "files"):
-        (agent_home / part).mkdir(parents=True, exist_ok=True)
+    (agent_home / "files").mkdir(parents=True, exist_ok=True)
+    for relative in gdw.BACKEND_HOME_DIRS["codex"]:
+        layer = agent_home / gdw._layer_name(relative)
+        for part in ("upper", "work"):
+            (layer / part).mkdir(parents=True, exist_ok=True)
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
 
@@ -248,6 +254,44 @@ def test_reviewer_cannot_write_the_backend_config_through_the_overlay(
     assert (config / "settings.json").read_text(encoding="utf-8") == "original"
 
 
+def test_every_backend_state_directory_survives_to_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outside_tmp_dir: Path
+) -> None:
+    """Not just the dotfile — the XDG directories a CLI actually writes to.
+
+    Regression: only the first directory per backend was overlaid, so opencode
+    kept its config across turns but wrote conversations to `~/.local/share`,
+    which stayed a per-turn `tmpfs`. Its second turn died with "Session not
+    found" — the bug the dotfile-only overlay was supposed to have fixed.
+    """
+
+    fake_home = outside_tmp_dir
+    monkeypatch.setenv("HOME", str(fake_home))
+    for relative in gdw.BACKEND_HOME_DIRS["codex"]:
+        (fake_home / relative).mkdir(parents=True, exist_ok=True)
+
+    writes = " && ".join(
+        f"echo session > $HOME/{relative}/probe"
+        for relative in gdw.BACKEND_HOME_DIRS["codex"]
+    )
+    first, _worktree = _run_sandboxed(
+        tmp_path, role="implementer", shell_command=writes
+    )
+    assert first.returncode == 0, first.stderr
+
+    reads = " && ".join(
+        f"cat $HOME/{relative}/probe" for relative in gdw.BACKEND_HOME_DIRS["codex"]
+    )
+    second, _worktree = _run_sandboxed(
+        tmp_path, role="implementer", shell_command=reads
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.count("session") == len(gdw.BACKEND_HOME_DIRS["codex"])
+    for relative in gdw.BACKEND_HOME_DIRS["codex"]:
+        assert not (fake_home / relative / "probe").exists()
+
+
 def test_two_agents_on_one_backend_do_not_collide_on_the_config_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outside_tmp_dir: Path
 ) -> None:
@@ -266,7 +310,7 @@ def test_two_agents_on_one_backend_do_not_collide_on_the_config_overlay(
 
     # Stand in for a backend CLI whose server outlives its turn, still
     # holding that agent's overlay when the next agent starts.
-    first = tmp_path / "agents" / "home" / "gdw-1-first"
+    first = tmp_path / "agents" / "home" / "gdw-1-first" / ".codex"
     for part in ("upper", "work"):
         (first / part).mkdir(parents=True, exist_ok=True)
     mount = tmp_path / "held"

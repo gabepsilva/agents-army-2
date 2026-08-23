@@ -106,11 +106,23 @@ WRITABLE_ROLES = frozenset({"implementer", "documenter"})
 # missing entry just loses that convenience for one backend — the base
 # `--ro-bind / /` already leaves the real path readable, so turn correctness
 # never depends on this mapping being exact.
+# Every directory a backend CLI reads its login from or writes its session
+# to. More than one each, because these tools follow XDG: opencode keeps
+# config in `~/.config`, conversations in `~/.local/share`, and locks in
+# `~/.local/state`. Overlaying only the first left "Session not found" on the
+# second turn of every opencode agent. Paths are resolved under the real
+# `$HOME`; a host that relocates them with `XDG_*` is not supported, because
+# `--clearenv` means the sandboxed CLI looks under `$HOME` regardless.
 BACKEND_HOME_DIRS = {
-    "claude": ".claude",
-    "codex": ".codex",
-    "grok": ".grok",
-    "opencode": ".config/opencode",
+    "claude": (".claude",),
+    "codex": (".codex", ".local/state/codex"),
+    "grok": (".grok",),
+    "opencode": (
+        ".config/opencode",
+        ".local/share/opencode",
+        ".local/state/opencode",
+        ".cache/opencode",
+    ),
 }
 # Single-file configs that sit beside, not inside, the directories above.
 # `bwrap` overlays a directory, never a file, so these are copied once into
@@ -1207,6 +1219,12 @@ class GitHub:
         return proc.stdout
 
 
+def _layer_name(relative: str) -> str:
+    """A flat, filesystem-safe directory name for one overlaid config path."""
+
+    return relative.replace("/", "-")
+
+
 def _within(path: Path, other: Path) -> bool:
     """Whether `path` is `other` or lives under it. Both must be resolved."""
 
@@ -1305,18 +1323,19 @@ def _ephemeral_home_flags(context: SandboxContext) -> list[str]:
     # flag runs, not against the sandbox's own already-`tmpfs`'d view.
     flags = ["--ro-bind", str(context.isolation_dir), str(context.isolation_dir)]
     flags += ["--tmpfs", str(context.ephemeral_home)]
-    backend_dir = BACKEND_HOME_DIRS.get(context.backend)
-    if backend_dir is not None:
-        source = context.real_home / backend_dir
-        if source.exists():
-            flags += [
-                "--overlay-src",
-                str(source),
-                "--overlay",
-                str(context.agent_home / "upper"),
-                str(context.agent_home / "work"),
-                str(context.ephemeral_home / backend_dir),
-            ]
+    for relative in BACKEND_HOME_DIRS.get(context.backend, ()):
+        source = context.real_home / relative
+        if not source.exists():
+            continue
+        layer = context.agent_home / _layer_name(relative)
+        flags += [
+            "--overlay-src",
+            str(source),
+            "--overlay",
+            str(layer / "upper"),
+            str(layer / "work"),
+            str(context.ephemeral_home / relative),
+        ]
     for name in BACKEND_HOME_FILES.get(context.backend, ()):
         carried = context.agent_home / "files" / name
         if carried.exists():
@@ -1604,8 +1623,11 @@ class AgentGateway:
         if not agent_name or set(agent_name) - AGENT_NAME_CHARACTERS:
             raise WorkflowError(f"unusable agent name {agent_name!r}")
         home = self.state_file.parent / "home" / agent_name
-        for name in ("upper", "work", "files"):
-            (home / name).mkdir(parents=True, exist_ok=True)
+        (home / "files").mkdir(parents=True, exist_ok=True)
+        for relative in BACKEND_HOME_DIRS.get(backend, ()):
+            layer = home / _layer_name(relative)
+            for name in ("upper", "work"):
+                (layer / name).mkdir(parents=True, exist_ok=True)
         for name in BACKEND_HOME_FILES.get(backend, ()):
             carried = home / "files" / name
             source = Path.home() / name
