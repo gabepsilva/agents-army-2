@@ -43,13 +43,15 @@ def remove_overlay_workdirs(tmp_path: Path):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _run_sandboxed(tmp_path: Path, *, role: str, shell_command: str):
+def _run_sandboxed(
+    tmp_path: Path, *, role: str, shell_command: str, agent: str = "gdw-1-agent"
+):
     """Build one real `bwrap` argv the way `AgentGateway._run_cli` does, and run it."""
 
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     state_dir = tmp_path / "agents"
-    agent_home = state_dir / "home" / "codex"
+    agent_home = state_dir / "home" / agent
     for part in ("upper", "work", "files"):
         (agent_home / part).mkdir(parents=True, exist_ok=True)
     schema = tmp_path / "schema.json"
@@ -244,6 +246,67 @@ def test_reviewer_cannot_write_the_backend_config_through_the_overlay(
     # edit — and the real file it was overlaid from is untouched.
     assert result.stdout.strip() == "tampered"
     assert (config / "settings.json").read_text(encoding="utf-8") == "original"
+
+
+def test_two_agents_on_one_backend_do_not_collide_on_the_config_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outside_tmp_dir: Path
+) -> None:
+    """Each agent gets its own layer, so a lingering server cannot block one.
+
+    Regression: the layer was keyed by backend. `overlayfs` refuses a second
+    mount sharing a live upperdir with EBUSY, and some backend CLIs leave a
+    server running past their turn — so the next agent on the same backend
+    died with "Can't make overlay mount ... Device or resource busy" before
+    its turn began.
+    """
+
+    fake_home = outside_tmp_dir
+    (fake_home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # Stand in for a backend CLI whose server outlives its turn, still
+    # holding that agent's overlay when the next agent starts.
+    first = tmp_path / "agents" / "home" / "gdw-1-first"
+    for part in ("upper", "work"):
+        (first / part).mkdir(parents=True, exist_ok=True)
+    mount = tmp_path / "held"
+    mount.mkdir()
+    holder = subprocess.Popen(
+        [
+            "bwrap",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--overlay-src",
+            str(fake_home / ".codex"),
+            "--overlay",
+            str(first / "upper"),
+            str(first / "work"),
+            str(mount),
+            "--",
+            "sleep",
+            "10",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        second, _worktree = _run_sandboxed(
+            tmp_path,
+            role="implementer",
+            shell_command="echo second-turn-ran",
+            agent="gdw-1-second",
+        )
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+    assert second.returncode == 0, second.stderr
+    assert "second-turn-ran" in second.stdout
 
 
 def test_missing_bwrap_fails_closed_before_any_orchestrator_call(

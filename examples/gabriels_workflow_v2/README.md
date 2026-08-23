@@ -101,7 +101,7 @@ worktree:
   workflow.json       identity, turns used, milestones, PR
   issue.json          the bounded issue, read from GitHub once
   agents/agents.json  orchestrator agent sessions
-  agents/home/<b>/    per-issue overlay for backend <b>'s config
+  agents/home/<agent>/ that agent's writable layer over its backend config
   checkpoints/*.json  one per stage
   worktree/           the branch gdwv2/issue-<n> develops on
 ```

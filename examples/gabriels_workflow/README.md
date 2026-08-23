@@ -158,7 +158,7 @@ what the driver — not an agent — trusts itself to do.
   Each backend's own login/session directory (`~/.claude`, `~/.codex`,
   `~/.grok`, `~/.config/opencode`) is mounted into it as an `overlayfs`: the
   real directory is the read-only lower layer, and writes land in a per-issue
-  upper layer under `.git/gdw/issue-<n>/agents/home/<backend>/`. The turn gets
+  upper layer under `.git/gdw/issue-<n>/agents/home/<agent>/`. The turn gets
   the login it would have outside the sandbox and a session that survives to
   the next turn, while the real config — which can carry hooks — stays
   unwritable. `~/.claude.json` sits beside its directory rather than inside

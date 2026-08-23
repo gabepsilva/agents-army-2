@@ -34,7 +34,7 @@ instructions for it to follow.
   `~/.grok`, `~/.config/opencode` via `BACKEND_HOME_DIRS`) is mounted into
   that ephemeral `$HOME` as an `overlayfs` whose **lower layer is the real
   directory and whose upper layer is per-issue**
-  (`<state dir>/home/<backend>/upper`). A turn therefore reads the login and
+  (`<state dir>/home/<agent>/upper`). A turn therefore reads the login and
   settings it would outside the sandbox, and its writes land in the issue's
   own layer — the real config is never modified. That matters in both
   directions: a backend's settings file can carry hooks, so a writable bind
@@ -43,10 +43,13 @@ instructions for it to follow.
   broke every `--resume`, because the CLIs record a conversation under that
   directory and the next turn found none. Single-file configs that sit beside
   the directory (`~/.claude.json` via `BACKEND_HOME_FILES`) cannot be
-  overlaid, so they are copied once into `<state dir>/home/<backend>/files`
-  and bound read-write from there. A wrong or missing mapping costs that
-  backend its resumable session, not turn correctness — the base bind still
-  leaves the real path readable.
+  overlaid, so they are copied once into `<state dir>/home/<agent>/files`
+  and bound read-write from there. The layer is keyed by agent, not by backend: a session belongs to one
+  agent, and `overlayfs` refuses a second mount sharing a live upperdir, so
+  two agents on one backend sharing a layer means the second one's turn
+  cannot start when a backend CLI leaves a server running past its turn. A
+  wrong or missing mapping costs that backend its resumable session, not turn
+  correctness — the base bind still leaves the real path readable.
 - **Named credential and socket shadows.** `~/.ssh`, `~/.aws`,
   `~/.config/gcloud`, `~/.azure`, `~/.netrc`, `~/.docker`, `~/.config/gh`,
   and `$SSH_AUTH_SOCK` (only when `Path(...).exists()` on the host) are

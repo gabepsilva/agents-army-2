@@ -118,6 +118,11 @@ BACKEND_HOME_DIRS = {
 BACKEND_HOME_FILES = {
     "claude": (".claude.json",),
 }
+# An agent name becomes a directory name under the state directory, and it
+# reaches here from configuration, so it is checked rather than trusted.
+AGENT_NAME_CHARACTERS = frozenset(
+    "-_.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 # Shadowed with `--ro-bind /dev/null <path>` when present on the host, so an
 # agent turn cannot read them regardless of which env var points at them.
 SENSITIVE_HOME_RELATIVE_PATHS = (
@@ -1522,7 +1527,7 @@ class AgentGateway:
     ) -> subprocess.CompletedProcess[str]:
         state_dir = self.state_file.parent
         state_dir.mkdir(parents=True, exist_ok=True)
-        agent_home = self._agent_home(turn.backend)
+        agent_home = self._agent_home(turn.agent_name, turn.backend)
         context = SandboxContext(
             role=turn.role,
             backend=turn.backend,
@@ -1557,16 +1562,24 @@ class AgentGateway:
             raise WorkflowError(f"orchestrator CLI failed: {message}")
         return result
 
-    def _agent_home(self, backend: str) -> Path:
-        """This issue's writable layer for one backend's config directory.
+    def _agent_home(self, agent_name: str, backend: str) -> Path:
+        """This agent's writable layer over its backend's config directory.
 
-        Created under the agent state directory, which the sandbox already
-        treats as the turn's own scratch space. `upper` and `work` must be on
-        one filesystem for `overlayfs`; `files` carries the single-file
-        configs, copied once so the real ones are never written.
+        Per agent, not per backend, for two reasons. A session belongs to one
+        agent, so that is the granularity the layer that carries it should
+        have. And `overlayfs` refuses a second mount sharing a live upperdir
+        (EBUSY) — some backend CLIs leave a server running past the turn that
+        started it, so two agents on one backend sharing a layer means the
+        second one's turn fails to start.
+
+        `upper` and `work` must be on one filesystem for `overlayfs`; `files`
+        carries the single-file configs, copied once so the real ones are
+        never written.
         """
 
-        home = self.state_file.parent / "home" / backend
+        if not agent_name or set(agent_name) - AGENT_NAME_CHARACTERS:
+            raise WorkflowError(f"unusable agent name {agent_name!r}")
+        home = self.state_file.parent / "home" / agent_name
         for name in ("upper", "work", "files"):
             (home / name).mkdir(parents=True, exist_ok=True)
         for name in BACKEND_HOME_FILES.get(backend, ()):
