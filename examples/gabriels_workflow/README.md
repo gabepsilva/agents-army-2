@@ -136,3 +136,70 @@ a stopped workflow ends with the reminder that rerunning resumes it.
 The required local tools are `git`, `make`, `uv`, `orchestrator`, and every
 authenticated agent CLI referenced by the configuration: `claude`, `codex`,
 `grok`, or `opencode`.
+
+## Sandboxing
+
+Every agent turn — the `orchestrator talk ...` call `AgentGateway.ask` makes —
+runs inside a [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`)
+sandbox rather than as a plain subprocess. Only this single call point is
+wrapped: the `orchestrator` package itself stays sandbox-agnostic, and the
+driver's own GitHub, git, and `make ci` calls run unsandboxed, since they are
+what the driver — not an agent — trusts itself to do.
+
+**Isolated:**
+
+- Environment: `--clearenv` plus an explicit `--setenv` allowlist
+  (`PATH`, `HOME`, `AGENTS_ARMY_HOME`, `AGENTS_ARMY_STATE_FILE`,
+  `GH_CONFIG_DIR`, and `LANG`/`LC_ALL`/`TZ`/`TERM` when set on the host).
+  `GH_TOKEN`, `GITHUB_TOKEN`, and the other names in `GITHUB_TOKEN_NAMES` are
+  never set; `GH_CONFIG_DIR` points at an empty per-turn directory, so `gh`
+  finds no host credentials even if the shim below were bypassed.
+- `$HOME`: a fresh, empty, per-turn `tmpfs`, distinct from the real `$HOME`.
+  Each backend's own login/session dotfile (`~/.claude`, `~/.codex`, `~/.grok`,
+  `~/.config/opencode`) is re-bound read-only into that ephemeral `$HOME` on a
+  best-effort basis — a wrong or missing entry only costs that backend the
+  convenience of resuming its host login, never turn correctness, since the
+  base bind below already leaves the real path readable.
+- Named credential and socket paths: `~/.ssh`, `~/.aws`, `~/.config/gcloud`,
+  `~/.azure`, `~/.netrc`, `~/.docker`, `~/.config/gh`, and `$SSH_AUTH_SOCK`
+  (when set and present) are shadowed — a directory gets a fresh empty
+  `tmpfs`, a file or socket gets bound to `/dev/null` — so a turn cannot read
+  them regardless of which env var points at them.
+- `/proc` and `/dev`: replaced with the sandbox's own view (`--proc`/`--dev`
+  under `--unshare-pid`), not the host's process table or device nodes.
+- `/tmp`, `/var/tmp`, `/dev/shm`, and `$XDG_RUNTIME_DIR`: private, empty
+  `tmpfs` mounts per turn.
+- The worktree: writable (`--bind`) only for `implementer` and `documenter`
+  (`WRITABLE_ROLES`); every other role — the reviewers, `griller`, `specifier`,
+  `expander`, `finalizer` — gets it read-only (`--ro-bind`), so a role that
+  should only report cannot also corrupt the tree.
+- `gh` is additionally blocked with a shim script on `PATH` ahead of the real
+  binary (`_sandbox_workspace`), independent of the sandbox.
+
+**Deliberately left visible, and why:** the rest of the host filesystem stays
+readable via a base `--ro-bind / /`, rather than an enumerated allowlist, so a
+toolchain installed under the real `$HOME` (`mise`, `uv`, etc.) keeps
+resolving without every path being named here individually. `/sys` is left
+read-only through that same base bind — lower-risk hardware/kernel metadata,
+none of `/proc`'s secret-bearing `environ`/`cmdline`.
+
+**Outside the sandbox entirely:** the driver's own GitHub App calls (issue
+comments, pull request creation/updates), git commits and pushes, and the
+full `make ci` run.
+
+**Network:** this is a credential/socket/path descope, not a literal egress
+cutoff. None of the four backend CLIs (`claude`, `codex`, `grok`, `opencode`)
+support a proxy or an alternate base URL, so cutting network access outright
+(`--unshare-net`) would break every one of them; a general `curl` to an
+arbitrary host is not blocked by this sandbox. An allowlisted egress path
+(`slirp4netns` or a host-side proxy) is explicit follow-up work, not part of
+this change.
+
+**Fail closed:** `AgentGateway.__init__` checks once, before any turn runs,
+that `bwrap` is on `PATH` and that a minimal self-test
+(`bwrap --ro-bind / / --proc /proc --dev /dev -- true`) succeeds. Either
+failure raises `WorkflowError` naming the fix — installing the `bubblewrap`
+package, or enabling unprivileged user namespaces
+(`sysctl kernel.unprivileged_userns_clone=1`) — and no `orchestrator` call is
+made. This sandbox requires Linux and `bubblewrap`; there is no macOS/Windows
+fallback.

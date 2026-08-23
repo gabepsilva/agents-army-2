@@ -35,3 +35,4 @@ nav:
   - Home: index.md
   - CLI Reference: cli-reference.md
   - Configuration: configuration.md
+  - Security: security.md

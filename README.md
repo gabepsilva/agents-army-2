@@ -15,6 +15,10 @@ session every time.
   - Codex: `codex`
   - Grok: `grok`
   - OpenCode 1.18.21+: `opencode`
+- For the Gabriel's Development Workflow example: Linux and
+  [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`) on `PATH`
+  with unprivileged user namespaces enabled (see
+  `examples/gabriels_workflow/README.md` Sandboxing and `docs/security.md`)
 
 ## Setup
 
@@ -311,6 +315,12 @@ publication, and control flow; agents focus on repository reasoning and code.
 Its prompts, response schemas, security boundary, and invocation are documented
 in [`examples/gabriels_workflow/README.md`](examples/gabriels_workflow/README.md).
 
+> **Sandboxing:** the workflow's `AgentGateway` wraps every `orchestrator talk`
+> turn in a `bwrap` sandbox (Linux + `bubblewrap` required, fail-closed if
+> missing). See that README's Sandboxing section and [`docs/security.md`](docs/security.md)
+> for what is isolated, what stays visible read-only, and the current network
+> posture (credential/socket/path descope only).
+
 ## Quality gates
 
 This project is developed mainly by AI agents, so its checks are
@@ -326,6 +336,11 @@ adapters require 95%, the example workflow requires 90%, supporting gate
 utilities require 80%, and changed lines require 90%. The mutation gate stays
 at a fixed 98% floor so assertions must detect corrupted core behavior without
 rewarding tests coupled only to implementation details.
+
+Semgrep rules include `no-shell-true-subprocess`, `no-bare-except`, and
+`no-inherited-env-agent-subprocess` (every `subprocess.run`/`Popen` launching
+`orchestrator` or `bwrap` must pass explicit `env=` so agent turns never inherit
+the host environment).
 
 ```sh
 make hooks   # install the pre-commit/pre-push gate (run once per clone)
