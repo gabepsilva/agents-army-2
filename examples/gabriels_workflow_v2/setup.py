@@ -62,7 +62,7 @@ def prepare_workflow(
     agents = RelayAgentGateway(
         roles=config.roles,
         issue=issue_number,
-        state_file=store.root / "agents.json",
+        state_file=store.root / "agents" / "agents.json",
         example_root=Path(__file__).resolve().parent,
         workdir=worktree,
         max_prompt_chars=config.budgets.max_prompt_chars,

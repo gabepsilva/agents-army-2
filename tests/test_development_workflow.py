@@ -1296,9 +1296,9 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
             )
         },
         issue=3,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
     result = gateway.ask(
@@ -1340,26 +1340,21 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
     # expander is not a writable role: the worktree is read-only. Search for
     # the *bind* of the worktree specifically, since its path also appears
     # earlier as the --setenv AGENTS_ARMY_HOME value.
+    worktree = str(tmp_path / "worktree")
     worktree_bind_indices = [
         index
         for index in range(len(argv) - 2)
         if argv[index] in ("--bind", "--ro-bind")
-        and argv[index + 1] == str(tmp_path)
-        and argv[index + 2] == str(tmp_path)
+        and argv[index + 1] == worktree
+        and argv[index + 2] == worktree
     ]
     assert worktree_bind_indices == [
         index for index in worktree_bind_indices if argv[index] == "--ro-bind"
     ]
     assert len(worktree_bind_indices) == 1
-    lock_prefix = str(tmp_path / "agents.json") + "."
-    lock_binds = [
-        index
-        for index in range(len(argv) - 2)
-        if argv[index] == "--bind"
-        and argv[index + 1].startswith(lock_prefix)
-        and argv[index + 1] == argv[index + 2]
-    ]
-    assert len(lock_binds) == 2
+    state_dir = str(tmp_path / "state")
+    assert (state_dir, state_dir) in _bind_pairs(argv, "--bind")
+    assert (state_dir, state_dir) not in _bind_pairs(argv, "--ro-bind")
     terminator = argv.index("--")
     assert argv[terminator + 1 :][:9] == [
         "orchestrator",
@@ -1374,11 +1369,13 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
     ]
     assert argv[terminator + 1 :][9] == "--prompt"
     assert len(calls) == 1
-    assert calls[0][1]["env"]["AGENTS_ARMY_STATE_FILE"] == str(tmp_path / "agents.json")
+    assert calls[0][1]["env"]["AGENTS_ARMY_STATE_FILE"] == str(
+        tmp_path / "state" / "agents.json"
+    )
     assert calls[0][1]["timeout"] == 22
-    assert calls[0][1]["cwd"] == str(tmp_path)
-    assert calls[0][1]["env"]["AGENTS_ARMY_HOME"] == str(tmp_path)
-    assert gateway.workdir == tmp_path
+    assert calls[0][1]["cwd"] == worktree
+    assert calls[0][1]["env"]["AGENTS_ARMY_HOME"] == worktree
+    assert str(gateway.workdir) == worktree
     assert os.environ["GH_TOKEN"] == "secret"
     assert os.environ["PATH"] == original_path
 
@@ -1413,7 +1410,7 @@ def test_agent_turns_run_in_the_worktree_not_the_directory_the_driver_started_in
             )
         },
         issue=3,
-        state_file=worktree.parent / "agents.json",
+        state_file=worktree.parent / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
         workdir=worktree,
         run=fake_run,
@@ -1458,9 +1455,9 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(
             "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
         },
         issue=1,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=example_root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
     with pytest.raises(gdw.WorkflowError, match="cannot read prompt"):
@@ -1514,9 +1511,9 @@ def test_agent_gateway_fills_prompts_with_brace_bearing_values(
             "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
         },
         issue=28,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=example_root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
 
@@ -1546,9 +1543,9 @@ def test_agent_gateway_names_the_placeholder_no_value_was_given_for(
             "role": SimpleNamespace(backend="codex", model=None, reasoning_effort=None)
         },
         issue=28,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=example_root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=lambda args, **_kwargs: _completed(args),
     )
 
@@ -1590,9 +1587,9 @@ def test_agent_gateway_rejects_malformed_cli_output(
             )
         },
         issue=1,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
     with pytest.raises(gdw.WorkflowError, match=message):
@@ -1617,9 +1614,9 @@ def test_agent_gateway_reports_cli_launch_failures(
     gateway = gdw.AgentGateway(
         roles={},
         issue=1,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=failing_run,
     )
     with pytest.raises(gdw.WorkflowError, match="orchestrator CLI failed"):
@@ -1634,9 +1631,9 @@ def test_agent_gateway_reports_cli_exit_without_stderr(
     gateway = gdw.AgentGateway(
         roles={},
         issue=1,
-        state_file=tmp_path / "state.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=lambda args, **_kwargs: _completed(args, returncode=9),
     )
     with pytest.raises(gdw.WorkflowError, match="exited 9"):
@@ -1666,9 +1663,9 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(
     gateway = gdw.AgentGateway(
         roles={"expander": configured},
         issue=5,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
     assert gateway.options("expander") is configured
@@ -1728,9 +1725,9 @@ def test_agent_gateway_attaches_skills_only_when_given(
             )
         },
         issue=7,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(gdw.__file__).parent,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         run=fake_run,
     )
     gateway.ask(
@@ -1771,7 +1768,7 @@ def _sandboxed_argv(
             role: SimpleNamespace(backend=backend, model=None, reasoning_effort=None)
         },
         issue=9,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "agents" / "agents.json",
         example_root=Path(gdw.__file__).parent,
         workdir=tmp_path / "worktree",
         run=fake_run,
@@ -1814,18 +1811,58 @@ def test_agent_gateway_binds_worktree_read_only_for_other_roles(
     assert (worktree, worktree) not in _bind_pairs(argv, "--bind")
 
 
-def test_agent_gateway_bwrap_argv_binds_state_and_both_lock_files_rw(
+def test_agent_gateway_bwrap_argv_binds_the_agent_state_directory_rw(
     tmp_path: Path, available_bwrap: None
 ) -> None:
+    """The directory, not the state file: the orchestrator renames into it.
+
+    `Orchestrator._persist` writes a sibling `.tmp` and renames it over the
+    state file, and takes sibling lock files. Binding the file alone leaves
+    its parent read-only, and every turn dies on the first `_persist`.
+    """
+
     argv, _kwargs = _sandboxed_argv(tmp_path, role="implementer")
-    state_file = tmp_path / "agents.json"
-    state_lock, agent_lock = gdw._lock_paths_for(state_file, "gdw-9-implementer")
+    state_dir = tmp_path / "agents"
     rw_binds = _bind_pairs(argv, "--bind")
-    assert (str(state_file), str(state_file)) in rw_binds
-    assert (str(state_lock), str(state_lock)) in rw_binds
-    assert (str(agent_lock), str(agent_lock)) in rw_binds
-    assert state_lock.exists()
-    assert agent_lock.exists()
+    assert (str(state_dir), str(state_dir)) in rw_binds
+    assert state_dir.is_dir()
+    assert not (tmp_path / "agents.json").exists()
+
+
+def test_agent_gateway_refuses_a_state_directory_inside_the_worktree(
+    tmp_path: Path, available_bwrap: None
+) -> None:
+    """Overlap would hand every read-only role a writable tree.
+
+    The state directory is bound read-write for all roles and comes after the
+    worktree bind, so a state directory under the worktree — or a worktree
+    under the state directory — silently re-mounts the tree read-write for a
+    reviewer.
+    """
+
+    worktree = tmp_path / "worktree"
+    for state_file in (
+        worktree / "agents" / "agents.json",
+        worktree / "agents.json",
+        tmp_path / "agents.json",
+    ):
+        with pytest.raises(gdw.WorkflowError, match="overlaps the worktree"):
+            gdw.AgentGateway(
+                roles={},
+                issue=1,
+                state_file=state_file,
+                example_root=Path(gdw.__file__).parent,
+                workdir=worktree,
+            )
+
+    gateway = gdw.AgentGateway(
+        roles={},
+        issue=1,
+        state_file=tmp_path / "state" / "agents.json",
+        example_root=Path(gdw.__file__).parent,
+        workdir=worktree,
+    )
+    assert gateway.workdir == worktree
 
 
 def test_agent_gateway_bwrap_argv_ends_with_terminator_before_payload(
@@ -1916,9 +1953,9 @@ def test_agent_gateway_requires_bwrap_on_path(
         gdw.AgentGateway(
             roles={},
             issue=1,
-            state_file=tmp_path / "agents.json",
+            state_file=tmp_path / "state" / "agents.json",
             example_root=Path(gdw.__file__).parent,
-            workdir=tmp_path,
+            workdir=tmp_path / "worktree",
             run=fake_run,
         )
     assert calls == []
@@ -1932,9 +1969,9 @@ def test_agent_gateway_requires_bwrap_on_path_names_user_namespace_fix(
         gdw.AgentGateway(
             roles={},
             issue=1,
-            state_file=tmp_path / "agents.json",
+            state_file=tmp_path / "state" / "agents.json",
             example_root=Path(gdw.__file__).parent,
-            workdir=tmp_path,
+            workdir=tmp_path / "worktree",
         )
 
 
@@ -1957,9 +1994,9 @@ def test_agent_gateway_requires_bwrap_self_test_to_pass(
         gdw.AgentGateway(
             roles={},
             issue=1,
-            state_file=tmp_path / "agents.json",
+            state_file=tmp_path / "state" / "agents.json",
             example_root=Path(gdw.__file__).parent,
-            workdir=tmp_path,
+            workdir=tmp_path / "worktree",
             run=fake_run,
         )
     assert calls == []
@@ -1985,9 +2022,9 @@ def test_all_workflow_schemas_are_strict_and_prompts_resolve(
     gateway = gdw.AgentGateway(
         roles={},
         issue=1,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=example_root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
     )
     values = {
         "ISSUE_CONTEXT_JSON": "{}",
@@ -2603,7 +2640,7 @@ def test_prepare_simple_workflow_checks_tools_and_builds_services(
     gateway_factory.assert_called_once_with(
         roles=config.roles,
         issue=7,
-        state_file=tmp_path / ".git" / "gdw" / "issue-7" / "agents.json",
+        state_file=tmp_path / ".git" / "gdw" / "issue-7" / "agents" / "agents.json",
         example_root=Path(simple_setup.__file__).resolve().parent,
         # The agents develop in the same tree git and CI use. Asserting the
         # repository root here instead is what let them diverge.
@@ -3318,9 +3355,9 @@ def test_finalization_schema_and_prompt_are_strict(
     gateway = gdw.AgentGateway(
         roles={},
         issue=42,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=example_root,
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
     )
     template = (example_root / "prompts" / "finalize.md").read_text(encoding="utf-8")
     assert set(gdw.PLACEHOLDER_PATTERN.findall(template)) == {

@@ -8,7 +8,6 @@ GitHub, full CI, commits, pushes, workflow state, and all stage transitions.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -1173,20 +1172,10 @@ class GitHub:
         return proc.stdout
 
 
-def _lock_paths_for(state_file: Path, agent_name: str) -> tuple[Path, Path]:
-    """The two lock files `orchestrator` touches for one agent's turns.
+def _within(path: Path, other: Path) -> bool:
+    """Whether `path` is `other` or lives under it. Both must be resolved."""
 
-    Mirrors `Orchestrator._lock_path`/`_agent_lock_path` in
-    `orchestrator/__init__.py` exactly: the state lock guards the whole file,
-    the per-agent lock (named by a hash of the agent name, since a name is
-    free text and would not survive being used as a filename) serializes one
-    agent's turns without blocking every other agent.
-    """
-
-    state_lock = state_file.with_name(state_file.name + ".lock")
-    digest = hashlib.sha256(agent_name.encode()).hexdigest()
-    agent_lock = state_file.with_name(f"{state_file.name}.{digest}.lock")
-    return state_lock, agent_lock
+    return path == other or other in path.parents
 
 
 @dataclass(frozen=True)
@@ -1196,7 +1185,7 @@ class SandboxContext:
     role: str
     backend: str
     worktree: Path
-    state_paths: Sequence[Path]
+    state_dir: Path
     schema_path: Path
     environment: Mapping[str, str]
     ephemeral_home: Path
@@ -1285,8 +1274,11 @@ def _ephemeral_home_flags(context: SandboxContext) -> list[str]:
 def _bind_flags(context: SandboxContext) -> list[str]:
     bind_flag = "--bind" if context.role in WRITABLE_ROLES else "--ro-bind"
     flags = [bind_flag, str(context.worktree), str(context.worktree)]
-    for state_path in context.state_paths:
-        flags += ["--bind", str(state_path), str(state_path)]
+    # The whole directory, not the state file alone: the orchestrator persists
+    # through a sibling `.tmp` and a rename, and takes sibling lock files, none
+    # of which a per-file bind can host. It holds nothing but agent session
+    # state, so nothing else becomes writable by giving it up.
+    flags += ["--bind", str(context.state_dir), str(context.state_dir)]
     flags += ["--ro-bind", str(context.schema_path), str(context.schema_path)]
     return flags
 
@@ -1386,6 +1378,16 @@ class AgentGateway:
         # in it had changed, and the run died at `commit` with "produced no
         # commits". A caller that forgets this argument now fails to build.
         self.workdir = workdir
+        # The state directory is bound read-write for every role, including
+        # the ones whose worktree bind is read-only. If the two overlapped,
+        # that later rw bind would silently hand a reviewer a writable tree.
+        state_dir = state_file.parent.resolve()
+        tree = workdir.resolve()
+        if _within(state_dir, tree) or _within(tree, state_dir):
+            raise WorkflowError(
+                f"agent state directory {state_dir} overlaps the worktree "
+                f"{tree}; they must be separate"
+            )
         self.prompts = example_root / "prompts"
         self.validations = example_root / "validations"
         self._run_process = run
@@ -1494,15 +1496,13 @@ class AgentGateway:
         *,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
-        state_lock, agent_lock = _lock_paths_for(self.state_file, turn.agent_name)
-        for bound_path in (self.state_file, state_lock, agent_lock):
-            bound_path.parent.mkdir(parents=True, exist_ok=True)
-            bound_path.touch(exist_ok=True)
+        state_dir = self.state_file.parent
+        state_dir.mkdir(parents=True, exist_ok=True)
         context = SandboxContext(
             role=turn.role,
             backend=turn.backend,
             worktree=self.workdir,
-            state_paths=(self.state_file, state_lock, agent_lock),
+            state_dir=state_dir,
             schema_path=turn.schema_path,
             environment=environment,
             ephemeral_home=turn.ephemeral_home,

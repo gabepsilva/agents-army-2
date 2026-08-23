@@ -32,27 +32,24 @@ def _run_sandboxed(tmp_path: Path, *, role: str, shell_command: str):
 
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
-    state_file = tmp_path / "agents.json"
+    state_dir = tmp_path / "agents"
+    state_dir.mkdir(parents=True, exist_ok=True)
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
 
     gateway = gdw.AgentGateway(
         roles={},
         issue=1,
-        state_file=state_file,
+        state_file=state_dir / "agents.json",
         example_root=Path(gdw.__file__).parent,
         workdir=worktree,
     )
     with gateway._sandbox_workspace() as (environment, ephemeral_home, isolation):
-        state_lock, agent_lock = gdw._lock_paths_for(state_file, "gdw-1-" + role)
-        for bound_path in (state_file, state_lock, agent_lock):
-            bound_path.parent.mkdir(parents=True, exist_ok=True)
-            bound_path.touch(exist_ok=True)
         context = gdw.SandboxContext(
             role=role,
             backend="codex",
             worktree=worktree,
-            state_paths=(state_file, state_lock, agent_lock),
+            state_dir=state_dir,
             schema_path=schema,
             environment=environment,
             ephemeral_home=ephemeral_home,
@@ -183,9 +180,9 @@ def test_missing_bwrap_fails_closed_before_any_orchestrator_call(
         gdw.AgentGateway(
             roles={},
             issue=1,
-            state_file=tmp_path / "agents.json",
+            state_file=tmp_path / "state" / "agents.json",
             example_root=Path(gdw.__file__).parent,
-            workdir=tmp_path,
+            workdir=tmp_path / "worktree",
             run=fake_run,
         )
     assert calls == []

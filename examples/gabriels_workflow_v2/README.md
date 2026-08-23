@@ -100,7 +100,7 @@ worktree:
 .git/gdw-v2/issue-<n>/
   workflow.json       identity, turns used, milestones, PR
   issue.json          the bounded issue, read from GitHub once
-  agents.json         orchestrator agent sessions
+  agents/agents.json  orchestrator agent sessions
   checkpoints/*.json  one per stage
   worktree/           the branch gdwv2/issue-<n> develops on
 ```
@@ -170,6 +170,9 @@ Unchanged from V1, and shared with it: every agent turn runs inside a
 `documenter`, and GitHub credentials never enter a turn. See
 [`../gabriels_workflow/README.md`](../gabriels_workflow/README.md) for the full
 description of what is isolated and what is deliberately left visible.
+
+`agents/` is its own directory because the sandbox binds it read-write for
+every role; nothing else in the state directory is reachable from a turn.
 
 Handoffs do not weaken that boundary. Every prompt wraps its context in
 `<untrusted_context_json>` and says so, because a handoff is written by a

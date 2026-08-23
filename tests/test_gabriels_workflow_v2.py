@@ -815,7 +815,7 @@ def test_setup_builds_the_issue_worktree_and_points_agents_at_it(
     assert workflow.store.metadata["issue"] == 42
     (arguments,) = built
     assert arguments["workdir"] == worktree
-    assert arguments["state_file"] == issue_root / "agents.json"
+    assert arguments["state_file"] == issue_root / "agents" / "agents.json"
     assert arguments["max_prompt_chars"] == 60_000
     assert set(arguments["roles"]) == AGENT_ROLES
 
@@ -1052,14 +1052,14 @@ def test_relay_gateway_keeps_the_prompt_budget_it_was_built_with(
     gateway = RelayAgentGateway(
         roles={},
         issue=42,
-        state_file=tmp_path / "agents.json",
+        state_file=tmp_path / "state" / "agents.json",
         example_root=Path(__file__).parents[1] / "examples/gabriels_workflow_v2",
-        workdir=tmp_path,
+        workdir=tmp_path / "worktree",
         max_prompt_chars=5_000,
     )
 
     assert gateway.max_prompt_chars == 5_000
-    assert gateway.workdir == tmp_path
+    assert gateway.workdir == tmp_path / "worktree"
     assert len(gateway._prompt("expand", {"CONTEXT_JSON": "{}"})) < 5_000
 
 

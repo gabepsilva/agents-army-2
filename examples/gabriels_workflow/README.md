@@ -107,8 +107,8 @@ ignored for this reason.
 
 Agent backend/model/effort settings are persisted with their sessions. Changing
 one for an issue that has already started produces an explicit mismatch error;
-remove that issue's `.git/gdw/issue-<number>/agents.json` to start fresh agent
-sessions while retaining completed workflow checkpoints.
+remove that issue's `.git/gdw/issue-<number>/agents/agents.json` to start
+fresh agent sessions while retaining completed workflow checkpoints.
 
 Workflow and agent state is stored under `.git/gdw/issue-<number>/`. Running the
 same issue again resumes completed stages and avoids duplicate bot comments.
