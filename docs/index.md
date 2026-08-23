@@ -1,7 +1,7 @@
 # Agents Army
 
 Agents Army is a CLI that manages a fleet of coding-agent CLI sessions —
-Claude Code, Codex, and Grok. Each **agent** is a named, persistent
+Claude Code, Codex, Grok, or OpenCode. Each **agent** is a named, persistent
 conversation backed by a real CLI session: create as many as you want, and
 `talk` to each one independently. Every turn resumes that agent's underlying
 session, so the agent remembers the whole conversation.
@@ -21,9 +21,10 @@ uv run orchestrator talk reviewer -p "what did you just reply?"
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
-- At least one agent CLI installed and authenticated: `claude`, `codex`, or `grok`
+- At least one agent CLI installed and authenticated: `claude`, `codex`, `grok`, or `opencode`
 
 Run `uv run orchestrator doctor` to check which of these are on `PATH`.
+OpenCode 1.18.21 is the tested minimum version.
 
 ## Setup
 
@@ -40,11 +41,12 @@ uv run pytest          # run the test suite
 ## Project layout
 
 ```
-backends/          # AgentBackend interface + implementations (claude, codex, grok)
+backends/          # AgentBackend interface + implementations
   base.py          # abstract AgentBackend + TurnResult + TurnError
   claude.py        # ClaudeBackend (resumes via --resume)
   codex.py         # CodexBackend (resumes via codex exec resume)
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
+  opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (create / talk / list / delete / doctor)
   schema.py        # --schema loading, strict-subset checks, reply validation

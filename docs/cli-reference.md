@@ -26,7 +26,7 @@ going before turning it on.
 ## `create` — make a new agent
 
 ```
-orchestrator create NAME [-b/--backend {claude,codex,grok}] [-m/--model MODEL]
+orchestrator create NAME [-b/--backend {claude,codex,grok,opencode}] [-m/--model MODEL]
                           [-e/--reasoning-effort EFFORT]
 ```
 
@@ -106,7 +106,8 @@ uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 `--schema PATH` constrains the reply to a JSON Schema and prints the
 validated object instead of raw text. Each backend CLI is given the flag it
 understands for this (`--json-schema` inline for `claude`/`grok`,
-`--output-schema <file>` for `codex`).
+`--output-schema <file>` for `codex`); OpenCode 1.18.21 has no CLI schema
+flag, so validation/repair enforces its reply.
 
 **Schemas must be strict**: every object (including nested ones and array
 `items`) needs `"additionalProperties": false` and a `"required"` list
@@ -159,7 +160,7 @@ orchestrator doctor
 ```
 
 Reports the running Python version against this project's floor, and
-whether `uv`, `claude`, `codex`, `grok`, and `jq` (optional) are on `PATH`,
+whether `uv`, `claude`, `codex`, `grok`, `opencode`, and `jq` (optional) are on `PATH`,
 with their versions where available. Always exits `0` — it's a status
 report, not a gate; which backends you can actually use is your call.
 

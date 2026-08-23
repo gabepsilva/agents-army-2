@@ -1,17 +1,19 @@
 """Load a reply schema, and check a reply against it.
 
-`--schema` has to mean the same thing on all three CLIs. Two of them
-(claude, grok) take any JSON Schema and accept a lax one; codex rejects a
+`--schema` has to mean the same thing on every backend. Claude and grok take
+any JSON Schema and accept a lax one; codex rejects a
 schema that is not in OpenAI's strict structured-outputs dialect with an HTTP
 400 before the turn runs. A schema that works on two backends and 400s on the
 third is a parity break, so the strict subset is enforced here, once, for
-every backend.
+every backend. OpenCode has no CLI schema flag, so its reply is checked by the
+same validation and repair loop after the turn.
 
 The rules below are the ones that were actually measured against
 `codex exec --output-schema` (2026-08-20, codex-cli 0.147.0), not a reading of
-a spec: every other shape is passed through. `anyOf` and `$ref`/`$defs` in
+a spec: every other shape is passed through. OpenCode 1.18.21 is the tested
+minimum for its event envelope. `anyOf` and `$ref`/`$defs` in
 particular are *accepted*, because codex accepts them — rejecting a schema all
-three backends handle is as much a parity break as accepting one that only two
+backends handle is as much a parity break as accepting one that only two
 do, in the more annoying direction. Anything unmeasured that codex still
 refuses falls through to its own error message, which the codex backend now
 surfaces verbatim.
@@ -34,12 +36,10 @@ from jsonschema.validators import validator_for
 from backends.base import OutputSchema
 
 # Appended to the prompt whenever a schema is active, identically on every
-# backend. All three CLIs constrain the reply themselves — 23/23 conforming
-# replies under adversarial prompting on claude, 4/4 on codex, grok not
-# measurable — so this is a hedge, not the mechanism. It stays uniform because
-# per-backend prompt text is the exact divergence this interface exists to
-# prevent, and because the one backend that could not be trialled must not be
-# the one running without a hedge.
+# backend. Claude, codex, and grok constrain the reply themselves; OpenCode
+# relies on the validation/repair loop because its CLI has no schema flag. This
+# instruction stays uniform because per-backend prompt text is the exact
+# divergence this interface exists to prevent.
 SCHEMA_INSTRUCTION = (
     "Reply with JSON conforming to the supplied output schema, and nothing else."
 )
@@ -210,7 +210,7 @@ def load_schema(path: Path) -> OutputSchema:
         )
 
     # Re-serialised compactly rather than passed through as written: this text
-    # becomes one argv entry and one logged line on two of the three backends,
+    # becomes one argv entry and one logged line on the inline-schema backends,
     # and the file's own formatting says nothing the schema does not.
     return OutputSchema(
         text=json.dumps(document, separators=(",", ":"), sort_keys=True),

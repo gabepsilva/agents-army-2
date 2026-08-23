@@ -422,7 +422,7 @@ class TestLoadSchema:
 
     def test_anyof_is_accepted(self, tmp_path: Path) -> None:
         """Measured accepted by codex. Rejecting it would break parity in the
-        other direction: a schema all three backends run, refused by us."""
+        other direction: a schema every backend can run, refused by us."""
         document = {
             "type": "object",
             "additionalProperties": False,

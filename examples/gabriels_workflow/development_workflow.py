@@ -1529,7 +1529,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("issue", type=_positive)
     parser.add_argument("--repo", help="GitHub OWNER/REPO; defaults to this checkout")
     parser.add_argument(
-        "--backend", default="claude", choices=("claude", "codex", "grok")
+        "--backend",
+        default="claude",
+        choices=("claude", "codex", "grok", "opencode"),
     )
     parser.add_argument("--base", help="PR base branch; defaults to repository default")
     parser.add_argument(

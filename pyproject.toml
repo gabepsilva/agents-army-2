@@ -116,6 +116,7 @@ source_paths = [
     "backends/claude.py",
     "backends/codex.py",
     "backends/grok.py",
+    "backends/opencode.py",
     "backends/registry.py",
 ]
 also_copy = ["backends/", "orchestrator/"]

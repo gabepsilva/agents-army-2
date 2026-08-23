@@ -47,6 +47,7 @@ from backends.grok import (
     parse_grok_stdout,
 )
 from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
+from backends.opencode import OpenCodeBackend, OpenCodeTurnError
 from backends.registry import (
     UnknownBackendError,
     get_backend,
@@ -115,6 +116,7 @@ ALL_TOOLS_PRESENT = {
     "claude": "2.1.234 (Claude Code)",
     "codex": "codex-cli 0.147.0",
     "grok": "grok 1.0.5",
+    "opencode": "1.18.21",
     "jq": "jq-1.7",
 }
 
@@ -198,7 +200,12 @@ def register_echo_backend() -> None:
     register_backend("echo", EchoBackend)
 
 
-def _assert_subprocess_kwargs(kwargs: dict, cwd: Path) -> None:
+def _assert_subprocess_kwargs(
+    kwargs: dict,
+    cwd: Path,
+    expected_stdin: object = subprocess.DEVNULL,
+    expected_input: str | None = None,
+) -> None:
     """Every backend must run its subprocess the same disciplined way."""
     assert kwargs["cwd"] == str(cwd)
     assert kwargs["capture_output"] is True
@@ -210,7 +217,10 @@ def _assert_subprocess_kwargs(kwargs: dict, cwd: Path) -> None:
     # returns nothing after 25s and exits 124, and claude and grok are given
     # no chance to do the same. Asserted for every backend, in the one helper
     # every backend test already calls, so a new backend cannot skip it.
-    assert kwargs["stdin"] == subprocess.DEVNULL
+    if expected_input is None:
+        assert kwargs["stdin"] == expected_stdin
+    else:
+        assert kwargs["input"] == expected_input
 
 
 def _completed(returncode: int, stdout: str, stderr: str = "") -> Callable:
@@ -254,11 +264,22 @@ class TestAgentBackendInterface:
     def test_grok_name(self) -> None:
         assert GrokBackend().name == "grok"
 
+    def test_opencode_name(self) -> None:
+        assert OpenCodeBackend().name == "opencode"
+        assert "opencode" in list_backends()
+
     def test_backend_turn_errors_share_the_orchestrator_type(self) -> None:
         """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
         assert issubclass(ClaudeTurnError, TurnError)
         assert issubclass(CodexTurnError, TurnError)
         assert issubclass(GrokTurnError, TurnError)
+        assert issubclass(OpenCodeTurnError, TurnError)
+
+    def test_schema_enforcement_defaults_and_opencode_override(self) -> None:
+        assert ClaudeBackend.enforces_schema is True
+        assert CodexBackend.enforces_schema is True
+        assert GrokBackend.enforces_schema is True
+        assert OpenCodeBackend.enforces_schema is False
 
     def test_get_backend_resolves_grok(self) -> None:
         backend = get_backend("grok", model="grok-test", reasoning_effort="high")
@@ -1533,6 +1554,403 @@ class TestParseGrokStdout:
         assert parsed == {"sessionId": "s"}
 
 
+class TestOpenCodeRunTurn:
+    def test_fresh_turn_uses_exact_argv_and_verbatim_input(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        backend = OpenCodeBackend(model="provider/model", reasoning_effort="high")
+        prompt = '- leading "quote"\\path\nsecond line — café'
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "p1", "text": "done"},
+                    }
+                ),
+            ]
+        )
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("DEBUG", logger="backends.opencode"):
+            result = backend.run_turn(prompt, None, tmp_path)
+
+        assert calls[0][0] == [
+            "opencode",
+            "run",
+            "--format",
+            "json",
+            "--auto",
+            "--dir",
+            str(tmp_path),
+            "--model",
+            "provider/model",
+            "--variant",
+            "high",
+        ]
+        assert prompt not in calls[0][0]
+        _assert_subprocess_kwargs(
+            calls[0][1], tmp_path, expected_stdin=None, expected_input=prompt
+        )
+        assert result == TurnResult("s1", "done", stdout)
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"opencode turn: cwd={tmp_path} resume=False prompt_chars={len(prompt)} "
+            "timeout=3600s"
+        )
+        assert messages[1] == (
+            "opencode turn: invoking opencode run --format json --auto --dir "
+            f"{tmp_path} --model provider/model --variant high"
+        )
+        assert (
+            _reported_seconds(
+                messages[2],
+                rf"opencode turn: exited 0 after (\d+\.\d)s with {len(stdout)} "
+                rf"chars of stdout",
+            )
+            < 60
+        )
+        assert messages[3] == "opencode turn: parsed session=s1 parts=1 reply_chars=4"
+
+    def test_resumed_turn_adds_session_flag(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps({"type": "step-finish", "sessionID": "s1"})
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--auto",
+                "--dir",
+                str(tmp_path),
+                "--session",
+                "s1",
+            ]
+            _assert_subprocess_kwargs(
+                kwargs, tmp_path, expected_stdin=None, expected_input="again"
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with caplog.at_level("DEBUG", logger="backends.opencode"):
+            assert backend.run_turn("again", "s1", tmp_path).session_id == "s1"
+        assert _messages(caplog)[0] == (
+            f"opencode turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
+        )
+
+    def test_noisy_events_are_combined_and_structured_is_parsed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        reply = '{"verdict":"pass"}'
+        stdout = "\nnot json\n" + "\n".join(
+            [
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "a", "text": '{"verdict":'},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "b", "text": '"pass"}'},
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        result = backend.run_turn("x", None, tmp_path, schema=SCHEMA)
+        assert result.session_id == "s1"
+        assert result.reply == reply
+        assert result.raw == stdout
+        assert result.structured == {"verdict": "pass"}
+
+    def test_duplicate_parts_keep_last_text_in_first_seen_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        events = [
+            {"type": "text", "sessionID": "s1", "part": {"id": "a", "text": "old"}},
+            {"type": "text", "sessionID": "s1", "part": {"id": "b", "text": "two"}},
+            {"type": "text", "sessionID": "s1", "part": {"id": "a", "text": "new"}},
+        ]
+        stdout = "\n".join(json.dumps(event) for event in events)
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).reply == "newtwo"
+
+    @pytest.mark.parametrize("session_id", [None, "", " \t\n", 17])
+    def test_invalid_session_id_raises(
+        self,
+        session_id: object,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backend = OpenCodeBackend()
+        payload = {"type": "step-start"}
+        if session_id is not None:
+            payload["sessionID"] = session_id
+        stdout = json.dumps(payload)
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"opencode did not report a sessionID\nstdout: {stdout}\nstderr: "
+        )
+
+    def test_error_event_on_zero_exit_raises(self, tmp_path: Path, monkeypatch) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "error",
+                "sessionID": "s1",
+                "error": {"data": {"message": "bad request"}},
+            }
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error: bad request"
+
+    def test_nonzero_exit_prefers_data_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "error",
+                "sessionID": "s1",
+                "error": {"name": "ProviderError", "data": {"message": "auth failed"}},
+            }
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(2, stdout, "ignored"))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error: auth failed"
+
+    def test_error_detail_requires_string_message_before_using_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "error",
+                "sessionID": "s1",
+                "error": {
+                    "name": "ProviderError",
+                    "data": {"message": 17},
+                },
+            }
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(2, stdout))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error: ProviderError"
+
+    def test_error_detail_requires_string_name_before_using_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "error",
+                "sessionID": "s1",
+                "error": {"name": 17},
+            }
+        )
+        stderr = "stderr detail"
+        monkeypatch.setattr(subprocess, "run", _completed(2, stdout, stderr))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == f"opencode exited 2\nstderr: {stderr}"
+
+    def test_nonzero_exit_uses_last_error_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "error",
+                        "sessionID": "s1",
+                        "error": {"data": {"message": "old"}},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "error",
+                        "sessionID": "s1",
+                        "error": {"data": {"message": "latest"}},
+                    }
+                ),
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+            ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(2, stdout))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error: latest"
+
+    def test_nonzero_exit_uses_error_name_when_message_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "error",
+                "sessionID": "s1",
+                "error": {"name": "ProviderError", "data": {}},
+            }
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(2, stdout, "ignored"))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error: ProviderError"
+
+    def test_nonzero_exit_falls_back_to_stderr_tail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stderr = "s" * 2500
+        monkeypatch.setattr(subprocess, "run", _completed(3, "not json", stderr))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == f"opencode exited 3\nstderr: {stderr[-2000:]}"
+
+    def test_error_event_without_detail_on_zero_exit_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "error", "sessionID": "s1", "error": "bad"}),
+                json.dumps({"type": "error", "sessionID": "s1", "error": {}}),
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+            ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "opencode reported an error event"
+
+    def test_non_dict_and_empty_stream_events_are_ignored_or_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = '["progress"]\n{"type":"step-start","sessionID":"s1"}'
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).session_id == "s1"
+
+        monkeypatch.setattr(subprocess, "run", _completed(0, "not json"))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            "opencode did not report a sessionID\nstdout: not json\nstderr: "
+        )
+
+    def test_malformed_text_part_is_ignored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+                json.dumps({"type": "text", "sessionID": "s1", "part": None}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "a", "text": "one"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "missing"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "b", "text": "two"},
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).reply == "onetwo"
+
+    def test_missing_session_error_preserves_both_output_tails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = json.dumps({"type": "text"}) + "\n" + "o" * 2500
+        stderr = "e" * 2500
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout, stderr))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            "opencode did not report a sessionID\n"
+            f"stdout: {stdout[-2000:]}\nstderr: {stderr[-2000:]}"
+        )
+
+    def test_empty_event_stream_preserves_both_output_tails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "o" * 2500
+        stderr = "e" * 2500
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout, stderr))
+        with pytest.raises(OpenCodeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            "opencode did not report a sessionID\n"
+            f"stdout: {stdout[-2000:]}\nstderr: {stderr[-2000:]}"
+        )
+
+    def test_no_schema_does_not_parse_json_reply_into_structured_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "step-start", "sessionID": "s1"}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "p1", "text": "{}"},
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).structured is None
+
+
 class TestReplyText:
     def test_returns_the_string(self) -> None:
         assert reply_text({"text": "hi"}, "text") == "hi"
@@ -1567,7 +1985,7 @@ class TestJsonObjects:
 
 
 class TestStructuredReply:
-    """The one place three CLIs' envelopes turn into one object."""
+    """The one place backend envelopes turn into one object."""
 
     def test_no_schema_means_no_object_however_json_the_reply_is(self) -> None:
         assert structured_reply(None, '{"a":1}', {"a": 1}) is None
@@ -1590,6 +2008,71 @@ class TestStructuredReply:
 
 
 class TestOrchestrator:
+    def test_validated_opencode_turn_warns_once_about_cli_schema_enforcement(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class AdvisoryBackend(AgentBackend):
+            name = "advisory"
+            enforces_schema = False
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                return TurnResult(
+                    session_id="s1",
+                    reply="{}",
+                    raw="",
+                    structured={},
+                )
+
+        register_backend("advisory", AdvisoryBackend)
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch.spawn("agent", "advisory")
+
+        with caplog.at_level(logging.WARNING, logger="orchestrator"):
+            result = orch.talk("agent", "hello", schema=SCHEMA, retries=0)
+
+        assert result.structured == {}
+        assert _messages(caplog) == [
+            "backend advisory: schema is enforced via validation/repair, not the CLI"
+        ]
+
+    def test_schema_warning_is_absent_without_schema_or_for_enforcing_backend(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        class EnforcingBackend(AgentBackend):
+            name = "enforcing"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                return TurnResult(
+                    session_id="s1",
+                    reply="{}",
+                    raw="",
+                    structured={},
+                )
+
+        register_backend("enforcing", EnforcingBackend)
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch.spawn("echo", "enforcing")
+
+        with caplog.at_level(logging.WARNING, logger="orchestrator"):
+            orch.talk("echo", "plain")
+            orch.talk("echo", "structured", schema=SCHEMA, retries=0)
+
+        assert _messages(caplog) == []
+
     def test_spawn_talk_persists_and_resumes(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
         seen_session_ids: list[str | None] = []
@@ -2485,6 +2968,7 @@ class TestCLI:
             "\u2713 claude 2.1.234 (Claude Code)\n"
             "\u2713 codex-cli 0.147.0\n"
             "\u2713 grok 1.0.5\n"
+            "\u2713 opencode 1.18.21\n"
             "\u25cb jq 1.7 (optional)\n"
         )
         assert captured.err == ""
@@ -2499,6 +2983,7 @@ class TestCLI:
             ["claude", "--version"],
             ["codex", "--version"],
             ["grok", "--version"],
+            ["opencode", "--version"],
             ["jq", "--version"],
         ]
         assert capsys.readouterr().err == ""
@@ -2516,6 +3001,7 @@ class TestCLI:
             "\u2717 claude (not found)\n"
             "\u2717 codex (not found)\n"
             "\u2717 grok (not found)\n"
+            "\u2717 opencode (not found)\n"
             "\u25cb jq 1.7 (optional)\n"
         )
         assert captured.err == ""
@@ -2532,6 +3018,7 @@ class TestCLI:
             "\u2717 claude (not found)\n"
             "\u2717 codex (not found)\n"
             "\u2717 grok (not found)\n"
+            "\u2717 opencode (not found)\n"
             "\u2717 jq (not found, optional)\n"
         )
         assert captured.err == ""
@@ -2551,6 +3038,7 @@ class TestCLI:
             "\u2713 claude 2.1.234 (Claude Code)\n"
             "\u2713 codex-cli 0.147.0\n"
             "\u2713 grok 1.0.5\n"
+            "\u2713 opencode 1.18.21\n"
             "\u2717 jq (not found, optional)\n"
         )
         assert captured.err == ""
@@ -2568,6 +3056,7 @@ class TestCLI:
             "\u2717 claude (not found)\n"
             "\u2717 codex (not found)\n"
             "\u2717 grok (not found)\n"
+            "\u2717 opencode (not found)\n"
             "\u25cb jq (version unknown, optional)\n"
         )
         assert captured.err == ""
@@ -2609,6 +3098,7 @@ class TestCLI:
             "\u2713 claude (version unknown)\n"
             "\u2713 codex (version unknown)\n"
             "\u2713 grok (version unknown)\n"
+            "\u2713 opencode (version unknown)\n"
             "\u25cb jq (version unknown, optional)\n"
         )
         assert captured.err == ""
@@ -2676,6 +3166,7 @@ class TestCLI:
             ("claude", False),
             ("codex", False),
             ("grok", False),
+            ("opencode", False),
             ("jq", True),
         )
 

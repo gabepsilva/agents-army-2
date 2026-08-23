@@ -288,7 +288,7 @@ def test_workflow_config_reports_missing_private_key_file(tmp_path: Path) -> Non
                     for role in REQUIRED_ROLES
                 }
             },
-            "claude, codex, grok",
+            "claude, codex, grok, opencode",
         ),
         (
             {
@@ -1939,6 +1939,9 @@ def test_positive_parser_and_main_success_and_failure(
     with pytest.raises(Exception, match="expected 1 or more"):
         gdw._positive("0")
     assert gdw._parser().parse_args(["4", "--ready"]).ready is True
+    assert gdw._parser().parse_args(["4", "--backend", "opencode"]).backend == (
+        "opencode"
+    )
 
     class MainGitHub(FakeGitHub):
         def __init__(self, _root: Path, _repo: str | None) -> None:
@@ -1985,6 +1988,14 @@ def test_positive_parser_and_main_success_and_failure(
     MainWorkflow.should_fail = True
     assert gdw.main(["4", "--base", "trunk"]) == 1
     assert "workflow stopped: halt" in capsys.readouterr().err
+
+
+def test_role_config_accepts_opencode() -> None:
+    config = RoleConfig(
+        backend=" OpenCode ",
+        github_app={"app_id": 1, "private_key": "key"},
+    )
+    assert config.backend == "opencode"
 
 
 def test_prepare_simple_workflow_checks_tools_and_builds_services(
