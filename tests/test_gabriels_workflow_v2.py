@@ -14,12 +14,6 @@ from typing import Any, cast
 import pytest
 import yaml
 
-from examples.gabriels_workflow.development_workflow import (
-    CommandResult,
-    GateResult,
-    WorkflowError,
-    WorkflowStopped,
-)
 from examples.gabriels_workflow_v2 import cli, setup
 from examples.gabriels_workflow_v2.config import (
     AGENT_ROLES,
@@ -35,6 +29,8 @@ from examples.gabriels_workflow_v2.contracts import (
     digest,
     validate_handoff,
 )
+from examples.gabriels_workflow_v2.errors import WorkflowError, WorkflowStopped
+from examples.gabriels_workflow_v2.gates import CommandResult, GateResult
 from examples.gabriels_workflow_v2.publisher import GitHubPublisher
 from examples.gabriels_workflow_v2.workflow import (
     DevelopmentWorkflowV2,
@@ -42,6 +38,7 @@ from examples.gabriels_workflow_v2.workflow import (
     RelayRepository,
     WorkflowOptions,
     WorkflowServices,
+    _shorten_home,
 )
 from orchestrator.schema import load_schema, validate_reply
 
@@ -572,9 +569,9 @@ def test_publisher_opens_a_pull_request_only_when_the_branch_has_none() -> None:
     ]
 
 
-def test_publisher_markers_do_not_collide_with_v1_comments() -> None:
+def test_publisher_markers_do_not_collide_with_older_gdw_comments() -> None:
     comments = [
-        SimpleNamespace(body="<!-- gdw:7:summary -->\nV1 stage comment"),
+        SimpleNamespace(body="<!-- gdw:7:summary -->\nolder stage comment"),
         SimpleNamespace(body="<!-- gdw-v2:7:specification -->\nV2 milestone"),
     ]
     posted: list[str] = []
@@ -595,7 +592,7 @@ def test_publisher_markers_do_not_collide_with_v1_comments() -> None:
     assert posted[0].startswith("<!-- gdw-v2:7:final-summary -->\n## GDW V2 — ")
 
 
-def test_publisher_builds_one_check_run_per_stage_with_v1_footer_fields() -> None:
+def test_publisher_builds_one_check_run_per_stage_with_attribution_fields() -> None:
     created: list[dict[str, Any]] = []
     repository = SimpleNamespace(
         create_check_run=lambda **kwargs: created.append(kwargs)
@@ -1135,7 +1132,7 @@ def test_relay_gateway_keeps_the_prompt_budget_it_was_built_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "examples.gabriels_workflow.development_workflow._require_bwrap",
+        "examples.gabriels_workflow_v2.gateway._require_bwrap",
         lambda: "/usr/bin/bwrap",
     )
 
@@ -1396,3 +1393,22 @@ def test_gate_digest_names_the_failing_gates() -> None:
     assert _gate_digest(green) == "1/1 gates passed"
     assert _gate_digest(red) == "1/2 gates passed; failed: types"
     assert _gate_digest({"returncode": 2, "gates": []}) == "make ci exited 2"
+
+
+def test_shorten_home_resolves_home_boundaries_and_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+
+    target = home / "resolved" / "worktree"
+    target.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    outside = tmp_path / "outside" / "worktree"
+
+    assert _shorten_home(home) == "~"
+    assert _shorten_home(home / "project" / "worktree") == "~/project/worktree"
+    assert _shorten_home(link) == "~/resolved/worktree"
+    assert _shorten_home(outside) == str(outside.resolve())

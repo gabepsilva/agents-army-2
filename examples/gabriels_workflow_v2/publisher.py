@@ -7,8 +7,8 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from examples.gabriels_workflow.development_workflow import WorkflowError
-from examples.gabriels_workflow.github_app_client import GitHubAppClient
+from examples.gabriels_workflow_v2.errors import WorkflowError
+from examples.gabriels_workflow_v2.github_app import GitHubAppClient
 
 LOGGER = logging.getLogger("gdw-v2")
 CHECK_CONCLUSIONS = frozenset({"success", "failure", "neutral"})
@@ -17,10 +17,10 @@ CHECK_CONCLUSIONS = frozenset({"success", "failure", "neutral"})
 class GitHubPublisher(GitHubAppClient):
     """Publish summaries without using GitHub comments as execution state.
 
-    V2 keeps its execution state in the local checkpoint store, so GitHub
-    carries only milestones. Its own marker prefix keeps those milestones
-    from being read as V1 stage comments, and keeps a V1 run on the same
-    issue from suppressing them.
+    Execution state lives in the local checkpoint store, so GitHub carries
+    only milestones. The `gdw-v2` marker prefix keeps those milestones apart
+    from the plain `gdw:` markers an older driver left on the issues it ran,
+    so neither adopts nor suppresses the other's comments.
     """
 
     marker_prefix = "gdw-v2"

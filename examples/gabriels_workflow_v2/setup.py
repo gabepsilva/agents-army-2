@@ -6,9 +6,9 @@ import shutil
 from pathlib import Path
 from typing import cast
 
-from examples.gabriels_workflow.development_workflow import LOGGER, WorkflowError
 from examples.gabriels_workflow_v2.config import WorkflowConfig
 from examples.gabriels_workflow_v2.contracts import CheckpointStore
+from examples.gabriels_workflow_v2.errors import LOGGER, WorkflowError
 from examples.gabriels_workflow_v2.publisher import GitHubPublisher
 from examples.gabriels_workflow_v2.workflow import (
     DevelopmentWorkflowV2,

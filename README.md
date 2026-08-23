@@ -18,7 +18,7 @@ session every time.
 - For the Gabriel's Development Workflow example: Linux and
   [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`) on `PATH`
   with unprivileged user namespaces enabled (see
-  `examples/gabriels_workflow/README.md` Sandboxing and `docs/security.md`)
+  `examples/gabriels_workflow_v2/README.md` Sandboxing and `docs/security.md`)
 
 ## Setup
 
@@ -308,25 +308,22 @@ tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-
 
 ## End-to-end workflow example
 
-[`examples/gabriels_workflow/simple_development_workflow.py`](examples/gabriels_workflow/simple_development_workflow.py)
+[`examples/gabriels_workflow_v2/`](examples/gabriels_workflow_v2/README.md)
 shows how to compose persistent agents, prompts, and strict structured replies
-into a resumable raw-issue-to-PR workflow. The Python driver owns `gh`, full CI, git
-publication, and control flow; agents focus on repository reasoning and code.
-Its prompts, response schemas, security boundary, and invocation are documented
-in [`examples/gabriels_workflow/README.md`](examples/gabriels_workflow/README.md).
+into a resumable raw-issue-to-PR workflow. The Python driver owns `gh`, full CI,
+git publication, and control flow; agents focus on repository reasoning and
+code. Eight roles run as a driver-mediated relay: execution state lives in a
+local, hash-checked checkpoint store; each agent receives a compact handoff from
+the stage before it alongside the canonical artifact it depends on; every loop
+is bounded by an explicit budget; and GitHub receives two milestone comments
+rather than a comment per stage. Its prompts, response schemas, security
+boundary, and invocation are documented in that README.
 
 > **Sandboxing:** the workflow's `AgentGateway` wraps every `orchestrator talk`
 > turn in a `bwrap` sandbox (Linux + `bubblewrap` required, fail-closed if
 > missing). See that README's Sandboxing section and [`docs/security.md`](docs/security.md)
 > for what is isolated, what stays visible read-only, and the current network
 > posture (credential/socket/path descope only).
-
-[`examples/gabriels_workflow_v2/`](examples/gabriels_workflow_v2/README.md) runs
-the same eight roles as a driver-mediated relay instead. Execution state lives in
-a local, hash-checked checkpoint store; each agent receives a compact handoff from
-the stage before it alongside the canonical artifact it depends on; every loop is
-bounded by an explicit budget; and GitHub receives two milestone comments rather
-than a comment per stage.
 
 ## Quality gates
 

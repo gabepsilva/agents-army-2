@@ -25,7 +25,6 @@ agent_runs/
 orchestrator_state.json
 orchestrator_state.json*.lock
 orchestrator_state.json.tmp
-examples/gabriels_workflow/workflow.local
 examples/gabriels_workflow_v2/workflow.local
 
 # Editor

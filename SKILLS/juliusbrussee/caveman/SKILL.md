@@ -19,7 +19,7 @@ Adapted for this repo, in four ways:
    Compressing them would damage the work rather than save tokens.
 
 2. **Schema-aware.** Every stage that carries this skill is `--schema`
-   validated (`examples/gabriels_workflow/validations/`). The rules below name
+   validated (`examples/gabriels_workflow_v2/validations/`). The rules below name
    which fields may be compressed and which are exempt; upstream has no
    notion of a structured reply.
 
@@ -32,7 +32,7 @@ Adapted for this repo, in four ways:
    are read by a human.
 
 Attached via `--skill` to four stages in
-`examples/gabriels_workflow/development_workflow.py`: `implementation`,
+`examples/gabriels_workflow_v2/workflow.py`: `implementation`,
 `documentation`, `repair-*`, and `review-repair-*`. Those are the stages whose
 reply is a report on work already done. It is deliberately NOT attached to
 `expansion`, `grill`, `specification`, or either review — those replies are

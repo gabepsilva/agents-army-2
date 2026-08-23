@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.gabriels_workflow import development_workflow as gdw
+from examples.gabriels_workflow_v2 import gateway as gdw
 
 pytestmark = [
     pytest.mark.skipif(

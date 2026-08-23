@@ -21,7 +21,7 @@ import tools.mutation_cache as mutation_cache
 import tools.mutation_gate as mutation_gate
 import tools.ratchet_gate as ratchet_gate
 import tools.test_integrity as test_integrity
-from examples.gabriels_workflow import development_workflow as gdw
+from examples.gabriels_workflow_v2 import gates
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -953,4 +953,4 @@ class TestCiGateAnnouncements:
             timeout=30,
         ).stdout
 
-        assert gdw.GATE_ANNOUNCE.findall(printed) == ["lint"]
+        assert gates.GATE_ANNOUNCE.findall(printed) == ["lint"]

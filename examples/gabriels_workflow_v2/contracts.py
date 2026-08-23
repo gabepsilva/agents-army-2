@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from examples.gabriels_workflow.development_workflow import WorkflowError
+from examples.gabriels_workflow_v2.errors import WorkflowError
 
 FORMAT_VERSION = 1
 HANDOFF_FIELDS = frozenset(

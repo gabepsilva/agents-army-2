@@ -3,16 +3,14 @@
 Agent turns in the Gabriel's Development Workflow (GDW) example driver run
 inside a [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`)
 sandbox. Only the single `orchestrator talk ...` call made by
-`AgentGateway.ask` in `examples/gabriels_workflow/development_workflow.py` is
-wrapped. The `orchestrator` package itself stays sandbox-agnostic, and the
-driver's own GitHub, git, and `make ci` calls run unsandboxed.
+`AgentGateway.ask` in `examples/gabriels_workflow_v2/gateway.py` is wrapped.
+The `orchestrator` package itself stays sandbox-agnostic, and the driver's own
+GitHub, git, and `make ci` calls run unsandboxed.
 
-The V2 driver (`examples/gabriels_workflow_v2/`) reuses this same gateway, so
-everything below applies to it unchanged. What V2 adds is upstream of the
-sandbox: each agent's reply is schema-validated and every prompt presents its
-context inside `<untrusted_context_json>`, because a V2 handoff is written by
-the previous agent and is data for the next one to evaluate, never
-instructions for it to follow.
+What the driver adds is upstream of the sandbox: each agent's reply is
+schema-validated and every prompt presents its context inside
+`<untrusted_context_json>`, because a handoff is written by the previous agent
+and is data for the next one to evaluate, never instructions for it to follow.
 
 ## What is isolated
 
