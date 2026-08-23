@@ -367,6 +367,7 @@ class DevelopmentWorkflowV2:
 
     def _clarify(self, issue: dict[str, Any]) -> dict[str, Any]:
         previous: str | None = None
+        outstanding: list[str] = []
         expansion: dict[str, Any] | None = None
         grill: dict[str, Any] | None = None
         for round_number in range(1, self.budgets.max_clarification_rounds + 1):
@@ -406,6 +407,13 @@ class DevelopmentWorkflowV2:
             )
             if grill["verdict"] == "reject":
                 raise WorkflowStopped(str(grill["summary"]))
+            if grill["verdict"] == "escalate":
+                if not grill["questions"]:
+                    raise WorkflowError("griller escalated without questions")
+                raise self._escalate(
+                    f"clarification escalated: {grill['summary']}",
+                    grill["questions"],
+                )
             if (
                 grill["verdict"] == "ready"
                 and not grill["needs_another_round"]
@@ -421,9 +429,60 @@ class DevelopmentWorkflowV2:
             if unresolved == previous:
                 raise WorkflowStopped("clarification stalled")
             previous = unresolved
-        raise WorkflowStopped(
-            f"clarification exceeded {self.budgets.max_clarification_rounds} rounds"
+            outstanding = grill["questions"] or grill["handoff"]["open_questions"]
+        raise self._escalate(
+            f"clarification exceeded {self.budgets.max_clarification_rounds} rounds",
+            outstanding,
         )
+
+    def _escalate(self, reason: str, questions: Sequence[str]) -> WorkflowStopped:
+        """Stop by asking the human the outstanding questions, not by deciding them.
+
+        The griller used to have no exit for a question of authority. `reject`
+        abandons the proposal and `ready` decides, so a round budget closing in
+        on "may this issue's stated scope be narrowed?" put all the pressure on
+        `ready`: a real run cleared its own open question and shipped work the
+        issue had not asked for. The questions are published as a milestone
+        comment because the issue is the one channel a human already reads and
+        the only place an answer can be written that the next run will see.
+        Exhausting the round budget surfaces the last round's questions the
+        same way, since that is the other exit where they would otherwise die
+        in a stop message.
+
+        The comment is keyed by the questions themselves, so re-running without
+        answering re-posts nothing while a genuinely different question is
+        still asked. Discarding the issue snapshot and the clarification
+        checkpoints is what makes the next run a resume rather than a
+        stale-checkpoint failure: an answer only reaches an agent by being read
+        back off the issue, and every checkpoint recorded against the text that
+        predates it would fail its input hash. Nothing after clarification has
+        run, so nothing after clarification is disturbed.
+
+        Returned rather than raised so both stop paths keep their `raise` where
+        a reader of `_clarify` looks for it.
+        """
+
+        asked = list(questions)
+        self._publish_milestone(
+            f"clarification-escalation-{digest(asked)[:12]}",
+            self.issue_number,
+            "Clarification needs a human decision",
+            {
+                "reason": reason,
+                "questions": asked,
+                "how_to_answer": (
+                    "Answer on this issue, then re-run the workflow for it. "
+                    "Clarification restarts from the re-read issue; no later "
+                    "stage has run."
+                ),
+            },
+        )
+        self.store.discard_for_new_issue(
+            key
+            for round_number in range(1, self.budgets.max_clarification_rounds + 1)
+            for key in (f"expansion-{round_number}", f"grill-{round_number}")
+        )
+        return WorkflowStopped(reason)
 
     def _specify(
         self, issue: dict[str, Any], proposal: dict[str, Any]
@@ -738,13 +797,37 @@ class DevelopmentWorkflowV2:
         ci: dict[str, Any],
         reviews: dict[str, Any],
     ) -> str:
+        """Assemble the pull-request body, including what the specifier cut.
+
+        Only `specifier_reduction` entries are rendered. An `issue_declared`
+        exclusion is already written on the issue this body links to, so
+        repeating it here would bury the entries that exist nowhere a human
+        reads — the scope the specifier decided on its own to drop. Issue #66
+        shipped two such invented deferrals, one of them contradicting a stated
+        acceptance criterion, past two approving reviewers precisely because
+        the body rendered the criteria and nothing about what had been dropped.
+
+        The section is omitted when there was no reduction rather than
+        rendered empty, so a reader learns nothing from its absence and
+        everything from its presence.
+        """
+
         criteria = "\n".join(
             f"- {item}" for item in specification["acceptance_criteria"]
+        )
+        reductions = "\n".join(
+            f"- {entry['item']} - {entry['justification']}"
+            for entry in specification["out_of_scope"]
+            if entry["source"] == "specifier_reduction"
+        )
+        cut = (
+            f"## Scope the specifier deferred\n\n{reductions}\n\n" if reductions else ""
         )
         return (
             f"Closes #{self.issue_number}\n\n"
             f"## Solution\n\n{specification['solution']}\n\n"
             f"## Acceptance criteria\n\n{criteria}\n\n"
+            f"{cut}"
             f"## Implementation\n\n{implementation['handoff']['summary']}\n\n"
             f"## Documentation\n\n{documentation['handoff']['summary']}\n\n"
             f"## Validation\n\nFull CI passed with {len(ci.get('gates', []))} reported "

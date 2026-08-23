@@ -60,7 +60,31 @@ Two comments, both driver-authored from validated schema fields:
 2. **Final implementation summary** on the pull request, after publication.
 
 Plus the pull request itself, whose body is assembled from the specification,
-the two work summaries, and the CI and review verdicts.
+the two work summaries, the CI and review verdicts, and any scope the specifier
+deferred.
+
+### Scope, and who narrowed it
+
+From `_specify` onward the specification is ground truth, so a bullet the
+specifier drops is indistinguishable downstream from work the issue never
+asked for. Every `out_of_scope` entry therefore carries its own provenance:
+
+```json
+{
+  "item": "no scheduling of prune into the Makefile target",
+  "source": "specifier_reduction",
+  "justification": "wiring is a follow-up the issue did not ask for"
+}
+```
+
+`source` is `issue_declared` only when the issue's own text excludes the item,
+and the justification quotes that text. Anything the specifier decides to drop
+or defer is a `specifier_reduction` and must say why. The pull-request body
+renders the reductions under **Scope the specifier deferred** — and only the
+reductions, since an `issue_declared` entry is already written on the issue the
+body links to. The section is omitted when there are none, so its presence is
+itself the signal. The specification reviewer audits the same field against the
+canonical issue.
 
 ### Seeing which agents ran
 

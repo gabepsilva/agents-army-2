@@ -89,7 +89,13 @@ def _specification() -> dict[str, Any]:
         "implementation_decisions": ["use local checkpoints"],
         "testing_decisions": ["exercise resume behavior"],
         "acceptance_criteria": ["all eight roles run once"],
-        "out_of_scope": ["remove roles"],
+        "out_of_scope": [
+            {
+                "item": "remove roles",
+                "source": "issue_declared",
+                "justification": "the issue excludes role changes",
+            }
+        ],
         "handoff": _handoff("specification handoff"),
     }
 

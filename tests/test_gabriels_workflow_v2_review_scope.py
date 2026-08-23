@@ -87,7 +87,13 @@ def test_specification_reviewer_is_given_the_issue_it_must_audit_against(
     assert context["canonical_issue"] == issue
     assert "removed without manual intervention" in context["canonical_issue"]["body"]
     assert "Changing the checkpoint format" in context["canonical_issue"]["body"]
-    assert context["canonical_specification"]["out_of_scope"] == ["remove roles"]
+    assert context["canonical_specification"]["out_of_scope"] == [
+        {
+            "item": "remove roles",
+            "source": "issue_declared",
+            "justification": "the issue excludes role changes",
+        }
+    ]
 
 
 def test_specification_review_checkpoint_is_bound_to_the_issue_it_saw(
