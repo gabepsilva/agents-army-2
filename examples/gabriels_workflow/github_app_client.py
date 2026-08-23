@@ -8,6 +8,11 @@ from typing import Any
 from github import Auth, Github, GithubIntegration
 from github.Repository import Repository
 
+from examples.gabriels_workflow.development_workflow import (
+    WorkflowError,
+    _pull_request_number,
+)
+
 LOGGER = logging.getLogger("gdw")
 
 
@@ -147,6 +152,123 @@ class GitHubAppClient:
     def update_pr(self, number: int, *, body: str) -> None:
         LOGGER.info("github-app: updating pull request #%s", number)
         self.repository.get_pull(number).edit(body=body)
+
+    def pull_request_context(self, number: int) -> dict[str, Any]:
+        try:
+            issue = self.repository.get_issue(number)
+            pull = self.repository.get_pull(number)
+            if (
+                isinstance(issue.number, bool)
+                or not isinstance(issue.number, int)
+                or issue.number != number
+            ):
+                raise WorkflowError(
+                    f"GitHub returned pull-request identity that does not match #{number}"
+                )
+            title = self._text(issue.title, "pull-request title")
+            if not title:
+                raise WorkflowError("GitHub returned an empty pull-request title")
+            url = self._text(pull.html_url, "pull-request URL")
+            if not url or _pull_request_number(url) != number:
+                raise WorkflowError(
+                    f"GitHub returned pull-request identity that does not match #{number}"
+                )
+            comments = [
+                self._comment_context(comment) for comment in issue.get_comments()
+            ]
+            reviews = [self._review_context(review) for review in pull.get_reviews()]
+            review_comments = [
+                self._review_comment_context(comment)
+                for comment in pull.get_review_comments()
+            ]
+            return {
+                "number": issue.number,
+                "title": title,
+                "body": self._text(issue.body, "pull-request body", allow_none=True),
+                "url": url,
+                "comments": comments,
+                "reviews": reviews,
+                "review_comments": review_comments,
+            }
+        except Exception as exc:
+            raise WorkflowError(
+                f"cannot read pull-request context #{number}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _author(value: object) -> object:
+        if value is None:
+            return None
+        login = getattr(value, "login", None)
+        if not isinstance(login, str):
+            raise WorkflowError("GitHub returned an invalid pull-request author")
+        return login
+
+    @staticmethod
+    def _text(value: object, field: str, *, allow_none: bool = False) -> str:
+        if value is None and allow_none:
+            return ""
+        if not isinstance(value, str):
+            raise WorkflowError(f"GitHub returned an invalid {field}")
+        return value
+
+    @classmethod
+    def _timestamp(cls, value: object, field: str) -> str:
+        isoformat = getattr(value, "isoformat", None)
+        if not callable(isoformat):
+            raise WorkflowError(f"GitHub returned an invalid {field}")
+        timestamp = isoformat()
+        if not isinstance(timestamp, str) or not timestamp:
+            raise WorkflowError(f"GitHub returned an invalid {field}")
+        return timestamp
+
+    @staticmethod
+    def _line(value: object) -> int | None:
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise WorkflowError("GitHub returned an invalid review comment line")
+
+    @classmethod
+    def _comment_context(cls, comment: object) -> dict[str, Any]:
+        return {
+            "author": cls._author(getattr(comment, "user", None)),
+            "body": cls._text(
+                getattr(comment, "body", None), "comment body", allow_none=True
+            ),
+            "createdAt": cls._timestamp(
+                getattr(comment, "created_at", None), "comment timestamp"
+            ),
+            "url": cls._text(getattr(comment, "html_url", None), "comment URL"),
+        }
+
+    @classmethod
+    def _review_context(cls, review: object) -> dict[str, Any]:
+        return {
+            "author": cls._author(getattr(review, "user", None)),
+            "state": cls._text(getattr(review, "state", None), "review state"),
+            "body": cls._text(
+                getattr(review, "body", None), "review body", allow_none=True
+            ),
+            "submittedAt": cls._timestamp(
+                getattr(review, "submitted_at", None), "review timestamp"
+            ),
+            "url": cls._text(getattr(review, "html_url", None), "review URL"),
+        }
+
+    @classmethod
+    def _review_comment_context(cls, comment: object) -> dict[str, Any]:
+        return {
+            "author": cls._author(getattr(comment, "user", None)),
+            "body": cls._text(
+                getattr(comment, "body", None), "review comment body", allow_none=True
+            ),
+            "path": cls._text(getattr(comment, "path", None), "review comment path"),
+            "line": cls._line(getattr(comment, "line", None)),
+            "createdAt": cls._timestamp(
+                getattr(comment, "created_at", None), "review comment timestamp"
+            ),
+            "url": cls._text(getattr(comment, "html_url", None), "review comment URL"),
+        }
 
     def close(self) -> None:
         if self.github is not None:

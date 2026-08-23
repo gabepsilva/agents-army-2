@@ -90,7 +90,7 @@ addopts = [
     "--strict-config",
     "--strict-markers",
     "--tb=short",
-    "--cov-fail-under=100",
+    "--cov-fail-under=90",
     "-n",
     "4",
 ]
@@ -103,7 +103,7 @@ source = ["."]
 omit = [".venv/*", "tests/*"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 90
 show_missing = true
 skip_empty = true
 

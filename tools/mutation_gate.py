@@ -7,7 +7,9 @@ surviving mutant is a change no assertion detected. That is the one signal a
 test written only to pass cannot fake, so it is a merge gate rather than a
 report.
 
-Raise MUTATION_SCORE_FLOOR as survivors are killed. Never lower it.
+The 98% floor is a fixed high-confidence threshold, not a target to ratchet to
+100%. Equivalent and unobservable mutants should remain documented rather
+than generating implementation-coupled tests.
 
 Recorded 2026-08-20 at 1461/1479 (98.8%), after --validate-schema landed. The
 survivors are equivalent mutants — they cannot change behavior, so no test can

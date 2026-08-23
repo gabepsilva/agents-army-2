@@ -315,11 +315,17 @@ in [`examples/gabriels_workflow/README.md`](examples/gabriels_workflow/README.md
 
 This project is developed mainly by AI agents, so its checks are
 deterministic and self-enforcing rather than left to review. `make ci` is
-the full gate: lint, format, types, coverage floor, mutation testing,
+the full gate: lint, format, types, risk-based branch coverage, mutation testing,
 static security scanning (Bandit, Semgrep, pip-audit), and secret scanning
 (Gitleaks). `make hooks` wires it into git so `make verify` runs on every
 commit and `make ci` runs on every push. See [AGENTS.md](AGENTS.md) for the
 rules behind the gates.
+
+Coverage is deliberately not a 100% quota: core orchestration and backend
+adapters require 95%, the example workflow requires 90%, supporting gate
+utilities require 80%, and changed lines require 90%. The mutation gate stays
+at a fixed 98% floor so assertions must detect corrupted core behavior without
+rewarding tests coupled only to implementation details.
 
 ```sh
 make hooks   # install the pre-commit/pre-push gate (run once per clone)

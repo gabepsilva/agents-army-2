@@ -67,6 +67,11 @@ switching backends mid-conversation. New backends plug in by subclassing
 This project is developed mainly by AI agents, so its checks are
 deterministic and self-enforcing rather than left to review.
 
+Branch coverage is risk-based rather than a 100% quota: core orchestration and
+backend adapters require 95%, the example workflow requires 90%, supporting
+gate utilities require 80%, and changed lines require 90%. Mutation testing
+holds core behavior to a fixed 98% floor.
+
 ```sh
 make hooks   # install the pre-commit/pre-push gate (run once per clone)
 make verify  # lint, types, tests, coverage, mutation — the local gate

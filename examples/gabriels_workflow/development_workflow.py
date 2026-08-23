@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import NoReturn, Protocol, cast
 
 GITHUB_TOKEN_NAMES = (
     "GH_TOKEN",
@@ -32,6 +32,22 @@ GITHUB_TOKEN_NAMES = (
     "GITHUB_APP_PRIVATE_KEY",
 )
 CI_EVIDENCE_CHARS = 20_000
+CONTEXT_BODY_CHARS = 20_000
+CONTEXT_RECORD_CHARS = 3_000
+CONTEXT_ISSUE_COMMENTS = 20
+CONTEXT_PR_ITEMS = 40
+ARTIFACT_BUNDLE_CHARS = 200_000
+FINALIZATION_FIELDS = (
+    "status",
+    "blockers",
+    "summary",
+    "agreements",
+    "disagreements",
+    "feedback_considered",
+    "implementation_errors",
+    "fixes_applied",
+    "opportunities_to_improve",
+)
 # `{{EXPANSION_JSON}}` in a prompt template. Deliberately narrow: a prompt
 # names its placeholders in upper case, so braces around anything else are
 # text — the kind of text an agent writes when it quotes code back.
@@ -75,6 +91,7 @@ AGENT_ROLES = frozenset(
         "documenter",
         "reviewer-specification",
         "reviewer-quality",
+        "finalizer",
     }
 )
 # Clarification and the specification stay on the issue. Once that
@@ -183,6 +200,8 @@ class GitHubService(Protocol):
     ) -> str: ...
 
     def update_pr(self, number: int, *, body: str) -> None: ...
+
+    def pull_request_context(self, number: int) -> dict: ...
 
 
 class RepositoryService(Protocol):
@@ -410,6 +429,46 @@ def _bounded(text: str, limit: int = CI_EVIDENCE_CHARS) -> str:
     return f"… output truncated …\n{text[-limit:]}"
 
 
+def _bounded_context_text(value: object, limit: int) -> object:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    marker = "...[truncated]"
+    return value[: max(0, limit - len(marker))] + marker
+
+
+def _bounded_record(record: object) -> dict:
+    if not isinstance(record, Mapping):
+        raise WorkflowError("GitHub returned a collection with an invalid record")
+    bounded = dict(record)
+    for key in ("body", "comment"):
+        if key in bounded:
+            bounded[key] = _bounded_context_text(bounded[key], CONTEXT_RECORD_CHARS)
+    return bounded
+
+
+def _chronological(records: object, timestamp_key: str) -> list[Mapping[str, object]]:
+    if not isinstance(records, list):
+        raise WorkflowError("GitHub returned a collection that was not an array")
+    if not all(isinstance(record, Mapping) for record in records):
+        raise WorkflowError("GitHub returned a collection with an invalid record")
+    normalized = [cast(Mapping[str, object], record) for record in records]
+    indexed = list(enumerate(normalized))
+    indexed.sort(
+        key=lambda pair: (
+            str(pair[1].get(timestamp_key, "")),
+            pair[0],
+        )
+    )
+    return [record for _index, record in indexed]
+
+
+def _bounded_latest(records: object, timestamp_key: str, limit: int) -> list[dict]:
+    return [
+        _bounded_record(record)
+        for record in _chronological(records, timestamp_key)[-limit:]
+    ]
+
+
 def _markdown_label(value: object) -> str:
     return str(value).replace("_", " ").strip().title()
 
@@ -559,6 +618,8 @@ class ArtifactStore:
                 "pr_url": None,
                 "pr_number": None,
                 "development_pr_url": None,
+                "publication_complete": False,
+                "finalization_comment_posted": False,
             },
         )
 
@@ -579,6 +640,17 @@ class ArtifactStore:
 
     def record_pr(self, url: str) -> None:
         metadata = self.metadata
+        metadata["pr_url"] = url
+        self._write(self.metadata_path, metadata)
+
+    def record_publication_complete(self) -> None:
+        metadata = self.metadata
+        metadata["publication_complete"] = True
+        self._write(self.metadata_path, metadata)
+
+    def record_finalization_complete(self, url: str) -> None:
+        metadata = self.metadata
+        metadata["finalization_comment_posted"] = True
         metadata["pr_url"] = url
         self._write(self.metadata_path, metadata)
 
@@ -881,18 +953,167 @@ class GitHub:
         LOGGER.info("github: updating pull request #%s", number)
         self._body_call(body, "pr", "edit", str(number), "--body-file")
 
+    def pull_request_context(self, number: int) -> dict:
+        payload = self._json_call(
+            "pr",
+            "view",
+            str(number),
+            "--json",
+            "number,title,body,url,comments,reviews",
+        )
+        context_number = cast(int, self._required_pr_value(payload, "number", number))
+        context_url = cast(str, self._required_pr_value(payload, "url", ""))
+        if context_number != number or _pull_request_number(context_url) != number:
+            raise WorkflowError(
+                f"gh returned pull-request identity that does not match #{number}"
+            )
+        comments = self._normalized_collection(payload.get("comments"), "comments")
+        reviews = self._normalized_collection(payload.get("reviews"), "reviews")
+        inline = self._json_value_call(
+            "api",
+            self._pull_request_comments_endpoint(number),
+            "--paginate",
+        )
+        review_comments = self._normalized_collection(inline, "review comments")
+        return {
+            "number": context_number,
+            "title": self._required_pr_value(payload, "title", ""),
+            "body": self._required_pr_value(payload, "body", "") or "",
+            "url": context_url,
+            "comments": [self._normalize_comment(item) for item in comments],
+            "reviews": [self._normalize_review(item) for item in reviews],
+            "review_comments": [
+                self._normalize_review_comment(item) for item in review_comments
+            ],
+        }
+
+    def _pull_request_comments_endpoint(self, number: int) -> str:
+        return f"repos/{self._repository_name()}/pulls/{number}/comments"
+
+    def _repository_name(self) -> str:
+        if self.repository is not None:
+            return self.repository
+        payload = self._json_call("repo", "view", "--json", "nameWithOwner")
+        repository = payload.get("nameWithOwner")
+        if not isinstance(repository, str) or "/" not in repository:
+            raise WorkflowError("gh repo view did not report nameWithOwner")
+        return repository
+
+    @staticmethod
+    def _required_pr_value(
+        payload: Mapping[str, object], key: str, default: object
+    ) -> object:
+        value = payload.get(key, default)
+        if key == "number":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise WorkflowError("gh pull-request data has an invalid number")
+            return value
+        if key == "body" and value is None:
+            return ""
+        if not isinstance(value, str) or (key in {"title", "url"} and not value):
+            raise WorkflowError(f"gh pull-request data has an invalid {key}")
+        return value
+
+    @staticmethod
+    def _normalized_collection(value: object, name: str) -> list[Mapping[str, object]]:
+        if not isinstance(value, list):
+            raise WorkflowError(f"gh pull-request {name} were not an array")
+        if not all(isinstance(item, Mapping) for item in value):
+            raise WorkflowError(f"gh pull-request {name} contained an invalid item")
+        return [cast(Mapping[str, object], item) for item in value]
+
+    @staticmethod
+    def _normalize_author(value: object) -> object:
+        if isinstance(value, Mapping):
+            value = value.get("login") or value.get("name") or value.get("user")
+        if value is None or isinstance(value, str):
+            return value
+        raise WorkflowError("gh pull-request data has an invalid author")
+
+    @staticmethod
+    def _normalize_text(value: object, field: str) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise WorkflowError(f"gh pull-request data has an invalid {field}")
+        return value
+
+    @classmethod
+    def _normalize_comment(cls, item: Mapping[str, object]) -> dict:
+        return {
+            "author": cls._normalize_author(item.get("author")),
+            "body": cls._normalize_text(item.get("body", ""), "comment body"),
+            "createdAt": cls._normalize_text(
+                item.get("createdAt", ""), "comment timestamp"
+            ),
+            "url": cls._normalize_text(item.get("url", ""), "comment URL"),
+        }
+
+    @classmethod
+    def _normalize_review(cls, item: Mapping[str, object]) -> dict:
+        return {
+            "author": cls._normalize_author(item.get("author")),
+            "state": cls._normalize_text(item.get("state", ""), "review state"),
+            "body": cls._normalize_text(item.get("body", ""), "review body"),
+            "submittedAt": cls._normalize_text(
+                item.get("submittedAt", ""), "review timestamp"
+            ),
+            "url": cls._normalize_text(item.get("url", ""), "review URL"),
+        }
+
+    @classmethod
+    def _normalize_review_comment(cls, item: Mapping[str, object]) -> dict:
+        return {
+            "author": cls._normalize_author(item.get("user") or item.get("author")),
+            "body": cls._normalize_text(item.get("body", ""), "review comment body"),
+            "path": cls._normalize_text(item.get("path", ""), "review comment path"),
+            "line": GitHub._normalize_line(item.get("line")),
+            "createdAt": cls._normalize_text(
+                item.get("created_at") or item.get("createdAt", ""),
+                "review comment timestamp",
+            ),
+            "url": cls._normalize_text(
+                item.get("html_url") or item.get("url", ""), "review comment URL"
+            ),
+        }
+
+    @staticmethod
+    def _normalize_line(value: object) -> int | None:
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            return value
+        raise WorkflowError("gh pull-request data has an invalid review comment line")
+
     def _repo_args(self) -> list[str]:
         return [] if self.repository is None else ["--repo", self.repository]
 
     def _json_call(self, *args: str) -> dict:
-        raw = self._call(*args)
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise WorkflowError(f"gh returned invalid JSON: {exc}") from exc
+        payload = self._json_value_call(*args)
         if not isinstance(payload, dict):
             raise WorkflowError("gh returned JSON that was not an object")
         return payload
+
+    def _json_value_call(self, *args: str) -> object:
+        raw = self._call(*args)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            decoder = json.JSONDecoder()
+            values: list[object] = []
+            offset = 0
+            try:
+                while offset < len(raw):
+                    while offset < len(raw) and raw[offset].isspace():
+                        offset += 1
+                    if offset == len(raw):
+                        break
+                    value, offset = decoder.raw_decode(raw, offset)
+                    values.append(value)
+            except json.JSONDecodeError:
+                raise WorkflowError(f"gh returned invalid JSON: {exc}") from exc
+            if values and all(isinstance(value, list) for value in values):
+                lists = [cast(list[object], value) for value in values]
+                return [item for value in lists for item in value]
+            raise WorkflowError(f"gh returned invalid JSON: {exc}") from exc
 
     def _body_call(self, body: str, *args: str) -> str:
         with tempfile.TemporaryDirectory(prefix="gdw-gh-") as directory:
@@ -1135,6 +1356,9 @@ class DevelopmentWorkflow:
             self.base_branch,
             self.draft,
         )
+        if self._publication_complete():
+            issue_context = self.load_issue()
+            return self.finalize(issue_context)
         issue_context = self.load_issue()
         expansion = self.clarify(issue_context)
         specification = self.specify(issue_context, expansion)
@@ -1142,14 +1366,46 @@ class DevelopmentWorkflow:
         self.implement(specification)
         ci_summary = self.stabilize(specification)
         final_reviews = self.review(specification, ci_summary)
-        return self.publish(specification, final_reviews)
+        self.publish(specification, final_reviews)
+        return self.finalize(issue_context)
 
     def completed_url(self) -> str | None:
-        existing_url = self.store.metadata.get("pr_url")
-        if isinstance(existing_url, str) and existing_url:
-            LOGGER.info("workflow: already completed, pull request %s", existing_url)
-            return existing_url
+        metadata = self.store.metadata
+        existing_url = metadata.get("pr_url")
+        if (
+            isinstance(existing_url, str)
+            and existing_url
+            and self._publication_complete()
+            and metadata.get("finalization_comment_posted") is True
+            and self.store.has("finalization")
+        ):
+            try:
+                number = _pull_request_number(existing_url)
+            except WorkflowError:
+                return None
+            self.github.collect_markers(number)
+            marker = f"<!-- gdw:{number}:finalization -->"
+            if marker in self.github.markers:
+                LOGGER.info(
+                    "workflow: already completed, pull request %s", existing_url
+                )
+                return existing_url
         return None
+
+    def _publication_complete(self) -> bool:
+        metadata = self.store.metadata
+        if metadata.get("publication_complete") is True:
+            return True
+        if "publication_complete" in metadata:
+            return False
+        legacy_url = metadata.get("development_pr_url") or metadata.get("pr_url")
+        if not isinstance(legacy_url, str) or not legacy_url:
+            return False
+        return self.store.has("specification") and any(
+            re.fullmatch(r"review-\d+-(?:specification|quality)\.json", path.name)
+            is not None
+            for path in self.store.artifacts.glob("review-*.json")
+        )
 
     def load_issue(self) -> dict:
         issue = self.github.issue(self.issue_number)
@@ -1161,6 +1417,17 @@ class DevelopmentWorkflow:
             and isinstance(comment.get("body"), str)
             and "<!-- gdw:" not in comment["body"]
         ][-5:]
+        finalization_comments = _bounded_latest(
+            [
+                comment
+                for comment in comments
+                if isinstance(comment, Mapping)
+                and isinstance(comment.get("body"), str)
+                and "<!-- gdw:" not in comment["body"]
+            ],
+            "createdAt",
+            CONTEXT_ISSUE_COMMENTS,
+        )
         pr_number = self.store.metadata.get("pr_number")
         if isinstance(pr_number, int) and pr_number > 0:
             self.github.collect_markers(pr_number)
@@ -1185,6 +1452,16 @@ class DevelopmentWorkflow:
                 "latest_comments": latest_comments,
             },
             "latest_comments": latest_comments,
+            "finalization": {
+                "number": issue.get("number"),
+                "title": _bounded_context_text(
+                    issue.get("title", ""), CONTEXT_BODY_CHARS
+                ),
+                "body": _bounded_context_text(
+                    issue.get("body", ""), CONTEXT_BODY_CHARS
+                ),
+                "comments": finalization_comments,
+            },
         }
 
     def clarify(self, issue_context: dict) -> dict:
@@ -1289,8 +1566,189 @@ class DevelopmentWorkflow:
         self.repository.push(self.branch)
         self.github.update_pr(number, body=self._pr_body(specification, final_reviews))
         LOGGER.info("workflow: pull request updated at %s", url)
-        self.store.record_pr(url)
+        self.store.record_publication_complete()
+        LOGGER.info("workflow: publication_complete=true")
         return url
+
+    def finalize(self, issue_context: dict) -> str:
+        metadata = self.store.metadata
+        url = metadata.get("development_pr_url") or metadata.get("pr_url")
+        if not isinstance(url, str) or not url:
+            raise WorkflowError("cannot finalize without a pull-request URL")
+        number = _pull_request_number(url)
+        marker = f"<!-- gdw:{number}:finalization -->"
+        finalizer_github = self.role_github.get("finalizer", self.github)
+        elapsed: float | None = None
+        workdir: Path | None = None
+
+        if self.store.has("finalization"):
+            finalizer_github.collect_markers(number)
+            payload = self._ordered_finalization(self.store.load("finalization"))
+            LOGGER.info("finalization: reusing cached payload")
+        else:
+            pr_context = self._bounded_pr_context(number)
+            artifacts = self._bounded_artifacts()
+            values = {
+                "ISSUE_CONTEXT_JSON": _json(self._issue_context(issue_context)),
+                "PR_CONTEXT_JSON": _json(pr_context),
+                "ARTIFACTS_JSON": _json(artifacts),
+            }
+            LOGGER.info("finalization: asking finalizer")
+            started = time.monotonic()
+            payload = self.agents.ask(
+                role="finalizer",
+                prompt_name="finalize",
+                schema_name="finalization",
+                values=values,
+                skills=(),
+            )
+            elapsed = time.monotonic() - started
+            workdir = self.agents.workdir
+            payload = self._ordered_finalization(payload)
+            self.store.save("finalization", payload)
+            LOGGER.info("finalization: saved finalization.json")
+            finalizer_github.collect_markers(number)
+
+        self._require_complete(payload, "finalization", "finalization")
+        if marker not in finalizer_github.markers:
+            finalizer_github.comment_once(
+                number,
+                "finalization",
+                "Post-mortem",
+                payload,
+                attribution=_attribution(
+                    self.agents.options("finalizer"),
+                    skills=(),
+                    elapsed=elapsed,
+                    workdir=workdir,
+                ),
+            )
+        if marker not in finalizer_github.markers:
+            raise WorkflowError("finalization comment marker was not confirmed")
+        self.github.markers.add(marker)
+        self.store.record_finalization_complete(url)
+        LOGGER.info("workflow: finalization complete")
+        return url
+
+    def finalize_from_checkpoints(self) -> str:
+        if not self._publication_complete():
+            raise WorkflowError("cannot finalize before publication is complete")
+        if self.store.has("specification"):
+            self.store.load("specification")
+        for path in sorted(self.store.artifacts.glob("review-*.json")):
+            self.store.load(path.stem)
+        return self.finalize(self.load_issue())
+
+    def _issue_context(self, issue_context: Mapping[str, object]) -> dict:
+        finalization_context = issue_context.get("finalization")
+        if isinstance(finalization_context, Mapping):
+            return {
+                "number": finalization_context.get("number"),
+                "title": _bounded_context_text(
+                    finalization_context.get("title", ""), CONTEXT_BODY_CHARS
+                ),
+                "body": _bounded_context_text(
+                    finalization_context.get("body", ""), CONTEXT_BODY_CHARS
+                ),
+                "comments": _bounded_latest(
+                    finalization_context.get("comments", []),
+                    "createdAt",
+                    CONTEXT_ISSUE_COMMENTS,
+                ),
+            }
+        initial = issue_context.get("initial", {})
+        if not isinstance(initial, Mapping):
+            raise WorkflowError("issue context is not an object")
+        return {
+            "number": initial.get("number"),
+            "title": _bounded_context_text(
+                initial.get("title", ""), CONTEXT_BODY_CHARS
+            ),
+            "body": _bounded_context_text(initial.get("body", ""), CONTEXT_BODY_CHARS),
+            "comments": _bounded_latest(
+                issue_context.get("latest_comments", []),
+                "createdAt",
+                CONTEXT_ISSUE_COMMENTS,
+            ),
+        }
+
+    def _bounded_pr_context(self, number: int) -> dict:
+        context = self.github.pull_request_context(number)
+        if not isinstance(context, Mapping):
+            raise WorkflowError("pull-request context was not an object")
+        context_number = context.get("number")
+        context_url = context.get("url")
+        if (
+            isinstance(context_number, bool)
+            or not isinstance(context_number, int)
+            or context_number != number
+            or not isinstance(context_url, str)
+            or _pull_request_number(context_url) != number
+        ):
+            raise WorkflowError(
+                f"pull-request context identity does not match #{number}"
+            )
+        return {
+            "number": context_number,
+            "title": _bounded_context_text(
+                context.get("title", ""), CONTEXT_BODY_CHARS
+            ),
+            "body": _bounded_context_text(context.get("body", ""), CONTEXT_BODY_CHARS),
+            "url": context_url,
+            "comments": _bounded_latest(
+                context.get("comments", []), "createdAt", CONTEXT_PR_ITEMS
+            ),
+            "reviews": _bounded_latest(
+                context.get("reviews", []), "submittedAt", CONTEXT_PR_ITEMS
+            ),
+            "review_comments": _bounded_latest(
+                context.get("review_comments", []), "createdAt", CONTEXT_PR_ITEMS
+            ),
+        }
+
+    def _bounded_artifacts(self) -> dict:
+        artifacts: dict[str, object] = {}
+        if self.store.artifacts.exists():
+            paths = sorted(
+                self.store.artifacts.rglob("*.json"),
+                key=lambda item: item.relative_to(self.store.artifacts).as_posix(),
+            )
+            for path in paths:
+                filename = path.relative_to(self.store.artifacts).as_posix()
+                artifacts[filename] = self.store._read(path)
+        bundle = {
+            "artifacts": artifacts,
+            "publication": {
+                "pr_number": self.store.metadata.get("pr_number"),
+                "pr_url": self.store.metadata.get("development_pr_url")
+                or self.store.metadata.get("pr_url"),
+                "base_sha": self.store.metadata.get("base_sha"),
+            },
+        }
+        if len(_json(bundle)) > ARTIFACT_BUNDLE_CHARS:
+            raise WorkflowError(
+                f"finalization artifact bundle exceeds {ARTIFACT_BUNDLE_CHARS} characters"
+            )
+        return bundle
+
+    @staticmethod
+    def _ordered_finalization(payload: object) -> dict:
+        if not isinstance(payload, Mapping) or set(payload) != set(FINALIZATION_FIELDS):
+            raise WorkflowError(
+                "finalization payload must contain exactly the required fields"
+            )
+        ordered = {field: payload[field] for field in FINALIZATION_FIELDS}
+        if ordered["status"] not in {"complete", "blocked"}:
+            raise WorkflowError("finalization status must be complete or blocked")
+        if not isinstance(ordered["summary"], str) or not ordered["summary"]:
+            raise WorkflowError("finalization summary must be a non-empty string")
+        for field in ("blockers", *FINALIZATION_FIELDS[3:]):
+            values = ordered[field]
+            if not isinstance(values, list) or any(
+                not isinstance(item, str) or not item for item in values
+            ):
+                raise WorkflowError(f"finalization {field} must be an array of strings")
+        return ordered
 
     def _reach_agreement(self, issue_context: dict) -> dict:
         expansion: dict | None = None

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "blockers",
+    "summary",
+    "agreements",
+    "disagreements",
+    "feedback_considered",
+    "implementation_errors",
+    "fixes_applied",
+    "opportunities_to_improve"
+  ],
+  "properties": {
+    "status": {"type": "string", "enum": ["complete", "blocked"]},
+    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "summary": {"type": "string", "minLength": 1},
+    "agreements": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "disagreements": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "feedback_considered": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "implementation_errors": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "fixes_applied": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "opportunities_to_improve": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

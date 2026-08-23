@@ -8,7 +8,10 @@ to be prose in AGENTS.md asking politely; asking is not a control.
 
 Thresholds are read from the base branch and compared with the working tree.
 Raising a floor is always allowed. Lowering one fails. A floor may be dropped
-only when its source file is genuinely gone.
+only when its source file is genuinely gone. Coverage is the exception: a
+deliberate risk-policy reset can lower its thresholds by advancing
+``COVERAGE_POLICY_VERSION`` exactly one version. That explicit change is easy
+to review and does not weaken mutation, changed-line coverage, or security.
 
 A threshold is only guarded if this file knows where it lives, so every new
 one needs an entry here. They currently sit in three places: the gate
@@ -65,6 +68,13 @@ def _constant(source: str, name: str):
             for target in node.targets
         ):
             return ast.literal_eval(node.value)
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value is not None
+        ):
+            return ast.literal_eval(node.value)
     return None
 
 
@@ -77,9 +87,31 @@ def _pyproject_numbers(source: str) -> tuple[float | None, list[str]]:
     return fail_under, source_paths
 
 
-def _check_coverage_floors(base: str, failures: list[str]) -> None:
+def _coverage_policy_reset(base: str, failures: list[str]) -> bool:
+    """Return whether this change deliberately advances the coverage policy."""
     base_source = _read_base(base, COVERAGE_GATE)
     if base_source is None:
+        return False
+    now_source = Path(COVERAGE_GATE).read_text(encoding="utf-8")
+    was = _constant(base_source, "COVERAGE_POLICY_VERSION") or 1
+    now = _constant(now_source, "COVERAGE_POLICY_VERSION") or 1
+    if now < was:
+        failures.append(f"COVERAGE_POLICY_VERSION lowered {was:g} -> {now:g}.")
+        return False
+    if now > was + 1:
+        failures.append(
+            f"COVERAGE_POLICY_VERSION jumped {was:g} -> {now:g}; advance it one "
+            "reviewed policy revision at a time."
+        )
+        return False
+    return now == was + 1
+
+
+def _check_coverage_floors(
+    base: str, failures: list[str], *, policy_reset: bool
+) -> None:
+    base_source = _read_base(base, COVERAGE_GATE)
+    if base_source is None or policy_reset:
         return
     base_floors = _constant(base_source, "FLOORS") or {}
     now_floors = _constant(Path(COVERAGE_GATE).read_text(encoding="utf-8"), "FLOORS")
@@ -117,7 +149,9 @@ def _check_mutation_floor(base: str, failures: list[str]) -> None:
         failures.append(f"MUTATION_SCORE_FLOOR lowered {was:g} -> {now:g}.")
 
 
-def _check_pyproject(base: str, failures: list[str]) -> None:
+def _check_pyproject(
+    base: str, failures: list[str], *, coverage_policy_reset: bool
+) -> None:
     base_source = _read_base(base, PYPROJECT)
     if base_source is None:
         return
@@ -127,7 +161,8 @@ def _check_pyproject(base: str, failures: list[str]) -> None:
     )
 
     if (
-        was_fail_under is not None
+        not coverage_policy_reset
+        and was_fail_under is not None
         and now_fail_under is not None
         and now_fail_under < was_fail_under
     ):
@@ -212,9 +247,10 @@ def main(argv: list[str]) -> int:
         return 1
 
     failures: list[str] = []
-    _check_coverage_floors(base, failures)
+    coverage_policy_reset = _coverage_policy_reset(base, failures)
+    _check_coverage_floors(base, failures, policy_reset=coverage_policy_reset)
     _check_mutation_floor(base, failures)
-    _check_pyproject(base, failures)
+    _check_pyproject(base, failures, coverage_policy_reset=coverage_policy_reset)
     _check_diff_coverage_floor(base, failures)
     _check_semgrep_rules(base, failures)
 

@@ -11,6 +11,7 @@ main flow:
 6. Run CI and repair failures.
 7. Obtain specification and quality approvals.
 8. Commit, push, and update the pull request.
+9. Ask the PR-only finalizer and post the final Post-mortem comment.
 
 The supporting modules own the details:
 
@@ -33,8 +34,9 @@ tested minimum; its schema is inlined in the prompt and enforced by the
 otherwise-shared validation/repair loop.
 
 The issue body is sent only for the initial expansion. Later clarification and
-specification turns receive the five latest non-workflow comments, preserving
-context without repeatedly spending tokens on the entire conversation.
+specification turns retain the five latest non-workflow comments. The finalizer
+receives bounded issue and pull-request context plus every JSON artifact
+checkpoint.
 
 Clarification and review have no configured round limit. Every participant's
 structured reply includes `needs_another_round`; the workflow advances only
@@ -64,14 +66,16 @@ To use another configuration file, pass `--config path/to/workflow.yaml`.
 Without that option, the script loads
 `examples/gabriels_workflow/workflow.local`. Model names and reasoning-effort
 values are passed through to the configured CLI. Each of `expander`, `griller`,
-`specifier`, `implementer`, `reviewer-specification`, and `reviewer-quality`
-must be configured explicitly.
+`specifier`, `implementer`, `documenter`, `reviewer-specification`,
+`reviewer-quality`, and `finalizer` must be configured explicitly.
 
 Each stage result is commented through that stage role's GitHub App. Expansion,
 grilling, and the specification stay on the issue — the specification is the
 last bot comment there. The implementer app then opens a draft pull request and
 posts implementation, CI, and review there. The same app commits, pushes, and
-updates that pull request when the work is done.
+updates that pull request when the work is done. The finalizer is PR-only,
+read-only, uses no skills, and posts the last workflow-authored comment after
+publication.
 
 Each newly generated agent-stage comment ends with a six-field attribution
 footer: `backend`, `model`, `reasoning_effort`, `task_duration`, `skills`, and
@@ -94,7 +98,7 @@ is marked as such instead of being reported as passing. The full CI output
 stays out of GitHub — it is checkpointed under `.git/gdw/` and handed to
 the repair agent, which is what actually reads it.
 
-Install all six apps on the configured repository with the
+Install all eight apps (one per role) on the configured repository with the
 permissions required for issues, pull requests, and repository contents.
 
 Private keys are accepted directly as YAML strings, including `|` multiline

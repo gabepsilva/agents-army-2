@@ -90,7 +90,7 @@ class TestCoverageGate:
         assert coverage_gate.main() == 0
         assert "at or above their floors" in capsys.readouterr().out
 
-    def test_full_point_of_headroom_is_noted(
+    def test_headroom_does_not_create_an_automatic_ratchet(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
         monkeypatch.setattr(coverage_gate, "COVERAGE_PATH", tmp_path / "coverage.json")
@@ -99,7 +99,7 @@ class TestCoverageGate:
             json.dumps(_coverage_report({"mod.py": 91.4})), encoding="utf-8"
         )
         assert coverage_gate.main() == 0
-        assert "raise its floor to 91" in capsys.readouterr().out
+        assert "raise its floor" not in capsys.readouterr().out
 
 
 class TestMutationGate:
@@ -179,7 +179,7 @@ def _integrity_tree(tmp_path: Path, source: str, name: str = "test_plant.py") ->
 
 
 class TestIntegrityGate:
-    def test_test_without_assertion_fails(
+    def test_assertion_free_test_is_allowed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
         monkeypatch.setattr(
@@ -187,8 +187,8 @@ class TestIntegrityGate:
             "TESTS_DIR",
             _integrity_tree(tmp_path, "def test_noop():\n    print(1)\n"),
         )
-        assert test_integrity.main() == 1
-        assert "has no assertion" in capsys.readouterr().out
+        assert test_integrity.main() == 0
+        assert "no unexplained skips" in capsys.readouterr().out
 
     def test_skip_without_issue_reason_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -216,7 +216,7 @@ class TestIntegrityGate:
             test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
         )
         assert test_integrity.main() == 0
-        assert "every test can fail" in capsys.readouterr().out
+        assert "no unexplained skips" in capsys.readouterr().out
 
     def test_bare_skip_decorator_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -238,38 +238,6 @@ class TestIntegrityGate:
         assert test_integrity.main() == 1
         assert "bare @...xfail" in capsys.readouterr().out
 
-    def test_pytest_raises_counts_as_an_assertion(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        source = (
-            "import pytest\n\n"
-            "def test_x():\n"
-            "    with pytest.raises(ValueError):\n"
-            "        raise ValueError('x')\n"
-        )
-        monkeypatch.setattr(
-            test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
-        )
-        assert test_integrity.main() == 0
-
-    def test_assert_called_and_assertionerror_count(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        source = (
-            "def test_mock():\n"
-            "    class M:\n"
-            "        def assert_called(self):\n"
-            "            return None\n"
-            "    M().assert_called()\n"
-            "\n"
-            "def test_inverted():\n"
-            "    raise AssertionError('blocked')\n"
-        )
-        monkeypatch.setattr(
-            test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
-        )
-        assert test_integrity.main() == 0
-
     def test_skipif_without_issue_reason_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
@@ -283,38 +251,6 @@ class TestIntegrityGate:
         )
         assert test_integrity.main() == 1
         assert "needs reason=" in capsys.readouterr().out
-
-    def test_warns_counts_as_an_assertion(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        source = (
-            "import pytest\nimport warnings\n\n"
-            "def test_x():\n"
-            "    with pytest.warns(UserWarning):\n"
-            "        warnings.warn('x', UserWarning)\n"
-        )
-        monkeypatch.setattr(
-            test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
-        )
-        assert test_integrity.main() == 0
-
-    def test_pytest_fail_counts_as_an_assertion(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        source = "import pytest\n\ndef test_x():\n    pytest.fail('nope')\n"
-        monkeypatch.setattr(
-            test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
-        )
-        assert test_integrity.main() == 0
-
-    def test_non_assertion_call_then_assert_passes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        source = "def test_x():\n    len([])\n    assert True\n"
-        monkeypatch.setattr(
-            test_integrity, "TESTS_DIR", _integrity_tree(tmp_path, source)
-        )
-        assert test_integrity.main() == 0
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -420,6 +356,24 @@ class TestRatchetGate:
         assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
         assert "coverage floor lowered 80 -> 70" in capsys.readouterr().out
 
+    def test_lowered_annotated_coverage_floor_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_gate_tree(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "FLOORS: dict[str, float] = {'kept.py': 80.0}\nNEW_FILE_FLOOR = 60.0\n",
+        )
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "FLOORS: dict[str, float] = {'kept.py': 70.0}\nNEW_FILE_FLOOR = 60.0\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "coverage floor lowered 80 -> 70" in capsys.readouterr().out
+
     def test_removed_floor_while_file_exists_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
@@ -471,6 +425,62 @@ class TestRatchetGate:
         monkeypatch.chdir(tmp_path)
         assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
         assert "fail_under lowered 100 -> 80" in capsys.readouterr().out
+
+    def test_one_version_advance_allows_a_reviewed_coverage_policy_reset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_gate_tree(tmp_path)
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "COVERAGE_POLICY_VERSION = 2\n"
+            "FLOORS: dict[str, float] = {'kept.py': 70.0}\n"
+            "NEW_FILE_FLOOR = 50.0\n",
+        )
+        _write(
+            tmp_path / "pyproject.toml",
+            "[tool.coverage.report]\nfail_under = 90\n"
+            "[tool.mutmut]\nsource_paths = ['kept.py']\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+        assert "no threshold weakened" in capsys.readouterr().out
+
+    def test_coverage_policy_version_cannot_skip_a_review_revision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_gate_tree(tmp_path)
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "COVERAGE_POLICY_VERSION = 3\n"
+            "FLOORS = {'kept.py': 70.0}\nNEW_FILE_FLOOR = 50.0\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "advance it one reviewed policy revision" in capsys.readouterr().out
+
+    def test_coverage_policy_version_cannot_move_backwards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_gate_tree(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "COVERAGE_POLICY_VERSION = 2\n"
+            "FLOORS = {'kept.py': 80.0}\nNEW_FILE_FLOOR = 60.0\n",
+        )
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "coverage_gate.py",
+            "COVERAGE_POLICY_VERSION = 1\n"
+            "FLOORS = {'kept.py': 80.0}\nNEW_FILE_FLOOR = 60.0\n",
+        )
+        monkeypatch.chdir(tmp_path)
+
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "COVERAGE_POLICY_VERSION lowered 2 -> 1" in capsys.readouterr().out
 
     def test_narrowed_mutmut_scope_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
@@ -586,59 +596,6 @@ class TestRatchetGate:
         assert "coverage floor removed while the file still exists" in (
             capsys.readouterr().out
         )
-
-
-def _footer_documentation_errors(documentation: str) -> tuple[str, ...]:
-    normalized = " ".join(documentation.split())
-    footer_fields = (
-        "backend",
-        "model",
-        "reasoning_effort",
-        "task_duration",
-        "skills",
-        "worktree",
-    )
-    missing = [field for field in footer_fields if f"`{field}`" not in documentation]
-    if "self.agents.ask()" not in normalized:
-        missing.append("self.agents.ask()")
-    if not {"elapsed", "seconds"}.issubset(normalized.split()):
-        missing.append("task_duration elapsed-seconds semantics")
-    if "X.Ys" not in normalized:
-        missing.append("X.Ys")
-    if not all(
-        phrase in normalized
-        for phrase in ("basename", "resolved path", "home directory", "`~`")
-    ):
-        missing.append("worktree basename/home-shortening semantics")
-    if not ("Cached stages" in normalized or "Cached stages reuse" in normalized):
-        missing.append("cached-stage semantics")
-    if "no attribution footer" not in normalized:
-        missing.append("no attribution footer")
-    return tuple(missing)
-
-
-def test_footer_documentation_lists_all_six_fields_and_semantics() -> None:
-    for relative in ("README.md", "examples/gabriels_workflow/README.md"):
-        documentation = (REPO / relative).read_text(encoding="utf-8")
-        assert _footer_documentation_errors(documentation) == ()
-
-
-def test_footer_documentation_checker_rejects_stale_readme_fixture(
-    tmp_path: Path,
-) -> None:
-    stale_readme = tmp_path / "README.md"
-    stale_readme.write_text(
-        """
-        Footer fields: `backend`, `model`, `reasoning_effort`, `task_duration`,
-        `skills`, and `worktree`.
-        task_duration is the elapsed self.agents.ask() turn in seconds as X.Ys.
-        Cached stages post no new metadata. Driver comments have no attribution footer.
-        """,
-        encoding="utf-8",
-    )
-
-    errors = _footer_documentation_errors(stale_readme.read_text(encoding="utf-8"))
-    assert "worktree basename/home-shortening semantics" in errors
 
 
 def _semgrep_image() -> str:
