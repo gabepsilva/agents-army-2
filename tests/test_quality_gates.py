@@ -312,6 +312,772 @@ def _minimal_gate_tree(root: Path) -> None:
     _write(root / "kept.py", "x = 1\n")
 
 
+def _minimal_topology_tree(root: Path) -> None:
+    """A CI_GATES/Makefile-chain/ci.yml topology small enough to plant
+    a single deletion in, mirroring the real repo's structure at each
+    protected point: VERIFY_QUICK's ratchet gate, the ci->security->
+    security-static->semgrep chain, the hosted quality-gate needs, and the
+    coverage job's diff-coverage step."""
+    _minimal_gate_tree(root)
+    _write(
+        root / "tools" / "ratchet_gate.py",
+        "GATE_TOPOLOGY_POLICY_VERSION = 1\n"
+        'COVERAGE_GATE = "tools/coverage_gate.py"\n'
+        'MUTATION_GATE = "tools/mutation_gate.py"\n'
+        'PYPROJECT = "pyproject.toml"\n'
+        'MAKEFILE = "Makefile"\n'
+        'SEMGREP_RULES = "semgrep.yml"\n'
+        'CI_WORKFLOW = ".github/workflows/ci.yml"\n'
+        'RATCHET_GATE = "tools/ratchet_gate.py"\n'
+        'TOPOLOGY_TARGETS = ("ci", "verify", "security")\n',
+    )
+    _write(
+        root / "Makefile",
+        "DIFF_COVERAGE_MIN ?= 90\n"
+        "RATCHET_BASE ?= origin/master\n"
+        "DIFF_BASE ?= origin/master\n"
+        "VERIFY_QUICK := format-check lint types test-integrity ratchet\n"
+        "VERIFY_COVERAGE := test-coverage\n"
+        "VERIFY_MUTATION := mutation\n"
+        "VERIFY_SECURITY := security-static\n"
+        "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) $(VERIFY_MUTATION) \\\n"
+        "\tsemgrep $(VERIFY_SECURITY) secrets\n"
+        "verify-quick: $(VERIFY_QUICK) workflows\n"
+        "verify-coverage: $(VERIFY_COVERAGE)\n"
+        "verify-mutation: $(VERIFY_MUTATION)\n"
+        "verify-security: $(VERIFY_SECURITY)\n"
+        "security: security-static secrets\n"
+        "verify: verify-quick verify-coverage verify-mutation\n"
+        "ci: verify security\n"
+        "ci-hosted: verify verify-security\n"
+        "security-static: semgrep\n"
+        "lint:\n"
+        "\tuv run ruff check .\n"
+        "ratchet:\n"
+        "\tuv run python tools/ratchet_gate.py $(RATCHET_BASE)\n",
+    )
+    _write(
+        root / ".github" / "workflows" / "ci.yml",
+        "name: CI\n\non:\n  push:\n  pull_request:\n\njobs:\n"
+        "  quick:\n"
+        "    name: Quick\n"
+        "    steps:\n"
+        "      - run: make verify-quick\n"
+        "  coverage:\n"
+        "    name: Coverage\n"
+        "    steps:\n"
+        "      - name: diff coverage\n"
+        "        run: make diff-coverage\n"
+        "  mutation:\n"
+        "    name: Mutation\n"
+        "  security-static:\n"
+        "    name: Static security\n"
+        "  quality-gate:\n"
+        "    name: Quality and security\n"
+        "    needs: [quick, coverage, mutation, security-static]\n"
+        "    steps:\n"
+        "      - name: Require every quality lane to succeed\n"
+        '        run: test "$LANE_RESULTS" = "success success success success"\n'
+        "  secret-scan:\n"
+        "    name: Secret scan\n"
+        "    steps:\n"
+        "      - name: Run Gitleaks\n"
+        "        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e\n",
+    )
+
+
+class TestGateTopology:
+    def test_local_gate_dropped_from_ci_gates_via_verify_quick_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "VERIFY_QUICK := format-check lint types test-integrity ratchet",
+                "VERIFY_QUICK := format-check lint types test-integrity",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES dropped required gate(s)" in out
+        assert "ratchet" in out
+
+    def test_local_gate_dropped_directly_from_ci_gates_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets\n",
+                "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\t$(VERIFY_SECURITY) secrets\n",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES dropped required gate(s)" in out
+        assert "semgrep" in out
+
+    def test_narrower_verify_quick_reassignment_before_ci_gates_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """`make` resolves a `:=` variable to its last assignment before the
+        point it is used, so a second, narrower VERIFY_QUICK inserted right
+        before CI_GATES's own definition is what `make` actually expands --
+        a first-match reader would miss it and call the narrowed set
+        unchanged."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "CI_GATES := $(VERIFY_QUICK) workflows",
+                "VERIFY_QUICK := format-check lint types test-integrity\n"
+                "CI_GATES := $(VERIFY_QUICK) workflows",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES dropped required gate(s)" in out
+        assert "ratchet" in out
+
+    def test_narrower_ci_gates_appended_after_the_original_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A second, narrower `CI_GATES :=` appended after the original is
+        what `make` actually uses; a first-match reader would keep reading
+        the original and call the narrowed set unchanged."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile + "CI_GATES := format-check lint types\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES dropped required gate(s)" in out
+
+    def test_editing_both_ci_gates_and_its_chain_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Dropping semgrep from both CI_GATES and the security-static
+        prerequisite it feeds is still caught in both places, because each
+        base comparison detects its own missing membership independently of
+        how consistently the deletion was hidden elsewhere."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        makefile = makefile.replace(
+            "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+            "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets\n",
+            "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+            "$(VERIFY_MUTATION) \\\n\t$(VERIFY_SECURITY) secrets\n",
+        )
+        makefile = makefile.replace("security-static: semgrep\n", "security-static:\n")
+        _write(tmp_path / "Makefile", makefile)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES dropped required gate(s)" in out
+        assert "security-static: prerequisite(s) dropped" in out
+        assert "semgrep" in out
+
+    def test_narrowed_make_chain_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace("ci: verify security\n", "ci: verify\n"),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "ci: prerequisite(s) dropped" in out
+        assert "security" in out
+
+    def test_hosted_job_deleted_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            "name: CI\n\njobs:\n"
+            "  quick:\n    name: Quick\n"
+            "  mutation:\n    name: Mutation\n"
+            "  security-static:\n    name: Static security\n"
+            "  quality-gate:\n    name: Quality and security\n"
+            "    needs: [quick, coverage, mutation, security-static]\n"
+            "  secret-scan:\n    name: Secret scan\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI workflow job(s) deleted" in out
+        assert "coverage" in out
+
+    def test_narrowed_quality_gate_needs_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                "needs: [quick, coverage, mutation, security-static]",
+                "needs: [quick, coverage, mutation]",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "quality-gate needs narrowed" in out
+        assert "security-static" in out
+
+    def test_quality_gate_needs_deleted_with_a_decoy_needs_elsewhere_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """quality-gate's own needs: must be read from its job block, not
+        the first flow-style needs: found anywhere after it -- otherwise
+        deleting quality-gate's list entirely while adding an identical
+        needs: to a later job (here secret-scan) reads as unchanged."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow = workflow.replace(
+            "    needs: [quick, coverage, mutation, security-static]\n", "", 1
+        )
+        workflow = workflow.replace(
+            "  secret-scan:\n    name: Secret scan\n",
+            "  secret-scan:\n    name: Secret scan\n"
+            "    needs: [quick, coverage, mutation, security-static]\n",
+            1,
+        )
+        _write(tmp_path / ".github" / "workflows" / "ci.yml", workflow)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "quality-gate needs narrowed" in out
+        assert "security-static" in out
+
+    def test_diff_coverage_step_deleted_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                "    steps:\n      - name: diff coverage\n        run: make diff-coverage\n",
+                "",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "diff-coverage step was removed" in capsys.readouterr().out
+
+    def test_diff_coverage_step_neutered_but_mentioned_in_a_comment_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A comment mentioning the old command must not satisfy a
+        whole-file substring check; the check must require an actual
+        `run:` line inside the coverage job."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                "        run: make diff-coverage\n",
+                "        run: true  # was: make diff-coverage\n",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "diff-coverage step was removed" in capsys.readouterr().out
+
+    def test_secret_scan_gitleaks_step_deleted_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                "    steps:\n"
+                "      - name: Run Gitleaks\n"
+                "        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c"
+                "57e68cb5cbf0e8d1e\n",
+                "",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "Gitleaks step was removed" in capsys.readouterr().out
+
+    def test_quality_gate_assertion_neutered_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A lane in `needs:` that the assertion stops counting can fail in
+        silence: `if: always()` runs quality-gate regardless, so only this
+        step turns a red lane into a red required check."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                'run: test "$LANE_RESULTS" = "success success success success"',
+                'run: "true"',
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "no longer asserts that every lane succeeded" in capsys.readouterr().out
+
+    def test_quality_gate_assertion_shorter_than_its_needs_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Shortening the compared string leaves the later lanes unasserted."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                'run: test "$LANE_RESULTS" = "success success success success"',
+                'run: test "$LANE_RESULTS" = "success"',
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert (
+            "asserts only 1 successful lane(s) but needs 4" in capsys.readouterr().out
+        )
+
+    def _plant(self, tmp_path: Path, name: str, old: str, new: str) -> None:
+        target = {
+            "mk": tmp_path / "Makefile",
+            "ci": tmp_path / ".github" / "workflows" / "ci.yml",
+            "rg": tmp_path / "tools" / "ratchet_gate.py",
+        }[name]
+        text = target.read_text(encoding="utf-8")
+        assert old in text, f"planting anchor missing from {name}"
+        _write(target, text.replace(old, new, 1))
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            pytest.param(
+                (
+                    "mk",
+                    "CI_GATES := $(VERIFY_QUICK)",
+                    "override VERIFY_QUICK := format-check\nCI_GATES := $(VERIFY_QUICK)",
+                    "CI_GATES dropped required gate(s)",
+                ),
+                id="override-reassignment-hides-a-narrower-list",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "CI_GATES := $(VERIFY_QUICK)",
+                    "VERIFY_QUICK ::= format-check\nCI_GATES := $(VERIFY_QUICK)",
+                    "CI_GATES dropped required gate(s)",
+                ),
+                id="simply-expanded-reassignment-hides-a-narrower-list",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "ci: verify security",
+                    "ifeq (1,2)\nci: verify security\nendif\n\nci: verify",
+                    "ci: prerequisite(s) dropped",
+                ),
+                id="decoy-rule-in-a-dead-conditional",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "VERIFY_QUICK :=",
+                    ".IGNORE:\n\nVERIFY_QUICK :=",
+                    "every gate's failure would be ignored",
+                ),
+                id="dot-ignore-makes-every-gate-advisory",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "DIFF_COVERAGE_MIN ?= 90",
+                    "DIFF_COVERAGE_MIN ?= 90\nMAKEFLAGS += -i",
+                    "error-ignoring flag",
+                ),
+                id="makeflags-ignore-errors",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "RATCHET_BASE ?= origin/master",
+                    "RATCHET_BASE ?= HEAD",
+                    "RATCHET_BASE changed",
+                ),
+                id="base-ref-repointed-at-head",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "tools/ratchet_gate.py $(RATCHET_BASE)",
+                    "tools/ratchet_gate.py HEAD",
+                    "no longer passes $(RATCHET_BASE)",
+                ),
+                id="base-ref-hardcoded-into-the-recipe",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "\tuv run ruff check .",
+                    "\t@true",
+                    "command dropped from its recipe",
+                ),
+                id="gate-recipe-turned-into-a-no-op",
+            ),
+            pytest.param(
+                (
+                    "mk",
+                    "\tuv run ruff check .",
+                    "\t-uv run ruff check .",
+                    "failure-ignoring",
+                ),
+                id="gate-command-given-makes-dash-prefix",
+            ),
+            pytest.param(
+                (
+                    "rg",
+                    'MAKEFILE = "Makefile"',
+                    'MAKEFILE = "makefile"',
+                    "MAKEFILE repointed",
+                ),
+                id="guarded-path-repointed-off-the-base-tree",
+            ),
+            pytest.param(
+                (
+                    "rg",
+                    'TOPOLOGY_TARGETS = ("ci", "verify", "security")',
+                    'TOPOLOGY_TARGETS = ("ci",)',
+                    "TOPOLOGY_TARGETS dropped",
+                ),
+                id="topology-target-list-narrowed",
+            ),
+            pytest.param(
+                (
+                    "ci",
+                    "      - run: make verify-quick",
+                    "      - run: 'true'",
+                    "no longer does what it did",
+                ),
+                id="lane-stops-running-its-gate",
+            ),
+            pytest.param(
+                (
+                    "ci",
+                    "  quick:\n",
+                    "  quick:\n    continue-on-error: true\n",
+                    "continue-on-error added",
+                ),
+                id="lane-failure-reported-as-success",
+            ),
+            pytest.param(
+                (
+                    "ci",
+                    "    name: Quality and security\n",
+                    "    name: Quality and security (legacy)\n",
+                    "no longer does what it did",
+                ),
+                id="required-check-identity-renamed",
+            ),
+            pytest.param(
+                (
+                    "ci",
+                    "  pull_request:\n",
+                    "",
+                    "CI trigger(s) removed",
+                ),
+                id="pull-request-trigger-dropped",
+            ),
+        ],
+    )
+    def test_planted_bypass_fails(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys,
+        case: tuple[str, str, str, str],
+    ) -> None:
+        """Each edit leaves the topology looking intact while the check it
+        names stops running -- every one of them passed an earlier revision
+        of this gate."""
+        where, old, new, expected = case
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        self._plant(tmp_path, where, old, new)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert expected in capsys.readouterr().out
+
+    def test_shadow_version_assignment_does_not_grant_a_reset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Python resolves a duplicated constant to the last binding, a
+        first-match reader to the first. An added earlier `= 2` must not buy
+        a topology reset while the reviewed line still reads `= 1`."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        self._plant(
+            tmp_path,
+            "rg",
+            "GATE_TOPOLOGY_POLICY_VERSION = 1",
+            "GATE_TOPOLOGY_POLICY_VERSION = 2\nGATE_TOPOLOGY_POLICY_VERSION = 1",
+        )
+        self._plant(tmp_path, "mk", "ci: verify security", "ci: verify")
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "ci: prerequisite(s) dropped" in capsys.readouterr().out
+
+    def test_a_legitimate_addition_still_needs_no_version_bump(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The hardening must not turn ordinary growth into a policy event."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        self._plant(
+            tmp_path,
+            "mk",
+            "\tsemgrep $(VERIFY_SECURITY) secrets",
+            "\tsemgrep $(VERIFY_SECURITY) secrets newgate",
+        )
+        self._plant(
+            tmp_path,
+            "ci",
+            "  secret-scan:\n",
+            "  brand-new:\n    name: Brand new\n  secret-scan:\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+
+    def test_secret_scan_gitleaks_step_survives_in_wrong_job_still_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A gitleaks-action reference relocated into an unrelated job must
+        not satisfy a whole-file substring check."""
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        workflow = workflow.replace(
+            "    steps:\n"
+            "      - name: Run Gitleaks\n"
+            "        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c"
+            "57e68cb5cbf0e8d1e\n",
+            "",
+        )
+        workflow = workflow.replace(
+            "  quick:\n    name: Quick\n",
+            "  quick:\n    name: Quick\n"
+            "    steps:\n"
+            "      - name: Run Gitleaks\n"
+            "        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c"
+            "57e68cb5cbf0e8d1e\n",
+        )
+        _write(tmp_path / ".github" / "workflows" / "ci.yml", workflow)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "Gitleaks step was removed" in capsys.readouterr().out
+
+    def test_unparsable_ci_gates_on_base_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A reformat of CI_GATES this gate cannot parse must fail instead
+        of silently skipping the check, unless it is bundled with a
+        reviewed GATE_TOPOLOGY_POLICY_VERSION bump."""
+        _minimal_topology_tree(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets\n",
+                "CI_GATES = $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets\n",
+            ),
+        )
+        _commit_gates(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "CI_GATES on the base branch could not be resolved" in out
+
+    def test_unparsable_quality_gate_needs_on_base_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A `needs:` reformatted into a multi-line block must fail instead
+        of silently skipping the check, unless it is bundled with a
+        reviewed GATE_TOPOLOGY_POLICY_VERSION bump."""
+        _minimal_topology_tree(tmp_path)
+        workflow = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / ".github" / "workflows" / "ci.yml",
+            workflow.replace(
+                "    needs: [quick, coverage, mutation, security-static]\n",
+                "    needs:\n"
+                "      - quick\n"
+                "      - coverage\n"
+                "      - mutation\n"
+                "      - security-static\n",
+            ),
+        )
+        _commit_gates(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        out = capsys.readouterr().out
+        assert "quality-gate's needs: on the base branch does not match" in out
+
+    def test_topology_policy_version_cannot_move_backwards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _write(
+            tmp_path / "tools" / "ratchet_gate.py",
+            "GATE_TOPOLOGY_POLICY_VERSION = 2\n",
+        )
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "ratchet_gate.py",
+            "GATE_TOPOLOGY_POLICY_VERSION = 1\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "GATE_TOPOLOGY_POLICY_VERSION lowered 2 -> 1" in capsys.readouterr().out
+
+    def test_legitimate_addition_passes_without_a_version_bump(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets\n",
+                "CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) "
+                "$(VERIFY_MUTATION) \\\n\tsemgrep $(VERIFY_SECURITY) secrets new-gate\n",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+        assert "no threshold weakened" in capsys.readouterr().out
+
+    def test_topology_reset_advanced_by_one_with_a_deletion_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "VERIFY_QUICK := format-check lint types test-integrity ratchet",
+                "VERIFY_QUICK := format-check lint types test-integrity",
+            ),
+        )
+        ratchet_source = (tmp_path / "tools" / "ratchet_gate.py").read_text(
+            encoding="utf-8"
+        )
+        _write(
+            tmp_path / "tools" / "ratchet_gate.py",
+            ratchet_source.replace(
+                "GATE_TOPOLOGY_POLICY_VERSION = 1", "GATE_TOPOLOGY_POLICY_VERSION = 2"
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+        assert "no threshold weakened" in capsys.readouterr().out
+
+    def test_topology_reset_advanced_by_zero_with_a_deletion_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        makefile = (tmp_path / "Makefile").read_text(encoding="utf-8")
+        _write(
+            tmp_path / "Makefile",
+            makefile.replace(
+                "VERIFY_QUICK := format-check lint types test-integrity ratchet",
+                "VERIFY_QUICK := format-check lint types test-integrity",
+            ),
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "CI_GATES dropped required gate(s)" in capsys.readouterr().out
+
+    def test_topology_reset_advanced_by_two_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        _write(
+            tmp_path / "tools" / "ratchet_gate.py",
+            "GATE_TOPOLOGY_POLICY_VERSION = 3\n",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 1
+        assert "advance it one reviewed policy revision" in capsys.readouterr().out
+
+    def test_unchanged_topology_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        _minimal_topology_tree(tmp_path)
+        _commit_gates(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        assert ratchet_gate.main(["ratchet", "HEAD"]) == 0
+        assert "no threshold weakened" in capsys.readouterr().out
+
+
 class TestRatchetGate:
     def test_an_inherited_git_index_never_reaches_the_repository_under_test(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
