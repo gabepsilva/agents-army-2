@@ -175,5 +175,6 @@ uv run orchestrator doctor
 # ✓ claude 1.2.3
 # ✗ codex (not found)
 # ✗ grok (not found)
+# ✓ opencode 1.18.21
 # ○ jq-1.7 (optional)
 ```
