@@ -15,7 +15,9 @@ from examples.gabriels_workflow_v2.config import BudgetConfig
 from examples.gabriels_workflow_v2.contracts import (
     CheckpointStore,
     Stage,
+    blocking_findings,
     canonical_json,
+    check_review_consistency,
     digest,
     validate_handoff,
 )
@@ -599,6 +601,17 @@ class DevelopmentWorkflowV2:
         required from the caller, since it is run state that `_issue_snapshot`
         already serves from local disk; a caller holding it passes it to save
         the read.
+
+        A round only proceeds to repair once `check_review_consistency` has
+        passed every review, so `failure_evidence` can be filtered to each
+        reviewer's `blocking_findings` and is never empty. The full `reviews`
+        dict — every finding at every severity — still returns unfiltered for
+        the checkpoint, the run ledger, and the finalizer. When the
+        specification reviewer approves while still listing a non-blocking
+        finding, that deferral is posted as a digest-keyed milestone comment
+        so it reaches a human without costing an extra agent turn or a repair
+        round; the quality reviewer's non-blocking findings are not, since
+        they stay visible in the checkpoint and the finalizer context.
         """
 
         issue = self._issue_snapshot() if issue is None else issue
@@ -631,20 +644,34 @@ class DevelopmentWorkflowV2:
                 for kind in ("specification", "quality")
             }
             for kind, review in reviews.items():
-                if review["verdict"] == "approve" and review["findings"]:
-                    raise WorkflowError(f"{kind} review approved with findings")
+                check_review_consistency(kind, review)
             if all(
                 review["verdict"] == "approve" and not review["needs_another_round"]
                 for review in reviews.values()
             ):
+                deferred = reviews["specification"]["findings"]
+                if deferred:
+                    self._publish_milestone(
+                        f"review-deferral-{digest(deferred)[:12]}",
+                        self.issue_number,
+                        "Specification review deferral",
+                        deferred,
+                    )
                 return reviews, ci
+            blocking = {
+                kind: blocking_findings(review) for kind, review in reviews.items()
+            }
             repair = self._work(
                 f"review-repair-{round_number}-{snapshot[:12]}",
                 "implementer",
                 "repair",
                 {
                     "specification": self._without_handoff(specification),
-                    "failure_evidence": reviews,
+                    "failure_evidence": {
+                        kind: {**reviews[kind], "findings": findings}
+                        for kind, findings in blocking.items()
+                        if findings
+                    },
                 },
                 ("code-simplification", "caveman"),
             )

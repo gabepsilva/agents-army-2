@@ -111,12 +111,23 @@ def _work(summary: str = "implemented", status: str = "complete") -> dict[str, A
     }
 
 
+_DEFAULT_BLOCKING_FINDING = {
+    "severity": "required",
+    "axis": "correctness",
+    "title": "fixture blocking finding",
+    "evidence": "fixture",
+    "required_change": "fixture",
+}
+
+
 def _review(verdict: str = "approve", findings: list[dict] | None = None) -> dict:
+    if findings is None:
+        findings = [] if verdict == "approve" else [_DEFAULT_BLOCKING_FINDING]
     return {
         "verdict": verdict,
         "needs_another_round": verdict != "approve",
         "summary": "reviewed",
-        "findings": findings or [],
+        "findings": findings,
         "handoff": _handoff("review handoff"),
     }
 
@@ -491,10 +502,266 @@ def test_semantically_contradictory_review_is_rejected(tmp_path: Path) -> None:
         "required_change": "fix it",
     }
     workflow, *_ = _workflow(tmp_path, [_review(findings=[finding]), _review()])
-    with pytest.raises(WorkflowError, match="approved with findings"):
+    with pytest.raises(WorkflowError, match="approved with a blocking finding"):
         workflow._review_until_approved(
             _specification(), {"returncode": 0, "gates": []}
         )
+
+
+def test_changes_requested_without_a_blocking_finding_is_rejected(
+    tmp_path: Path,
+) -> None:
+    non_blocking = {
+        "severity": "optional",
+        "axis": "readability",
+        "title": "could be clearer",
+        "evidence": "feature.py:1",
+        "required_change": "rename it",
+    }
+    workflow, *_ = _workflow(
+        tmp_path, [_review("changes_requested", findings=[non_blocking]), _review()]
+    )
+    with pytest.raises(
+        WorkflowError, match="requested changes without a blocking finding"
+    ):
+        workflow._review_until_approved(
+            _specification(), {"returncode": 0, "gates": []}
+        )
+
+
+def test_approve_without_a_blocking_finding_but_needing_another_round_is_rejected(
+    tmp_path: Path,
+) -> None:
+    contradictory = {
+        "verdict": "approve",
+        "needs_another_round": True,
+        "summary": "reviewed",
+        "findings": [],
+        "handoff": _handoff("review handoff"),
+    }
+    workflow, *_, agents = _workflow(tmp_path, [contradictory, _review()])
+    with pytest.raises(
+        WorkflowError, match="needs another round without a blocking finding"
+    ):
+        workflow._review_until_approved(
+            _specification(), {"returncode": 0, "gates": []}
+        )
+    assert "implementer" not in [call["role"] for call in agents.calls]
+
+
+def test_repair_sees_only_blocking_findings_while_the_finalizer_sees_all(
+    tmp_path: Path,
+) -> None:
+    critical = {
+        "severity": "critical",
+        "axis": "correctness",
+        "title": "broken",
+        "evidence": "feature.py:1",
+        "required_change": "fix it",
+    }
+    spec_optional_r1 = {
+        "severity": "optional",
+        "axis": "specification",
+        "title": "worth a follow-up",
+        "evidence": "spec.md:1",
+        "required_change": "consider later",
+    }
+    quality_optional = {
+        "severity": "optional",
+        "axis": "readability",
+        "title": "could be clearer",
+        "evidence": "feature.py:2",
+        "required_change": "rename it",
+    }
+    spec_nit_r2 = {
+        "severity": "nit",
+        "axis": "specification",
+        "title": "still worth a follow-up",
+        "evidence": "spec.md:1",
+        "required_change": "consider later",
+    }
+    quality_nit_r2 = {
+        "severity": "nit",
+        "axis": "readability",
+        "title": "minor style nit",
+        "evidence": "feature.py:2",
+        "required_change": "tidy it",
+    }
+    replies = [
+        _proposal(),
+        _grill(),
+        _specification(),
+        _work(),
+        _work("documented"),
+        _review("changes_requested", findings=[critical, spec_optional_r1]),
+        _review(findings=[quality_optional]),
+        _work("repaired the finding"),
+        _review(findings=[spec_nit_r2]),
+        _review(findings=[quality_nit_r2]),
+        _finalization(),
+    ]
+    repository = FakeRepository(
+        [CommandResult(0, "green"), CommandResult(0, "green after repair")],
+        ["s1", "s2", "s3", "s4", "s5", "s6"],
+    )
+    workflow, _publisher, _repository, agents = _workflow(
+        tmp_path, replies, repository=repository
+    )
+
+    assert workflow.run() == "https://example.test/pull/9"
+
+    repair_context = json.loads(agents.calls[7]["values"]["CONTEXT_JSON"])
+    assert set(repair_context["failure_evidence"]) == {"specification"}
+    assert repair_context["failure_evidence"]["specification"]["findings"] == [critical]
+
+    finalizer_context = json.loads(agents.calls[10]["values"]["CONTEXT_JSON"])
+    assert finalizer_context["reviews"] == {
+        "specification": _review(findings=[spec_nit_r2]),
+        "quality": _review(findings=[quality_nit_r2]),
+    }
+
+
+def test_quality_review_approved_with_a_blocking_finding_is_rejected(
+    tmp_path: Path,
+) -> None:
+    finding = {
+        "severity": "critical",
+        "axis": "correctness",
+        "title": "broken",
+        "evidence": "feature.py:1",
+        "required_change": "fix it",
+    }
+    workflow, *_ = _workflow(tmp_path, [_review(), _review(findings=[finding])])
+    with pytest.raises(
+        WorkflowError, match="quality review approved with a blocking finding"
+    ):
+        workflow._review_until_approved(
+            _specification(), {"returncode": 0, "gates": []}
+        )
+
+
+def test_quality_review_requested_changes_without_a_blocking_finding_is_rejected(
+    tmp_path: Path,
+) -> None:
+    non_blocking = {
+        "severity": "nit",
+        "axis": "readability",
+        "title": "could be clearer",
+        "evidence": "feature.py:1",
+        "required_change": "rename it",
+    }
+    workflow, *_ = _workflow(
+        tmp_path,
+        [_review(), _review("changes_requested", findings=[non_blocking])],
+    )
+    with pytest.raises(
+        WorkflowError,
+        match="quality review requested changes without a blocking finding",
+    ):
+        workflow._review_until_approved(
+            _specification(), {"returncode": 0, "gates": []}
+        )
+
+
+def test_quality_review_needs_another_round_without_a_blocking_finding_is_rejected(
+    tmp_path: Path,
+) -> None:
+    contradictory = {
+        "verdict": "approve",
+        "needs_another_round": True,
+        "summary": "reviewed",
+        "findings": [],
+        "handoff": _handoff("review handoff"),
+    }
+    workflow, *_, agents = _workflow(tmp_path, [_review(), contradictory])
+    with pytest.raises(
+        WorkflowError,
+        match="quality review needs another round without a blocking finding",
+    ):
+        workflow._review_until_approved(
+            _specification(), {"returncode": 0, "gates": []}
+        )
+    assert "implementer" not in [call["role"] for call in agents.calls]
+
+
+def test_repair_includes_a_quality_only_blocking_finding(tmp_path: Path) -> None:
+    quality_finding = {
+        "severity": "critical",
+        "axis": "correctness",
+        "title": "broken",
+        "evidence": "feature.py:1",
+        "required_change": "fix it",
+    }
+    repository = FakeRepository(
+        [CommandResult(0, "green")], ["r1", "after-repair", "ci-before", "r2"]
+    )
+    workflow, _publisher, _repository, agents = _workflow(
+        tmp_path,
+        [
+            _review(),
+            _review("changes_requested", findings=[quality_finding]),
+            _work("repaired the finding"),
+            _review(),
+            _review(),
+        ],
+        repository=repository,
+    )
+
+    reviews, _ci = workflow._review_until_approved(
+        _specification(), {"returncode": 0, "gates": []}
+    )
+
+    assert all(review["verdict"] == "approve" for review in reviews.values())
+    repair_context = json.loads(agents.calls[2]["values"]["CONTEXT_JSON"])
+    assert set(repair_context["failure_evidence"]) == {"quality"}
+    assert repair_context["failure_evidence"]["quality"]["findings"] == [
+        quality_finding
+    ]
+
+
+def test_specification_deferral_posts_once_and_only_for_new_findings(
+    tmp_path: Path,
+) -> None:
+    deferral = {
+        "severity": "optional",
+        "axis": "specification",
+        "title": "legitimate deferral",
+        "evidence": "issue: scheduling into the Makefile",
+        "required_change": "track as a follow-up",
+    }
+    workflow, publisher, _repository, agents = _workflow(
+        tmp_path, [_review(findings=[deferral]), _review()]
+    )
+
+    workflow._review_until_approved(_specification(), {"returncode": 0, "gates": []})
+
+    deferral_comments = [
+        comment
+        for comment in publisher.comments
+        if comment[1].startswith("review-deferral-")
+    ]
+    assert len(deferral_comments) == 1
+    key = deferral_comments[0][1]
+    assert len(key) == len("review-deferral-") + 12
+    assert deferral_comments[0][0] == workflow.issue_number
+    assert len(agents.calls) == 2  # no extra agent turn for the deferral comment
+
+    workflow._review_until_approved(_specification(), {"returncode": 0, "gates": []})
+    assert (
+        len([c for c in publisher.comments if c[1].startswith("review-deferral-")]) == 1
+    )
+
+    other = {**deferral, "title": "a different legitimate deferral"}
+    other_workflow, other_publisher, *_rest = _workflow(
+        tmp_path / "other", [_review(findings=[other]), _review()]
+    )
+    other_workflow._review_until_approved(
+        _specification(), {"returncode": 0, "gates": []}
+    )
+    other_key = next(
+        c for c in other_publisher.comments if c[1].startswith("review-deferral-")
+    )[1]
+    assert other_key != key
 
 
 def test_blocked_work_and_unchanged_implementation_stop(tmp_path: Path) -> None:
