@@ -498,10 +498,12 @@ class FakeAgents:
         self,
         replies: list[dict],
         roles: Mapping[str, gdw.RoleOptions] | None = None,
+        workdir: Path | None = None,
     ) -> None:
         self.replies = deque(replies)
         self.calls: list[dict] = []
         self.roles = dict(roles or {})
+        self.workdir = workdir or Path("/tmp/fake-worktree")
         self.default_options = gdw._StaticRoleOptions(
             "fake-backend", "fake-model", "fake-effort"
         )
@@ -547,7 +549,7 @@ def _workflow(
     store.initialize(42, "feature", "base-sha")
     github = settings["github"] or FakeGitHub()
     repository = settings["repository"] or FakeRepository()
-    agents = FakeAgents(agent_replies, settings["agent_roles"])
+    agents = FakeAgents(agent_replies, settings["agent_roles"], tmp_path / "worktree")
     workflow = gdw.DevelopmentWorkflow(
         gdw.WorkflowOptions(
             42,
@@ -598,29 +600,32 @@ def test_helpers_render_and_bound() -> None:
 
 
 @pytest.mark.parametrize(
-    ("options", "skills", "expected"),
+    ("options", "skills", "elapsed", "expected"),
     [
         (
             gdw._StaticRoleOptions("grok", "grok-4.6", "high"),
             ("code-simplification", "caveman"),
-            "\n---\n\nbackend: `grok`  \nmodel: `grok-4.6`  \nreasoning_effort: `high`  \nskills: `code-simplification, caveman`",
+            12.34,
+            "\n---\n\nbackend: `grok`  \nmodel: `grok-4.6`  \nreasoning_effort: `high`  \ntask_duration: `12.3s`  \nskills: `code-simplification, caveman`  \nworktree: `worktree` - `/tmp/worktree`",
         ),
         (
             gdw._StaticRoleOptions("claude", None, "high"),
             ("caveman",),
-            "\n---\n\nbackend: `claude`  \nmodel: _unset_  \nreasoning_effort: `high`  \nskills: `caveman`",
+            0.04,
+            "\n---\n\nbackend: `claude`  \nmodel: _unset_  \nreasoning_effort: `high`  \ntask_duration: `0.0s`  \nskills: `caveman`  \nworktree: `worktree` - `/tmp/worktree`",
         ),
         (
             gdw._StaticRoleOptions("codex"),
             (),
-            "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_  \nskills: _none_",
+            1.0,
+            "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_  \ntask_duration: `1.0s`  \nskills: _none_  \nworktree: `worktree` - `/tmp/worktree`",
         ),
     ],
 )
 def test_attribution_renders_each_configured_field_exactly(
-    options: gdw.RoleOptions, skills: Sequence[str], expected: str
+    options: gdw.RoleOptions, skills: Sequence[str], elapsed: float, expected: str
 ) -> None:
-    attribution = gdw._attribution(options, skills)
+    attribution = gdw._attribution(options, skills, elapsed, Path("/tmp/worktree"))
 
     assert attribution == expected
     assert "`_unset_`" not in attribution
@@ -628,11 +633,70 @@ def test_attribution_renders_each_configured_field_exactly(
     assert "default" not in attribution
 
 
+def test_shorten_home_resolves_home_boundaries_and_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(gdw.Path, "home", classmethod(lambda _cls: home))
+
+    target = home / "resolved" / "worktree"
+    target.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    outside = tmp_path / "outside" / "worktree"
+
+    assert gdw._shorten_home(home) == "~"
+    assert gdw._shorten_home(home / "project" / "worktree") == "~/project/worktree"
+    assert gdw._shorten_home(link) == "~/resolved/worktree"
+    assert gdw._shorten_home(outside) == str(outside.resolve())
+    assert gdw._attribution(
+        gdw._StaticRoleOptions("codex"), elapsed=12.34, workdir=link
+    ).endswith("worktree: `worktree` - `~/resolved/worktree`")
+
+
+def test_attribution_marks_missing_duration_and_worktree_as_unset() -> None:
+    assert gdw._attribution(gdw._StaticRoleOptions("codex")) == (
+        "\n---\n\nbackend: `codex`  \nmodel: _unset_  \n"
+        "reasoning_effort: _unset_  \n"
+        "task_duration: _unset_  \nskills: _none_  \n"
+        "worktree: _unset_"
+    )
+
+
+def test_stage_uses_one_elapsed_value_for_log_and_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workflow, github, _repository, agents = _workflow(tmp_path, [{"answer": 1}])
+    clock = iter((100.0, 112.34))
+    monkeypatch.setattr(gdw.time, "monotonic", lambda: next(clock))
+    stage = gdw.Stage("stage", "Stage", "role", "prompt", "schema", {})
+
+    with caplog.at_level(logging.INFO, logger="gdw"):
+        assert workflow._stage(stage) == {"answer": 1}
+
+    expected = (
+        "\n---\n\nbackend: `fake-backend`  \nmodel: `fake-model`  \n"
+        "reasoning_effort: `fake-effort`  \n"
+        "task_duration: `12.3s`  \nskills: _none_  \n"
+        f"worktree: `worktree` - `{agents.workdir.resolve()}`"
+    )
+    assert github.attributions == [expected]
+    assert any(
+        record.getMessage().startswith("stage stage: role answered in 12.3s")
+        for record in caplog.records
+    )
+
+
 def test_render_comment_only_appends_a_nonempty_attribution() -> None:
     base = "<!-- marker -->\n## GDW — Title\n\n### Answer\n\n1\n"
     footer = (
         "\n---\n\nbackend: `codex`  \nmodel: _unset_  \n"
-        "reasoning_effort: _unset_  \nskills: _none_"
+        "reasoning_effort: _unset_  \n"
+        "task_duration: `0.0s`  \nskills: _none_  \n"
+        "worktree: `worktree` - `/tmp/worktree`"
     )
 
     assert gdw._render_comment("<!-- marker -->", "Title", {"answer": 1}) == base
@@ -1190,6 +1254,7 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
     assert calls[0][1]["timeout"] == 22
     assert calls[0][1]["cwd"] == str(tmp_path)
     assert calls[0][1]["env"]["AGENTS_ARMY_HOME"] == str(tmp_path)
+    assert gateway.workdir == tmp_path
     assert os.environ["GH_TOKEN"] == "secret"
     assert os.environ["PATH"] == original_path
 
@@ -1631,7 +1696,9 @@ def test_workflow_happy_path_and_completed_resume(tmp_path: Path) -> None:
     assert len(agents.calls) == 7
 
 
-def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> None:
+def test_each_stage_comments_as_its_configured_github_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     replies = [
         _expansion(),
         _grill(),
@@ -1653,6 +1720,7 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
     role_github = {role: FakeGitHub() for role in REQUIRED_ROLES}
     workflow.role_github = cast(dict[str, gdw.GitHubService], role_github)
 
+    monkeypatch.setattr(gdw.time, "monotonic", lambda: 100.0)
     workflow.run()
 
     expected_keys = {
@@ -1678,7 +1746,7 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         "reviewer-quality": ("code-review-and-quality", "code-simplification"),
     }
     assert {role: client.attributions[0] for role, client in role_github.items()} == {
-        role: gdw._attribution(options, role_skills[role])
+        role: gdw._attribution(options, role_skills[role], 0.0, tmp_path / "worktree")
         for role, options in roles.items()
     }
     issue_roles = gdw.ISSUE_COMMENT_ROLES
@@ -2005,6 +2073,7 @@ def test_cached_stage_does_not_call_agent(tmp_path: Path) -> None:
     assert workflow._stage(gdw.Stage("cached", "T", "r", "p", "s", {})) == {"value": 1}
     assert agents.calls == []
     assert github.comments == []
+    assert github.attributions == []
 
 
 def test_positive_parser_and_main_success_and_failure(

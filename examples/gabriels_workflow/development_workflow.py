@@ -196,6 +196,9 @@ class RepositoryService(Protocol):
 
 
 class AgentService(Protocol):
+    @property
+    def workdir(self) -> Path: ...
+
     def options(self, role: str) -> RoleOptions: ...
 
     def ask(
@@ -448,17 +451,44 @@ def _markdown(value: object, heading_level: int = 3) -> str:
     return _markdown_scalar(value)
 
 
-def _attribution(options: RoleOptions, skills: Sequence[str] = ()) -> str:
+def _shorten_home(path: Path) -> str:
+    resolved_path = path.resolve()
+    home = Path.home().resolve()
+    if resolved_path == home:
+        return "~"
+    try:
+        relative = resolved_path.relative_to(home)
+    except ValueError:
+        return str(resolved_path)
+    return f"~/{relative.as_posix()}"
+
+
+def _attribution(
+    options: RoleOptions,
+    skills: Sequence[str] = (),
+    elapsed: float | None = None,
+    workdir: Path | None = None,
+) -> str:
     def field(value: str | None) -> str:
         return f"`{value}`" if value and value.strip() else "_unset_"
 
     skills_field = field(", ".join(skills)) if skills else "_none_"
+    duration_field = f"`{elapsed:.1f}s`" if elapsed is not None else "_unset_"
+    if workdir is None:
+        worktree_field = "_unset_"
+    else:
+        resolved_workdir = workdir.resolve()
+        worktree_field = (
+            f"`{resolved_workdir.name}` - `{_shorten_home(resolved_workdir)}`"
+        )
     return (
         "\n---\n\n"
         f"backend: {field(options.backend)}  \n"
         f"model: {field(options.model)}  \n"
         f"reasoning_effort: {field(options.reasoning_effort)}  \n"
-        f"skills: {skills_field}"
+        f"task_duration: {duration_field}  \n"
+        f"skills: {skills_field}  \n"
+        f"worktree: {worktree_field}"
     )
 
 
@@ -1463,11 +1493,12 @@ class DevelopmentWorkflow:
             values=stage.values,
             skills=stage.skills,
         )
+        elapsed = time.monotonic() - started
         LOGGER.info(
             "stage %s: %s answered in %.1fs (%s)",
             stage.key,
             stage.role,
-            time.monotonic() - started,
+            elapsed,
             _outcome(result),
         )
         LOGGER.debug("stage %s: reply\n%s", stage.key, _json(result))
@@ -1478,7 +1509,12 @@ class DevelopmentWorkflow:
             stage.key,
             stage.title,
             result,
-            attribution=_attribution(self.agents.options(stage.role), stage.skills),
+            attribution=_attribution(
+                self.agents.options(stage.role),
+                stage.skills,
+                elapsed,
+                self.agents.workdir,
+            ),
         )
         return result
 
