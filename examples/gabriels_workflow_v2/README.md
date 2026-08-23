@@ -162,6 +162,10 @@ github_app:
 budgets:
   max_agent_turns: 24
 
+retention:
+  completed_retention_days: 7
+  max_retention_days: 30
+
 roles:
   expander:               {backend: codex,  model: gpt-5.1-codex, reasoning_effort: high}
   griller:                {backend: claude}
@@ -174,7 +178,10 @@ roles:
 ```
 
 All eight roles must be named explicitly; an unknown or missing role is a
-configuration error, not a default. Never commit a populated configuration.
+configuration error, not a default. `retention` is optional and defaults to
+`completed_retention_days: 7` (when `complete` is `True`) and a hard ceiling
+`max_retention_days: 30` (any run); both are bounded 0–365 and 1–365 and
+`max` must be at least `completed`. Never commit a populated configuration.
 
 ## Run
 
@@ -185,6 +192,24 @@ uv run python -m examples.gabriels_workflow_v2.cli 42
 `-v` logs every prompt, reply, and subprocess. `--config path/to/workflow.yaml`
 selects another configuration. stdout is the pull-request URL and nothing else,
 so the run stays pipeable; progress goes to stderr.
+
+Reclaim disk from closed runs with:
+
+```sh
+uv run python -m examples.gabriels_workflow_v2.prune [--dry-run] [--config PATH] [-v]
+```
+
+It removes `issue-<n>` directories under `.git/gdw-v2/` once a completed run
+is older than `retention.completed_retention_days` (default 7) or any run,
+complete or not, is older than `retention.max_retention_days` (default 30).
+Age comes from `workflow.json`'s `completed_at` when present, otherwise the
+file's mtime for legacy runs. Before deleting, a registered
+`issue-<n>/worktree` is deregistered with `git worktree remove --force`; the
+directory itself is removed with `shutil.rmtree(..., onerror=_chmod_and_retry)`
+so mode-`000` overlay work directories do not need a preparatory `chmod -R`.
+`--dry-run` lists the same candidates without deleting anything or touching
+`git worktree`; `--config` defaults to `workflow.local` beside the config
+module and still requires a readable `github_app.private_key`.
 
 For issue `<n>` the workflow creates or resumes a linked worktree at
 `.git/gdw-v2/issue-<n>/worktree` on branch `gdwv2/issue-<n>`, so it can be run
@@ -224,5 +249,10 @@ mechanics without inheriting the decisions:
   installed GitHub App, and the markdown one comment is rendered from
 - [`contracts.py`](contracts.py) / [`config.py`](config.py) —
   the checkpoint store and handoff schema, and the workflow's own configuration
+  including `RetentionConfig` (`completed_retention_days`/`max_retention_days`)
+- [`retention.py`](retention.py) — `prune_issue_state` and the `onerror=_chmod_and_retry`
+  fail-safe that clears mode-`000` overlay work directories during `rmtree`
+- [`prune.py`](prune.py) — standalone `prune` entry point (`--dry-run`, `--config`, `-v`)
+  that loads `RetentionConfig` and removes stale `issue-<n>` trees via `retention.py`
 
 These were extracted from the V1 driver this replaced, which has been removed.

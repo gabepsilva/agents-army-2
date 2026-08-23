@@ -322,7 +322,12 @@ class DevelopmentWorkflowV2:
             self._without_handoff(finalization),
             attribution=self._ledger_markdown(),
         )
-        self.store.update_metadata(complete=True, pr_number=number, pr_url=url)
+        self.store.update_metadata(
+            complete=True,
+            pr_number=number,
+            pr_url=url,
+            completed_at=datetime.now(UTC).isoformat(),
+        )
         return url
 
     def completed_url(self) -> str | None:
