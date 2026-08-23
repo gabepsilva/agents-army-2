@@ -155,11 +155,14 @@ what the driver — not an agent — trusts itself to do.
   never set; `GH_CONFIG_DIR` points at an empty per-turn directory, so `gh`
   finds no host credentials even if the shim below were bypassed.
 - `$HOME`: a fresh, empty, per-turn `tmpfs`, distinct from the real `$HOME`.
-  Each backend's own login/session dotfile (`~/.claude`, `~/.codex`, `~/.grok`,
-  `~/.config/opencode`) is re-bound read-only into that ephemeral `$HOME` on a
-  best-effort basis — a wrong or missing entry only costs that backend the
-  convenience of resuming its host login, never turn correctness, since the
-  base bind below already leaves the real path readable.
+  Each backend's own login/session directory (`~/.claude`, `~/.codex`,
+  `~/.grok`, `~/.config/opencode`) is mounted into it as an `overlayfs`: the
+  real directory is the read-only lower layer, and writes land in a per-issue
+  upper layer under `.git/gdw/issue-<n>/agents/home/<backend>/`. The turn gets
+  the login it would have outside the sandbox and a session that survives to
+  the next turn, while the real config — which can carry hooks — stays
+  unwritable. `~/.claude.json` sits beside its directory rather than inside
+  it, so it is copied into that per-issue layer once and bound from there.
 - Named credential and socket paths: `~/.ssh`, `~/.aws`, `~/.config/gcloud`,
   `~/.azure`, `~/.netrc`, `~/.docker`, `~/.config/gh`, and `$SSH_AUTH_SOCK`
   (when set and present) are shadowed — a directory gets a fresh empty

@@ -30,11 +30,22 @@ instructions for it to follow.
   a `gh` shim that prints "owned by the GDW driver" is placed first on
   `PATH`.
 - **Ephemeral `$HOME`.** A fresh `tmpfs` per turn, not the host `$HOME`.
-  The active backend's login/session dotfile (`~/.claude`, `~/.codex`,
-  `~/.grok`, `~/.config/opencode` via `BACKEND_HOME_DIRS`) is re-bound
-  read-only into that ephemeral `$HOME` on a best-effort basis when the source
-  exists. A wrong or missing mapping only costs that backend the convenience of
-  resuming its host login, never turn correctness, because the base bind already
+  The active backend's login/session directory (`~/.claude`, `~/.codex`,
+  `~/.grok`, `~/.config/opencode` via `BACKEND_HOME_DIRS`) is mounted into
+  that ephemeral `$HOME` as an `overlayfs` whose **lower layer is the real
+  directory and whose upper layer is per-issue**
+  (`<state dir>/home/<backend>/upper`). A turn therefore reads the login and
+  settings it would outside the sandbox, and its writes land in the issue's
+  own layer — the real config is never modified. That matters in both
+  directions: a backend's settings file can carry hooks, so a writable bind
+  of the real directory would be a way to execute on the host outside the
+  sandbox; and a purely read-only bind under a per-turn `tmpfs` silently
+  broke every `--resume`, because the CLIs record a conversation under that
+  directory and the next turn found none. Single-file configs that sit beside
+  the directory (`~/.claude.json` via `BACKEND_HOME_FILES`) cannot be
+  overlaid, so they are copied once into `<state dir>/home/<backend>/files`
+  and bound read-write from there. A wrong or missing mapping costs that
+  backend its resumable session, not turn correctness — the base bind still
   leaves the real path readable.
 - **Named credential and socket shadows.** `~/.ssh`, `~/.aws`,
   `~/.config/gcloud`, `~/.azure`, `~/.netrc`, `~/.docker`, `~/.config/gh`,
@@ -67,7 +78,7 @@ instructions for it to follow.
   The terminating `--` before `orchestrator talk` is part of the locked argv
   order.
 - **Argv order is the isolation contract.** Later mounts win, so the order
-  `(1) unshare flags, (2) --clearenv/--setenv, (3) --ro-bind / /, (4) --proc/--dev, (5) conditional shadows, (6) private tmpfs, (7) ephemeral HOME + per-backend re-bind, (8) worktree bind, (9) agent state directory bind, (10) schema bind, (11) -- payload` is locked and tested via fake-`run` argv inspection. Step 7 comes *after* step 6, not before: the ephemeral isolation directory (holding the `gh` shim and `GH_CONFIG_DIR`) and the ephemeral `HOME` both live under the system temp directory, so mounting the private `--tmpfs /tmp` first and then re-binding both back at their real host paths (`--ro-bind <isolation dir> <isolation dir>`, then `--tmpfs <ephemeral HOME>`) is what makes them survive; the reverse order would have the private `/tmp` wipe them.
+  `(1) unshare flags, (2) --clearenv/--setenv, (3) --ro-bind / /, (4) --proc/--dev, (5) conditional shadows, (6) private tmpfs, (7) ephemeral HOME + per-backend config overlay, (8) worktree bind, (9) agent state directory bind, (10) schema bind, (11) -- payload` is locked and tested via fake-`run` argv inspection. Step 7 comes *after* step 6, not before: the ephemeral isolation directory (holding the `gh` shim and `GH_CONFIG_DIR`) and the ephemeral `HOME` both live under the system temp directory, so mounting the private `--tmpfs /tmp` first and then re-binding both back at their real host paths (`--ro-bind <isolation dir> <isolation dir>`, then `--tmpfs <ephemeral HOME>`) is what makes them survive; the reverse order would have the private `/tmp` wipe them.
 
 ## What deliberately remains visible
 

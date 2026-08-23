@@ -27,13 +27,31 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def remove_overlay_workdirs(tmp_path: Path):
+    """Take back the `overlayfs` work directories before pytest tries to.
+
+    The kernel leaves `work/work` mode 000 and owned by us. pytest's own
+    `rm_rf` of an old `tmp_path` trips over it, and `filterwarnings = error`
+    turns that into a failure in whichever run happens to do the cleanup.
+    """
+
+    yield
+    for workdir in tmp_path.glob("**/home/*/work"):
+        for entry in workdir.iterdir():
+            entry.chmod(0o700)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _run_sandboxed(tmp_path: Path, *, role: str, shell_command: str):
     """Build one real `bwrap` argv the way `AgentGateway._run_cli` does, and run it."""
 
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
     state_dir = tmp_path / "agents"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    agent_home = state_dir / "home" / "codex"
+    for part in ("upper", "work", "files"):
+        (agent_home / part).mkdir(parents=True, exist_ok=True)
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
 
@@ -50,6 +68,7 @@ def _run_sandboxed(tmp_path: Path, *, role: str, shell_command: str):
             backend="codex",
             worktree=worktree,
             state_dir=state_dir,
+            agent_home=agent_home,
             schema_path=schema,
             environment=environment,
             ephemeral_home=ephemeral_home,
@@ -164,6 +183,67 @@ def test_proc_and_dev_are_sandbox_local_not_the_hosts(tmp_path: Path) -> None:
         "core",
         "kcore",
     }
+
+
+def test_backend_config_writes_persist_across_turns_but_not_to_the_real_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outside_tmp_dir: Path
+) -> None:
+    """A backend CLI records its conversation under its own config directory.
+
+    Regression: that directory used to be `--ro-bind`ed under a per-turn
+    `tmpfs` `$HOME`, so every write vanished at turn exit and the next turn's
+    `--resume <session>` found no conversation. Every agent asked twice died.
+    """
+
+    fake_home = outside_tmp_dir
+    config = fake_home / ".codex"
+    config.mkdir(parents=True)
+    (config / "auth.json").write_text("login", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    first, _worktree = _run_sandboxed(
+        tmp_path,
+        role="implementer",
+        shell_command="cat $HOME/.codex/auth.json && echo session > $HOME/.codex/s.json",
+    )
+    assert first.returncode == 0, first.stderr
+    assert "login" in first.stdout
+
+    second, _worktree = _run_sandboxed(
+        tmp_path, role="implementer", shell_command="cat $HOME/.codex/s.json"
+    )
+    assert second.returncode == 0, second.stderr
+    assert "session" in second.stdout
+    assert not (config / "s.json").exists()
+
+
+def test_reviewer_cannot_write_the_backend_config_through_the_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outside_tmp_dir: Path
+) -> None:
+    """The overlay is per-issue scratch, never a path back to the real config.
+
+    A settings file under a backend's real config directory can carry hooks,
+    so a turn that could write it would be executing on the host outside the
+    sandbox.
+    """
+
+    fake_home = outside_tmp_dir
+    config = fake_home / ".codex"
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text("original", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    result, _worktree = _run_sandboxed(
+        tmp_path,
+        role="reviewer-quality",
+        shell_command="echo tampered > $HOME/.codex/settings.json; cat $HOME/.codex/settings.json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The write lands in the issue's upper layer, so the turn sees its own
+    # edit — and the real file it was overlaid from is untouched.
+    assert result.stdout.strip() == "tampered"
+    assert (config / "settings.json").read_text(encoding="utf-8") == "original"
 
 
 def test_missing_bwrap_fails_closed_before_any_orchestrator_call(

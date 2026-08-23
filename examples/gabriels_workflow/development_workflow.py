@@ -112,6 +112,12 @@ BACKEND_HOME_DIRS = {
     "grok": ".grok",
     "opencode": ".config/opencode",
 }
+# Single-file configs that sit beside, not inside, the directories above.
+# `bwrap` overlays a directory, never a file, so these are copied once into
+# the issue's own layer and bound from there.
+BACKEND_HOME_FILES = {
+    "claude": (".claude.json",),
+}
 # Shadowed with `--ro-bind /dev/null <path>` when present on the host, so an
 # agent turn cannot read them regardless of which env var points at them.
 SENSITIVE_HOME_RELATIVE_PATHS = (
@@ -1186,6 +1192,7 @@ class SandboxContext:
     backend: str
     worktree: Path
     state_dir: Path
+    agent_home: Path
     schema_path: Path
     environment: Mapping[str, str]
     ephemeral_home: Path
@@ -1254,6 +1261,16 @@ def _private_tmpfs_flags() -> list[str]:
 
 
 def _ephemeral_home_flags(context: SandboxContext) -> list[str]:
+    """The per-turn `$HOME`, with the backend's config overlaid into it.
+
+    The backend's real config directory is the overlay's lower layer, so a
+    turn reads the login and settings it would outside the sandbox but cannot
+    write them. Writes land in the issue's own upper layer instead, which is
+    what makes a session resumable: the CLIs record a conversation under their
+    config directory, and a turn that could only write a `tmpfs` destroyed at
+    exit would leave the next turn's `--resume` with no conversation to find.
+    """
+
     # Re-bound after `_private_tmpfs_flags`'s `--tmpfs /tmp`, since `bwrap`
     # resolves a bind's source against the host filesystem at the time each
     # flag runs, not against the sandbox's own already-`tmpfs`'d view.
@@ -1264,10 +1281,17 @@ def _ephemeral_home_flags(context: SandboxContext) -> list[str]:
         source = context.real_home / backend_dir
         if source.exists():
             flags += [
-                "--ro-bind",
+                "--overlay-src",
                 str(source),
+                "--overlay",
+                str(context.agent_home / "upper"),
+                str(context.agent_home / "work"),
                 str(context.ephemeral_home / backend_dir),
             ]
+    for name in BACKEND_HOME_FILES.get(context.backend, ()):
+        carried = context.agent_home / "files" / name
+        if carried.exists():
+            flags += ["--bind", str(carried), str(context.ephemeral_home / name)]
     return flags
 
 
@@ -1498,11 +1522,13 @@ class AgentGateway:
     ) -> subprocess.CompletedProcess[str]:
         state_dir = self.state_file.parent
         state_dir.mkdir(parents=True, exist_ok=True)
+        agent_home = self._agent_home(turn.backend)
         context = SandboxContext(
             role=turn.role,
             backend=turn.backend,
             worktree=self.workdir,
             state_dir=state_dir,
+            agent_home=agent_home,
             schema_path=turn.schema_path,
             environment=environment,
             ephemeral_home=turn.ephemeral_home,
@@ -1530,6 +1556,26 @@ class AgentGateway:
             LOGGER.error("orchestrator: '%s' failed: %s", args[0], message)
             raise WorkflowError(f"orchestrator CLI failed: {message}")
         return result
+
+    def _agent_home(self, backend: str) -> Path:
+        """This issue's writable layer for one backend's config directory.
+
+        Created under the agent state directory, which the sandbox already
+        treats as the turn's own scratch space. `upper` and `work` must be on
+        one filesystem for `overlayfs`; `files` carries the single-file
+        configs, copied once so the real ones are never written.
+        """
+
+        home = self.state_file.parent / "home" / backend
+        for name in ("upper", "work", "files"):
+            (home / name).mkdir(parents=True, exist_ok=True)
+        for name in BACKEND_HOME_FILES.get(backend, ()):
+            carried = home / "files" / name
+            source = Path.home() / name
+            if not carried.exists() and source.is_file():
+                carried.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, carried)
+        return home
 
     def _prompt(self, name: str, values: Mapping[str, str]) -> str:
         """Fill one prompt template, judging completeness by the template alone.
