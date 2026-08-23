@@ -39,8 +39,18 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Report every directory reclaimed, on the failing exit path too.
+
+    A prune that steps over one wedged directory still returns the ones it
+    freed, and an error raised after that must not swallow them: a caller
+    piping stdout into a cleanup log would otherwise be told nothing was
+    freed when directories were.
+    """
+
     options = _parser().parse_args(argv)
     configure_logging(options.verbose)
+    removed: list[Path] = []
+    status = 0
     try:
         config = load_config(options.config)
         repository = RelayRepository(Path.cwd().resolve())
@@ -54,10 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except WorkflowError as exc:
         print(f"V2 prune stopped: {exc}", file=sys.stderr)
-        return 1
+        status = 1
     for path in removed:
         print(path)
-    return 0
+    return status
 
 
 if __name__ == "__main__":  # pragma: no cover

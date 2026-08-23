@@ -253,3 +253,69 @@ def test_prune_cli_prints_removed_paths_and_reports_workflow_errors(
 
     with pytest.raises(SystemExit):
         prune._parser().parse_args(["--unknown-flag"])
+
+
+def test_prune_never_removes_the_issue_currently_being_prepared(
+    tmp_path: Path,
+) -> None:
+    gdw_root = tmp_path / "gdw-v2"
+    current = _issue(gdw_root, 30, complete=True)
+    _age(current, 40)
+    (current / "worktree").mkdir()
+    sibling = _issue(gdw_root, 31, complete=True)
+    _age(sibling, 40)
+    repository = FakeRepository([])
+
+    removed = prune_issue_state(
+        gdw_root,
+        RetentionConfig(),
+        repository,
+        now=NOW,
+        dry_run=False,
+        skip=current / "worktree" / "..",
+    )
+
+    assert removed == [sibling]
+    assert current.exists()
+    assert CheckpointStore(current).metadata["issue"] == 30
+    assert not sibling.exists()
+
+
+def test_prune_steps_over_a_directory_it_cannot_remove(tmp_path: Path) -> None:
+    gdw_root = tmp_path / "gdw-v2"
+    stuck = _issue(gdw_root, 40, complete=True)
+    unreadable = _issue(gdw_root, 41, complete=True)
+    survivor = _issue(gdw_root, 42, complete=True)
+    for issue_root in (stuck, unreadable, survivor):
+        _age(issue_root, 8)
+        (issue_root / "worktree").mkdir()
+
+    class RefusingRepository(FakeRepository):
+        def _call(self, *args: str) -> str:
+            if args[:2] == ("worktree", "remove"):
+                if args[-1] == str(stuck / "worktree"):
+                    raise WorkflowError("git worktree remove --force failed")
+                if args[-1] == str(unreadable / "worktree"):
+                    raise PermissionError("cannot unlink administrative files")
+            return super()._call(*args)
+
+    repository = RefusingRepository(
+        [str(issue / "worktree") for issue in (stuck, unreadable, survivor)]
+    )
+
+    removed = prune_issue_state(
+        gdw_root, RetentionConfig(), repository, now=NOW, dry_run=False
+    )
+
+    assert removed == [survivor]
+    assert not survivor.exists()
+    assert stuck.exists()
+    assert unreadable.exists()
+
+
+def test_retention_config_ceiling_must_cover_the_completed_threshold() -> None:
+    assert RetentionConfig(completed_retention_days=9, max_retention_days=9)
+    with pytest.raises(
+        ValueError, match="max_retention_days must be at least completed_retention_days"
+    ):
+        RetentionConfig(completed_retention_days=10, max_retention_days=9)

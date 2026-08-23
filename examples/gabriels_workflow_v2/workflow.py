@@ -285,7 +285,7 @@ class DevelopmentWorkflowV2:
             specification,
             {"implementation": implementation, "documentation": documentation},
         )
-        reviews, ci = self._review_until_approved(specification, ci)
+        reviews, ci = self._review_until_approved(specification, ci, issue)
         self.repository.require_changed(self.initial_snapshot)
         title = str(specification["title"]).replace("\n", " ")[:72]
         self.repository.commit(
@@ -516,15 +516,33 @@ class DevelopmentWorkflowV2:
         raise WorkflowStopped(f"CI exceeded {self.budgets.max_ci_attempts} attempts")
 
     def _review_until_approved(
-        self, specification: dict[str, Any], ci: dict[str, Any]
+        self,
+        specification: dict[str, Any],
+        ci: dict[str, Any],
+        issue: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Review, repair, and re-run CI until both reviewers approve.
 
         Returns the approving reviews together with the CI evidence they were
         approved against, which is not the run this started with once a
         repair round has happened.
+
+        The specification reviewer also gets the canonical issue, because from
+        `_specify` onward the specification was the only ground truth: a
+        criterion the specifier quietly narrowed, or an `out_of_scope` entry it
+        invented, read as satisfied to everyone downstream. This is the one
+        stage that sees both documents, so it is where that drift can still be
+        caught. The quality reviewer does not get it — its axes are code, not
+        scope, a second opinion on the same drift would only double-report it,
+        and its context already carries the diff plus two review skills.
+
+        The issue defaults to the run's stored snapshot rather than being
+        required from the caller, since it is run state that `_issue_snapshot`
+        already serves from local disk; a caller holding it passes it to save
+        the read.
         """
 
+        issue = self._issue_snapshot() if issue is None else issue
         for round_number in range(1, self.budgets.max_review_rounds + 1):
             snapshot = self.repository.snapshot()
             reviews = {
@@ -540,6 +558,11 @@ class DevelopmentWorkflowV2:
                             ),
                             "diff_against": self.base_sha,
                             "ci": self._ci_summary(ci),
+                            **(
+                                {"canonical_issue": issue}
+                                if kind == "specification"
+                                else {}
+                            ),
                         },
                         ()
                         if kind == "specification"

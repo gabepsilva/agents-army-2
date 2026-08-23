@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from collections import deque
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -318,6 +320,33 @@ def test_happy_path_is_eight_compact_turns_and_two_github_summaries(
     assert len(agents.calls) == 8
     assert publisher.issue_calls == 1
     assert len(publisher.comments) == 2
+
+
+def test_a_finished_run_records_when_it_completed_for_retention(
+    tmp_path: Path,
+) -> None:
+    replies = [
+        _proposal(),
+        _grill(),
+        _specification(),
+        _work(),
+        _work("documented"),
+        _review(),
+        _review(),
+        _finalization(),
+    ]
+    workflow, _publisher, _repository, _agents = _workflow(tmp_path, replies)
+    before = datetime.now(UTC)
+
+    assert workflow.run() == "https://example.test/pull/9"
+
+    payload = json.loads(
+        (tmp_path / "state" / "workflow.json").read_text(encoding="utf-8")
+    )
+    assert payload["complete"] is True
+    completed_at = datetime.fromisoformat(payload["completed_at"])
+    assert completed_at.tzinfo is not None
+    assert before <= completed_at <= datetime.now(UTC)
 
 
 def test_resume_uses_local_issue_and_stage_checkpoints(tmp_path: Path) -> None:
@@ -944,6 +973,67 @@ def test_setup_names_the_missing_tool_or_backend_before_paying_a_model(
     )
     with pytest.raises(WorkflowError, match="codex is not installed"):
         setup.prepare_workflow(42, config)
+
+
+def test_setup_prunes_a_stale_sibling_issue_before_preparing_this_one(
+    origin_checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gdw_root = origin_checkout / ".git" / "gdw-v2"
+    stale = CheckpointStore(gdw_root / "issue-7")
+    stale.initialize(7, "gdwv2/issue-7", "base-sha")
+    stale.update_metadata(
+        complete=True,
+        pr_number=1,
+        pr_url="https://example.test/pull/1",
+        completed_at=(datetime.now(UTC) - timedelta(days=40)).isoformat(),
+    )
+
+    workflow = _prepared(monkeypatch, origin_checkout, _setup_config())
+
+    assert not (gdw_root / "issue-7").exists()
+    assert workflow.store.root == gdw_root / "issue-42"
+    assert (gdw_root / "issue-42" / "worktree").is_dir()
+
+
+def test_setup_never_prunes_the_issue_it_is_preparing(
+    origin_checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _setup_config()
+    first = _prepared(monkeypatch, origin_checkout, config)
+    issue_root = origin_checkout / ".git" / "gdw-v2" / "issue-42"
+    checkpoint = first.store.checkpoint_path("expansion-1")
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text("{}", encoding="utf-8")
+    (issue_root / "worktree" / "half-done.py").write_text("wip\n", encoding="utf-8")
+    CheckpointStore(issue_root).update_metadata(
+        complete=True,
+        pr_number=1,
+        pr_url="https://example.test/pull/1",
+        completed_at=(datetime.now(UTC) - timedelta(days=90)).isoformat(),
+    )
+
+    second = _prepared(monkeypatch, origin_checkout, config)
+
+    assert (issue_root / "worktree" / "half-done.py").is_file()
+    assert checkpoint.is_file()
+    assert second.store.metadata["issue"] == 42
+    assert second.initial_snapshot == first.initial_snapshot
+
+
+def test_setup_prepares_the_run_even_when_retention_pruning_fails(
+    origin_checkout: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> list[Path]:
+        raise WorkflowError("git worktree list --porcelain failed")
+
+    monkeypatch.setattr(setup, "prune_issue_state", refuse)
+
+    with caplog.at_level(logging.WARNING, logger="gdw"):
+        workflow = _prepared(monkeypatch, origin_checkout, _setup_config())
+
+    assert (origin_checkout / ".git" / "gdw-v2" / "issue-42" / "worktree").is_dir()
+    assert workflow.store.metadata["issue"] == 42
+    assert "git worktree list --porcelain failed" in caplog.text
 
 
 def test_clarification_revises_with_the_review_handoff_then_settles(

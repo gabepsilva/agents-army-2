@@ -48,6 +48,7 @@ def prune_issue_state(
     *,
     now: datetime,
     dry_run: bool = False,
+    skip: Path | None = None,
 ) -> list[Path]:
     """Remove completed and stale issue-N directories under `gdw_root`.
 
@@ -60,19 +61,34 @@ def prune_issue_state(
     abandoned in-flight run does not linger forever. `dry_run` returns the
     same candidate list without deleting anything or touching git's worktree
     registry.
+
+    `skip` names one issue directory to leave alone whatever its age, because
+    a run that prunes while preparing its own state would delete the tree it
+    is about to resume; it is matched on the resolved path so a caller that
+    reaches the same directory by another spelling still protects it. One
+    directory that refuses to go — a worktree registration `git worktree
+    remove --force` chokes on, an `rmtree` that fails — is logged and stepped
+    over rather than abandoning every candidate behind it, and the returned
+    list names only what was actually removed.
     """
 
+    protected = skip.resolve() if skip is not None else None
     removed = []
     for issue_root in sorted(gdw_root.glob("issue-*")):
-        if not issue_root.is_dir():
+        if not issue_root.is_dir() or issue_root.resolve() == protected:
             continue
         age_days = _age_days(issue_root, now)
         if age_days is None or not _prunable(issue_root, age_days, retention):
             continue
-        removed.append(issue_root)
         if dry_run:
+            removed.append(issue_root)
             continue
-        _remove(issue_root, repository)
+        try:
+            _remove(issue_root, repository)
+        except (WorkflowError, OSError) as exc:
+            LOGGER.warning("retention: leaving %s in place: %s", issue_root, exc)
+            continue
+        removed.append(issue_root)
     return removed
 
 
