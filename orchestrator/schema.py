@@ -1,17 +1,19 @@
 """Load a reply schema, and check a reply against it.
 
-`--schema` has to mean the same thing on all three CLIs. Two of them
-(claude, grok) take any JSON Schema and accept a lax one; codex rejects a
+`--schema` has to mean the same thing on every backend. Claude and grok take
+any JSON Schema and accept a lax one; codex rejects a
 schema that is not in OpenAI's strict structured-outputs dialect with an HTTP
 400 before the turn runs. A schema that works on two backends and 400s on the
 third is a parity break, so the strict subset is enforced here, once, for
-every backend.
+every backend. OpenCode has no CLI schema flag, so its reply is checked by the
+same validation and repair loop after the turn.
 
 The rules below are the ones that were actually measured against
 `codex exec --output-schema` (2026-08-20, codex-cli 0.147.0), not a reading of
-a spec: every other shape is passed through. `anyOf` and `$ref`/`$defs` in
+a spec: every other shape is passed through. OpenCode 1.18.21 is the tested
+minimum for its event envelope. `anyOf` and `$ref`/`$defs` in
 particular are *accepted*, because codex accepts them — rejecting a schema all
-three backends handle is as much a parity break as accepting one that only two
+backends handle is as much a parity break as accepting one that only two
 do, in the more annoying direction. Anything unmeasured that codex still
 refuses falls through to its own error message, which the codex backend now
 surfaces verbatim.
@@ -34,15 +36,18 @@ from jsonschema.validators import validator_for
 from backends.base import OutputSchema
 
 # Appended to the prompt whenever a schema is active, identically on every
-# backend. All three CLIs constrain the reply themselves — 23/23 conforming
-# replies under adversarial prompting on claude, 4/4 on codex, grok not
-# measurable — so this is a hedge, not the mechanism. It stays uniform because
-# per-backend prompt text is the exact divergence this interface exists to
-# prevent, and because the one backend that could not be trialled must not be
-# the one running without a hedge.
+# backend. Claude, codex, and grok constrain the reply themselves; OpenCode
+# relies on the validation/repair loop because its CLI has no schema flag. This
+# instruction stays uniform because per-backend prompt text is the exact
+# divergence this interface exists to prevent.
 SCHEMA_INSTRUCTION = (
     "Reply with JSON conforming to the supplied output schema, and nothing else."
 )
+
+# Introduces the document on a backend whose CLI has no flag to carry it. The
+# heading is part of the prompt, so it names what follows rather than assuming
+# the model recognises a bare JSON Schema.
+SCHEMA_HEADING = "The output schema is:"
 
 # Keywords codex refuses outright, each measured as a 400 with a strict schema
 # on both branches. `anyOf` is deliberately absent: it was measured accepted.
@@ -210,7 +215,7 @@ def load_schema(path: Path) -> OutputSchema:
         )
 
     # Re-serialised compactly rather than passed through as written: this text
-    # becomes one argv entry and one logged line on two of the three backends,
+    # becomes one argv entry and one logged line on the inline-schema backends,
     # and the file's own formatting says nothing the schema does not.
     return OutputSchema(
         text=json.dumps(document, separators=(",", ":"), sort_keys=True),
@@ -245,15 +250,41 @@ def validate_reply(reply: str, structured: dict | None, schema: OutputSchema) ->
     return structured
 
 
-def compose_schema_prompt(prompt: str) -> str:
+def _instruction(unenforced: OutputSchema | None) -> str:
+    """The instruction, carrying the document itself when nothing else does.
+
+    "conforming to the supplied output schema" is a coherent sentence on a
+    backend whose CLI was handed the schema. On one that was not, it points at
+    something the model was never given, and a live opencode 1.18.21 turn said
+    so in as many words: "I don't have access to the output schema you're
+    referring to." An instruction that cannot be followed is not a hedge, so
+    the backend that has no flag to carry the document gets it here instead.
+
+    This is the one place backend-specific prompt text is written, and it is
+    keyed on `AgentBackend.enforces_schema` rather than on a backend name, so
+    it stays a property of the CLI's capability and not a special case.
+    """
+    if unenforced is None:
+        return SCHEMA_INSTRUCTION
+    return f"{SCHEMA_INSTRUCTION}\n\n{SCHEMA_HEADING}\n{unenforced.text}"
+
+
+def compose_schema_prompt(prompt: str, unenforced: OutputSchema | None = None) -> str:
     """The prompt the agent sees on the first attempt: user text, then the line."""
-    return f"{prompt}\n\n{SCHEMA_INSTRUCTION}"
+    return f"{prompt}\n\n{_instruction(unenforced)}"
 
 
-def repair_prompt(error: ReplyValidationError) -> str:
+def repair_prompt(
+    error: ReplyValidationError, unenforced: OutputSchema | None = None
+) -> str:
     """The prompt for a retry: what was wrong, then the same line again.
 
     The reply itself is not quoted back — the session already holds it, and
     the model's own text is data, not something to re-feed as instruction.
+
+    The schema *is* repeated, though, on a backend that needs it inline: the
+    session holds it too, and a model still lost it between attempts in the
+    measured run, answering the repair with "I don't have access to the output
+    schema" after having been shown it one turn earlier.
     """
-    return f"That reply was rejected: {error.correction}\n\n{SCHEMA_INSTRUCTION}"
+    return f"That reply was rejected: {error.correction}\n\n{_instruction(unenforced)}"

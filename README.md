@@ -1,6 +1,7 @@
 # Agents Army
 
-A CLI that manages a fleet of coding-agent CLI sessions (Claude Code, Codex, ...).
+A CLI that manages a fleet of coding-agent CLI sessions (Claude Code, Codex,
+Grok, OpenCode, ...).
 Each agent is a named, persistent conversation backed by a real CLI session, so
 you can create many agents and talk to each one independently, resuming its
 session every time.
@@ -13,6 +14,7 @@ session every time.
   - Claude Code: `claude`
   - Codex: `codex`
   - Grok: `grok`
+  - OpenCode 1.18.21+: `opencode`
 
 ## Setup
 
@@ -80,7 +82,7 @@ uv run orchestrator --version
 
 `--schema PATH` constrains a turn's reply to a JSON Schema and prints
 the validated object instead of the raw text. It composes with `--skill`, and
-it works the same way on all three backends:
+it works across all backends:
 
 ```sh
 cat > verdict.json <<'JSON'
@@ -107,9 +109,13 @@ uv run orchestrator talk reviewer --schema verdict.json \
 ```
 
 Underneath, each CLI gets the flag it understands — `--json-schema` inline for
-`claude` and `grok`, `--output-schema <file>` for `codex` — and the same one
-extra prompt line on every backend. The three CLIs constrain the reply
-themselves; the line and the retries below are the fallback, not the mechanism.
+`claude` and `grok`, `--output-schema <file>` for `codex`. OpenCode has no
+schema flag, so the shared validation and repair loop enforces its reply after
+the turn, and the schema document travels in the prompt because nothing else
+carries it there. Every backend gets the same instruction line; only the
+document itself is added, and only for a backend whose CLI cannot take it.
+OpenCode 1.18.21 is the tested minimum because its NDJSON event envelope is
+not a stable public contract.
 
 **Schemas must be strict.** `codex` rejects a lax schema with an HTTP 400
 before the turn runs, while `claude` and `grok` accept one, so the orchestrator
@@ -117,7 +123,8 @@ enforces the strict subset itself and reports the offending path in the same
 wording whatever the backend. Every object — nested ones, and array `items`
 too — needs `"additionalProperties": false` and a `"required"` listing every
 one of its properties, and `oneOf`, `allOf` and `not` are refused. `anyOf`,
-`$ref` and `$defs` are fine: those were measured working on all three.
+`$ref` and `$defs` are fine: those were measured working on the schema-capable
+backends.
 
 ```sh
 uv run orchestrator talk reviewer --schema lax.json --prompt "..."
@@ -195,7 +202,7 @@ whether that is `create` or the first turn that names those values. Later turns
 that pass any of `-b`/`--backend`, `--model`, or `--reasoning-effort` assert the
 agent's exact configuration and fail on a mismatch. A turn with no config flags
 silently reuses the stored configuration.
-Currently available: `claude`, `codex`, `grok`.
+Currently available: `claude`, `codex`, `grok`, `opencode`.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
 the class in the `_BACKENDS` table in `backends/registry.py`. A backend only
@@ -203,15 +210,16 @@ has to implement `name` and
 `run_turn(prompt, session_id, cwd, timeout, schema)`. `run_turn` starts a
 fresh CLI session when `session_id` is `None` and resumes it otherwise,
 returning a `TurnResult` with the reply and the session id for the next turn.
-`schema` is `None` unless `--schema` was used; when it is set the
-backend passes it to its CLI in whichever form that CLI wants and fills
-`TurnResult.structured`. Failures raise a `TurnError` subclass so `talk` can
-print the message without knowing which CLI ran.
+`schema` is `None` unless `--schema` was used. Schema-capable backends declare
+`enforces_schema = True`, pass the schema to their CLIs in whichever form those
+CLIs want, and fill `TurnResult.structured`; OpenCode declares it `False`, is
+sent the document inline in the prompt, and has its reply enforced by
+orchestrator validation and repair instead. Failures raise a `TurnError` subclass so `talk` can print the
+message without knowing which CLI ran.
 
-Every backend runs its CLI with `stdin=DEVNULL`. A CLI whose stdin is an
-inherited pipe rather than a terminal blocks until it is killed, so without it
-a turn from cron, CI, or any host script burns its whole timeout and returns
-nothing.
+Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` to avoid blocking
+on an inherited pipe. OpenCode receives the prompt through `input=` instead;
+its no-positional-message mode reads stdin verbatim.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
@@ -226,6 +234,16 @@ reads a bare argument starting with `-` as a flag and rejects the run. Resume
 uses `--resume`; Grok's `--session-id` only names a **new** session and errors
 if that id already exists. The JSON envelope is camelCase (`sessionId`,
 `text`), not Claude's `session_id` / `result`.
+
+The OpenCode backend runs `opencode run --format json --auto --dir <cwd>`
+with the prompt on stdin and resumes with `--session`. Its `--model` and
+`--variant` options map to the configured model and reasoning effort. Version
+1.18.21 is the tested minimum. Because OpenCode has no schema-enforcing flag,
+the orchestrator's validation and repair loop enforces schemas for it, and the
+schema document is appended to the prompt so the reply it asks for is one the
+model has actually been shown. A reply that arrives wrapped in a ```json fence
+— the measured 1.18.21 behaviour — still yields its object: the adapter scans
+the reply for it rather than parsing the whole text.
 
 ### State
 
@@ -260,11 +278,12 @@ To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
 ## Project layout
 
 ```
-backends/          # AgentBackend interface + implementations (claude, codex, grok)
+backends/          # AgentBackend interface + implementations
   base.py          # abstract AgentBackend + TurnResult + TurnError
   claude.py        # ClaudeBackend (resumes via --resume)
   codex.py         # CodexBackend (resumes via codex exec resume)
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
+  opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
 orchestrator/      # the orchestrator CLI (create / talk / list / delete)
   schema.py        # --schema loading, strict-subset checks, reply validation

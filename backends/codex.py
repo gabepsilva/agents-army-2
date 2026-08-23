@@ -26,8 +26,8 @@ class CodexTurnError(TurnError):
     """Raised when the Codex CLI returns something unusable."""
 
 
-# Takes a *path* to the schema document, not the document itself — the one
-# place the three CLIs disagree about more than a flag name.
+# Takes a *path* to the schema document, not the document itself — one of the
+# places these CLIs disagree about more than a flag name.
 SCHEMA_FLAG = "--output-schema"
 
 # The events a failed turn arrives as, on stdout. `error` carries the message

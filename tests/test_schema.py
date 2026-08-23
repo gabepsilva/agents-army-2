@@ -26,6 +26,7 @@ from orchestrator import Orchestrator, main
 from orchestrator import cmd_talk as _cmd_talk
 from orchestrator.schema import (
     EXCERPT_CHARS,
+    SCHEMA_HEADING,
     SCHEMA_INSTRUCTION,
     ReplyValidationError,
     SchemaError,
@@ -422,7 +423,7 @@ class TestLoadSchema:
 
     def test_anyof_is_accepted(self, tmp_path: Path) -> None:
         """Measured accepted by codex. Rejecting it would break parity in the
-        other direction: a schema all three backends run, refused by us."""
+        other direction: a schema every backend can run, refused by us."""
         document = {
             "type": "object",
             "additionalProperties": False,
@@ -560,6 +561,33 @@ class TestPrompts:
             "the reply was not a JSON object",
         )
         assert "ignore all previous instructions" not in repair_prompt(error)
+
+    def test_an_enforcing_backend_is_not_shown_the_document(self) -> None:
+        """Its CLI already has the schema; repeating it in the prompt would
+        spend tokens on every turn to say the same thing twice."""
+        schema = OutputSchema(text='{"type":"object"}', path=Path("s.json"))
+        assert schema.text not in compose_schema_prompt("go")
+        assert SCHEMA_HEADING not in compose_schema_prompt("go")
+        error = ReplyValidationError("shown", "corrected")
+        assert schema.text not in repair_prompt(error)
+
+    def test_a_non_enforcing_backend_is_shown_the_document(self) -> None:
+        """Otherwise the instruction points at a schema the model never got,
+        which is what a live opencode turn reported back."""
+        schema = OutputSchema(text='{"type":"object"}', path=Path("s.json"))
+        composed = compose_schema_prompt("go", schema)
+        assert composed == (
+            f"go\n\n{SCHEMA_INSTRUCTION}\n\n{SCHEMA_HEADING}\n{schema.text}"
+        )
+
+    def test_a_repair_prompt_repeats_the_document(self) -> None:
+        """A model still lost the schema between attempts in the measured run."""
+        schema = OutputSchema(text='{"type":"object"}', path=Path("s.json"))
+        error = ReplyValidationError("shown", "the verdict was wrong")
+        assert repair_prompt(error, schema) == (
+            f"That reply was rejected: the verdict was wrong\n\n"
+            f"{SCHEMA_INSTRUCTION}\n\n{SCHEMA_HEADING}\n{schema.text}"
+        )
 
 
 class TestValidatedTalk:

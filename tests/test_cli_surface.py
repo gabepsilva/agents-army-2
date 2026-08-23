@@ -155,6 +155,41 @@ def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
     assert excinfo.value.code == 2
 
 
+def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+
+    def fail() -> None:
+        raise AssertionError("invalid CLI input constructed Orchestrator")
+
+    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    for argv in (
+        ["talk", "a", "-p", "one", "--prompt-file", str(prompt_file)],
+        ["talk", "a", "--prompt-file", str(prompt_file), "--", "two"],
+        [
+            "talk",
+            "a",
+            "-p",
+            "one",
+            "--prompt-file",
+            str(prompt_file),
+            "--",
+            "two",
+        ],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            orchestrator.main(argv)
+        assert excinfo.value.code == 2
+        assert (
+            "orchestrator talk: error: talk requires exactly one prompt source"
+            in capsys.readouterr().err
+        )
+
+
 @pytest.mark.parametrize(
     "argv",
     [

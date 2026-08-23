@@ -6,6 +6,7 @@ from backends.base import AgentBackend
 from backends.claude import ClaudeBackend
 from backends.codex import CodexBackend
 from backends.grok import GrokBackend
+from backends.opencode import OpenCodeBackend
 
 
 class UnknownBackendError(ValueError):
@@ -16,6 +17,7 @@ _BACKENDS: dict[str, type[AgentBackend]] = {
     "claude": ClaudeBackend,
     "codex": CodexBackend,
     "grok": GrokBackend,
+    "opencode": OpenCodeBackend,
 }
 
 

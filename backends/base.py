@@ -156,10 +156,12 @@ def structured_reply(
 class AgentBackend(ABC):
     """Abstract interface defining interaction with coding-agent CLIs.
 
-    Different CLIs (Claude, Codex, Grok, etc.) have different flag conventions,
+    Different CLIs (Claude, Codex, Grok, OpenCode, etc.) have different flag conventions,
     session lifecycle mechanisms, and execution requirements. Concrete
     subclasses encapsulate these differences.
     """
+
+    enforces_schema: bool = True
 
     def __init__(
         self,

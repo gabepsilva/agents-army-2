@@ -1171,7 +1171,7 @@ class DevelopmentWorkflow:
                 "implement",
                 "implementation",
                 {"SPECIFICATION_JSON": _json(specification)},
-                skills=("code-simplification",),
+                skills=("code-simplification", "caveman"),
             )
         )
         self._require_complete(implementation, "implementation", "implementation")
@@ -1183,6 +1183,7 @@ class DevelopmentWorkflow:
                 "document",
                 "documentation",
                 {"SPECIFICATION_JSON": _json(specification)},
+                skills=("caveman",),
             )
         )
         self._require_complete(documentation, "documentation", "documentation")
@@ -1351,7 +1352,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(result),
                     },
-                    skills=("code-simplification",),
+                    skills=("code-simplification", "caveman"),
                 )
             )
             self._require_complete(repair, "CI repair", f"repair-{prefix}-{attempt}")
@@ -1418,7 +1419,7 @@ class DevelopmentWorkflow:
                         "SPECIFICATION_JSON": _json(specification),
                         "FAILURE_EVIDENCE": _json(final),
                     },
-                    skills=("code-simplification",),
+                    skills=("code-simplification", "caveman"),
                 )
             )
             self._require_complete(
@@ -1528,7 +1529,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("issue", type=_positive)
     parser.add_argument("--repo", help="GitHub OWNER/REPO; defaults to this checkout")
     parser.add_argument(
-        "--backend", default="claude", choices=("claude", "codex", "grok")
+        "--backend",
+        default="claude",
+        choices=("claude", "codex", "grok", "opencode"),
     )
     parser.add_argument("--base", help="PR base branch; defaults to repository default")
     parser.add_argument(

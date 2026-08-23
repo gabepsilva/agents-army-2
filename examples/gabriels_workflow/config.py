@@ -52,8 +52,8 @@ class RoleConfig(BaseModel):
     @classmethod
     def supported_backend(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"claude", "codex", "grok"}:
-            raise ValueError("must be one of: claude, codex, grok")
+        if normalized not in {"claude", "codex", "grok", "opencode"}:
+            raise ValueError("must be one of: claude, codex, grok, opencode")
         return normalized
 
     @field_validator("model", "reasoning_effort")

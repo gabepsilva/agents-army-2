@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Long-lived orchestrator holding an array of agents.
 
-Each agent owns a persistent Claude Code, Codex, or Grok CLI session. Every
+Each agent owns a persistent Claude Code, Codex, Grok, or OpenCode CLI session. Every
 time you talk to an agent it resumes that session with your prompt and returns
 the reply, so each agent keeps its own conversation history across messages.
 """
@@ -289,8 +289,16 @@ class Orchestrator:
         can, holding this agent's lock for an hour and a half to do it. Each
         attempt gets whatever is left.
         """
+        # None on a CLI that was handed the schema itself; the document on one
+        # that was not, so the prompt can carry what the flag could not.
+        unenforced = None if agent.backend.enforces_schema else schema
+        if unenforced is not None:
+            log.warning(
+                "backend %s: schema is enforced via validation/repair, not the CLI",
+                agent.backend.name,
+            )
         deadline = time.monotonic() + timeout
-        attempt_prompt = compose_schema_prompt(prompt)
+        attempt_prompt = compose_schema_prompt(prompt, unenforced)
         attempt = 0
         while True:
             attempt += 1
@@ -323,7 +331,7 @@ class Orchestrator:
                         timeout,
                     )
                     raise
-                attempt_prompt = repair_prompt(exc)
+                attempt_prompt = repair_prompt(exc, unenforced)
             else:
                 # `else`, not a fall-through after the except: a `return` at
                 # this indentation would hand back the attempt that just
@@ -797,7 +805,7 @@ def _print_version() -> None:
 MIN_PYTHON = (3, 11)
 
 # Every tool `doctor` reports, in the order it prints them, paired
-# with whether its absence is fine. Only jq is optional: the three agent CLIs
+# with whether its absence is fine. Only jq is optional: agent CLIs
 # are listed separately rather than collapsed into one "at least one" line, so
 # the report says which backends this machine can actually run.
 DEPENDENCY_TOOLS: tuple[tuple[str, bool], ...] = (
@@ -805,6 +813,7 @@ DEPENDENCY_TOOLS: tuple[tuple[str, bool], ...] = (
     ("claude", False),
     ("codex", False),
     ("grok", False),
+    ("opencode", False),
     ("jq", True),
 )
 

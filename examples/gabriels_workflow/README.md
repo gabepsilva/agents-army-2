@@ -28,7 +28,9 @@ runs one schema-validated `orchestrator talk ... --prompt ...` call per turn,
 passing the configured backend/model/effort so the call creates or asserts the
 agent before running the turn. The example does not import or construct the
 Python `Orchestrator` API. The orchestrator CLI then invokes the selected
-`claude`, `codex`, or `grok` backend CLI.
+`claude`, `codex`, `grok`, or `opencode` backend CLI. OpenCode 1.18.21 is the
+tested minimum; its schema is inlined in the prompt and enforced by the
+otherwise-shared validation/repair loop.
 
 The issue body is sent only for the initial expansion. Later clarification and
 specification turns receive the five latest non-workflow comments, preserving
@@ -119,4 +121,4 @@ a stopped workflow ends with the reminder that rerunning resumes it.
 
 The required local tools are `git`, `make`, `uv`, `orchestrator`, and every
 authenticated agent CLI referenced by the configuration: `claude`, `codex`,
-or `grok`.
+`grok`, or `opencode`.

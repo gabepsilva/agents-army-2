@@ -56,17 +56,18 @@ configuration and fails on a mismatch, rather than switching a
 conversation's backend mid-stream; a turn with no config flags silently
 reuses what's stored.
 
-Currently available: `claude`, `codex`, `grok`.
+Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.21).
 
 | backend | CLI invocation | resume | notes |
 |---|---|---|---|
 | `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
 | `codex` | `codex exec` | `codex exec resume` | |
 | `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
+| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
-Every backend runs its CLI with `stdin=DEVNULL` — a CLI whose stdin is an
-inherited pipe rather than a terminal blocks until killed, which would burn
-a turn's whole timeout when run from cron, CI, or another script.
+Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` — a CLI whose
+stdin is an inherited pipe rather than a terminal blocks until killed. OpenCode
+uses `input=prompt` instead so its prompt is read verbatim.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and
 registering the class in the `_BACKENDS` table in `backends/registry.py`. A
