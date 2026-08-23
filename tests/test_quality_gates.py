@@ -662,6 +662,84 @@ class TestSemgrepRules:
         assert "no-shell-true-subprocess" in ids
         assert "no-bare-except" in ids
 
+    def test_planted_inherited_env_agent_subprocess_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        if not _docker_available():
+            pytest.skip(reason="docker required to plant-test Semgrep rules (#2)")
+        shutil.copy(REPO / "semgrep.yml", tmp_path / "semgrep.yml")
+        (tmp_path / "no_env.py").write_text(
+            "import subprocess\n"
+            'subprocess.run(["orchestrator", "talk", "x"], cwd="/tmp", '
+            "capture_output=True)\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "with_env.py").write_text(
+            "import subprocess\n"
+            'subprocess.run(["orchestrator", "talk", "x"], cwd="/tmp", '
+            'env={"PATH": "/x"})\n',
+            encoding="utf-8",
+        )
+        # The real call site builds argv from a variable, not a literal
+        # ["orchestrator", ...] list -- a rule that only matches the literal
+        # shape would never fire on the code it exists to guard.
+        (tmp_path / "gateway_variable_argv.py").write_text(
+            "import subprocess\n\n\n"
+            "class AgentGateway:\n"
+            "    def _run_cli(self, argv):\n"
+            '        return subprocess.run(argv, cwd="/tmp", capture_output=True)\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "gateway_variable_argv_with_env.py").write_text(
+            "import subprocess\n\n\n"
+            "class AgentGateway:\n"
+            "    def _run_cli(self, argv, environment):\n"
+            "        return subprocess.run(\n"
+            '            argv, cwd="/tmp", env=environment, capture_output=True\n'
+            "        )\n",
+            encoding="utf-8",
+        )
+        image = _semgrep_image()
+        proc = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--env",
+                "SEMGREP_ENABLE_VERSION_CHECK=0",
+                "--env",
+                "SEMGREP_SEND_METRICS=off",
+                "--volume",
+                f"{tmp_path}:/src:ro",
+                "--workdir",
+                "/src",
+                image,
+                "semgrep",
+                "scan",
+                "--config",
+                "semgrep.yml",
+                "--error",
+                "--metrics=off",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0
+        payload = json.loads(proc.stdout)
+        results = payload.get("results", [])
+        ids_by_path = {result["path"]: result["check_id"] for result in results}
+        assert ids_by_path.get("no_env.py") == "no-inherited-env-agent-subprocess"
+        assert (
+            ids_by_path.get("gateway_variable_argv.py")
+            == "no-inherited-env-agent-subprocess"
+        )
+        assert "with_env.py" not in ids_by_path
+        assert "gateway_variable_argv_with_env.py" not in ids_by_path
+
 
 class TestBanditScope:
     def test_planted_violation_under_examples_is_rejected(self, tmp_path: Path) -> None:

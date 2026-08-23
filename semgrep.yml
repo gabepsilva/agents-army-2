@@ -15,6 +15,42 @@ rules:
           - pattern: subprocess.check_call(..., shell=True, ...)
           - pattern: subprocess.check_output(..., shell=True, ...)
 
+  - id: no-inherited-env-agent-subprocess
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess call inside AgentGateway, or one launching the agent CLI
+      (orchestrator/bwrap) by a literal argv, does not pass env=. Agent
+      turns must run under an explicit, sandboxed environment, never the
+      host's inherited one -- pass env=<mapping>.
+    patterns:
+      - pattern-either:
+          # Any subprocess launch inside AgentGateway, whatever the argv
+          # expression looks like -- this is the class that owns the single
+          # sandboxed turn, so every subprocess call it makes must be
+          # explicit about its environment.
+          - patterns:
+              - pattern-inside: |
+                  class AgentGateway:
+                      ...
+              - pattern-either:
+                  - pattern: subprocess.run(...)
+                  - pattern: subprocess.Popen(...)
+              - pattern-not: subprocess.run(..., env=..., ...)
+              - pattern-not: subprocess.Popen(..., env=..., ...)
+          # Defense in depth outside AgentGateway: a literal orchestrator/
+          # bwrap argv anywhere else in the codebase without env=.
+          - patterns:
+              - pattern-either:
+                  - pattern: subprocess.run(["orchestrator", ...], ...)
+                  - pattern: subprocess.run(["bwrap", ...], ...)
+                  - pattern: subprocess.Popen(["orchestrator", ...], ...)
+                  - pattern: subprocess.Popen(["bwrap", ...], ...)
+              - pattern-not: subprocess.run(["orchestrator", ...], ..., env=..., ...)
+              - pattern-not: subprocess.run(["bwrap", ...], ..., env=..., ...)
+              - pattern-not: subprocess.Popen(["orchestrator", ...], ..., env=..., ...)
+              - pattern-not: subprocess.Popen(["bwrap", ...], ..., env=..., ...)
+
   - id: no-bare-except
     languages: [python]
     severity: WARNING

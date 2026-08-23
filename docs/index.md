@@ -22,6 +22,9 @@ uv run orchestrator talk reviewer -p "what did you just reply?"
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 - At least one agent CLI installed and authenticated: `claude`, `codex`, `grok`, or `opencode`
+- For the Gabriel's Development Workflow example: Linux and
+  [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`) on `PATH`
+  with unprivileged user namespaces enabled — see [Security](security.md)
 
 Run `uv run orchestrator doctor` to check which of these are on `PATH`.
 OpenCode 1.18.21 is the tested minimum version.
@@ -37,6 +40,7 @@ uv run pytest          # run the test suite
 
 - [CLI Reference](cli-reference.md) — every verb and flag, with examples
 - [Configuration](configuration.md) — environment variables, state file, skills
+- [Security](security.md) — bubblewrap sandbox around GDW agent turns, network posture, platform requirements
 
 ## Project layout
 
@@ -80,3 +84,14 @@ make ci      # verify + security scanning — the full gate
 
 See [AGENTS.md](https://github.com/gabepsilva/agents-army-2/blob/master/AGENTS.md)
 for the rules behind the gates.
+
+## Security
+
+The Gabriel's Development Workflow wraps every `orchestrator talk` turn in a
+`bwrap` sandbox. See [Security](security.md) for what is isolated (env
+allowlist, ephemeral `$HOME`, credential/socket shadows, private `/tmp`,
+worktree read-only by role, isolated `/proc`/`/dev`), what stays visible
+read-only for toolchain portability, what stays outside the sandbox (driver
+GitHub/git/`make ci` calls), the current network posture (credential descope
+only, not a full egress cutoff), and the Linux+bubblewrap fail-closed
+requirement.

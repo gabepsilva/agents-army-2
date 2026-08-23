@@ -8,6 +8,11 @@
 | `AGENTS_ARMY_STATE_FILE` | `$AGENTS_ARMY_HOME/orchestrator_state.json` | the registry file's exact path |
 | `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS` | the skill catalog root that `--skill` and `list skills` search |
 
+When the Gabriel's Development Workflow runs an agent turn, `AGENTS_ARMY_HOME`
+and `AGENTS_ARMY_STATE_FILE` are re-exported into the `bwrap` sandbox via
+`--setenv` (see [Security](security.md)); `$HOME` inside the sandbox is a
+fresh per-turn `tmpfs`, not the host `$HOME`.
+
 ```sh
 # relocate state, working directory, and skill catalog together
 AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
