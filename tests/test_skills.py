@@ -374,6 +374,21 @@ class TestListCommand:
         assert via_flag == via_command
         assert via_flag == "a                    backend=echo   session=-\n"
 
+    def test_list_agents_aligns_columns_for_long_names(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        long_name = "gdw-58-reviewer-specification"
+        orch.spawn("a", "echo")
+        orch.spawn(long_name, "echo")
+        _cmd_list(orch, _options(["list", "agents"]))
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 2
+        backend_offsets = {line.index("backend=") for line in lines}
+        session_offsets = {line.index("session=") for line in lines}
+        assert len(backend_offsets) == 1
+        assert len(session_offsets) == 1
+        assert backend_offsets.pop() == len(long_name) + 1
+
     def test_list_agents_empty(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:

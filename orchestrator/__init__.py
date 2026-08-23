@@ -558,10 +558,11 @@ def _print_agents(orchestrator: Orchestrator) -> None:
     if not agents:
         print("no agents")
         return
+    width = max(20, max(len(n) for n in agents))
     for name in agents:
         agent = orchestrator.agents[name]
         sid = agent.session_id or "-"
-        print(f"{name:20} backend={agent.backend.name:6} session={sid}")
+        print(f"{name:{width}} backend={agent.backend.name:6} session={sid}")
 
 
 def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
