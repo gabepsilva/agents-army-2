@@ -73,9 +73,13 @@ last bot comment there. The implementer app then opens a draft pull request and
 posts implementation, CI, and review there. The same app commits, pushes, and
 updates that pull request when the work is done.
 
-Each stage comment ends with the `backend`, `model`, and `reasoning_effort` that
-produced it. An unset model or effort is shown as `_unset_`, meaning the
-backend CLI selected its default.
+Each stage comment ends with an attribution footer reporting the `backend`,
+`model`, `reasoning_effort`, and `skills` that produced it. `backend`, `model`,
+and `reasoning_effort` render as `` `value` `` or `_unset_` when the backend
+CLI chose its default; `skills` renders as a single backtick-wrapped,
+comma-joined list (e.g. `` `code-simplification, caveman` ``) or `_none_` when
+the stage explicitly requested no skills. The driver-authored CI checklist
+comment carries no attribution footer.
 
 CI is reported as a checklist rather than a log: one ✅, ❌ or ⚪ per gate that
 `make ci` runs, a failing gate carrying a one-line reason. The gate list comes

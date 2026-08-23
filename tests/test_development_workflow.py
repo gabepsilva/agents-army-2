@@ -598,36 +598,41 @@ def test_helpers_render_and_bound() -> None:
 
 
 @pytest.mark.parametrize(
-    ("options", "expected"),
+    ("options", "skills", "expected"),
     [
         (
             gdw._StaticRoleOptions("grok", "grok-4.6", "high"),
-            "\n---\n\nbackend: `grok`  \nmodel: `grok-4.6`  \nreasoning_effort: `high`\n",
+            ("code-simplification", "caveman"),
+            "\n---\n\nbackend: `grok`  \nmodel: `grok-4.6`  \nreasoning_effort: `high`  \nskills: `code-simplification, caveman`",
         ),
         (
             gdw._StaticRoleOptions("claude", None, "high"),
-            "\n---\n\nbackend: `claude`  \nmodel: _unset_  \nreasoning_effort: `high`\n",
+            ("caveman",),
+            "\n---\n\nbackend: `claude`  \nmodel: _unset_  \nreasoning_effort: `high`  \nskills: `caveman`",
         ),
         (
             gdw._StaticRoleOptions("codex"),
-            "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_\n",
+            (),
+            "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_  \nskills: _none_",
         ),
     ],
 )
 def test_attribution_renders_each_configured_field_exactly(
-    options: gdw.RoleOptions, expected: str
+    options: gdw.RoleOptions, skills: Sequence[str], expected: str
 ) -> None:
-    attribution = gdw._attribution(options)
+    attribution = gdw._attribution(options, skills)
 
     assert attribution == expected
     assert "`_unset_`" not in attribution
+    assert "`_none_`" not in attribution
     assert "default" not in attribution
 
 
 def test_render_comment_only_appends_a_nonempty_attribution() -> None:
     base = "<!-- marker -->\n## GDW — Title\n\n### Answer\n\n1\n"
     footer = (
-        "\n---\n\nbackend: `codex`  \nmodel: _unset_  \nreasoning_effort: _unset_\n"
+        "\n---\n\nbackend: `codex`  \nmodel: _unset_  \n"
+        "reasoning_effort: _unset_  \nskills: _none_"
     )
 
     assert gdw._render_comment("<!-- marker -->", "Title", {"answer": 1}) == base
@@ -1663,8 +1668,18 @@ def test_each_stage_comments_as_its_configured_github_app(tmp_path: Path) -> Non
         role: client.comments[0][1] for role, client in role_github.items()
     } == expected_keys
     assert all(len(client.comments) == 1 for client in role_github.values())
+    role_skills = {
+        "expander": (),
+        "griller": (),
+        "specifier": (),
+        "implementer": ("code-simplification", "caveman"),
+        "documenter": ("caveman",),
+        "reviewer-specification": (),
+        "reviewer-quality": ("code-review-and-quality", "code-simplification"),
+    }
     assert {role: client.attributions[0] for role, client in role_github.items()} == {
-        role: gdw._attribution(options) for role, options in roles.items()
+        role: gdw._attribution(options, role_skills[role])
+        for role, options in roles.items()
     }
     issue_roles = gdw.ISSUE_COMMENT_ROLES
     for role, client in role_github.items():

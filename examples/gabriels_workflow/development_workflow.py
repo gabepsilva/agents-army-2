@@ -448,15 +448,17 @@ def _markdown(value: object, heading_level: int = 3) -> str:
     return _markdown_scalar(value)
 
 
-def _attribution(options: RoleOptions) -> str:
+def _attribution(options: RoleOptions, skills: Sequence[str] = ()) -> str:
     def field(value: str | None) -> str:
         return f"`{value}`" if value and value.strip() else "_unset_"
 
+    skills_field = field(", ".join(skills)) if skills else "_none_"
     return (
         "\n---\n\n"
         f"backend: {field(options.backend)}  \n"
         f"model: {field(options.model)}  \n"
-        f"reasoning_effort: {field(options.reasoning_effort)}\n"
+        f"reasoning_effort: {field(options.reasoning_effort)}  \n"
+        f"skills: {skills_field}"
     )
 
 
@@ -1476,7 +1478,7 @@ class DevelopmentWorkflow:
             stage.key,
             stage.title,
             result,
-            attribution=_attribution(self.agents.options(stage.role)),
+            attribution=_attribution(self.agents.options(stage.role), stage.skills),
         )
         return result
 
