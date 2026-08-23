@@ -900,9 +900,18 @@ def test_git_repository_opens_an_empty_commit_only_when_the_branch_matches_base(
     ]
 
 
-def test_ensure_issue_worktree_creates_branch_when_neither_exists(
+def test_ensure_issue_worktree_branches_off_the_remote_default(
     tmp_path: Path,
 ) -> None:
+    """`origin/master`, not the local `master` that may have fallen behind.
+
+    Regression: the ratchet and diff-coverage gates measure against
+    `origin/master`. Branching off a stale local `master` produced a worktree
+    that failed CI on commits it did not contain, and the only repair was a
+    merge the agent is instructed not to make — so the run stopped blocked
+    with nothing an agent could do about it.
+    """
+
     path = tmp_path / "issue" / "worktree"
     runner = ScriptedRun(
         [
@@ -911,6 +920,7 @@ def test_ensure_issue_worktree_creates_branch_when_neither_exists(
                 [], stdout="worktree /repo\nHEAD abc\nbranch refs/heads/master\n"
             ),
             _completed([], returncode=1),
+            _completed([]),
             _completed([]),
         ]
     )
@@ -921,7 +931,37 @@ def test_ensure_issue_worktree_creates_branch_when_neither_exists(
         ["git", "worktree", "prune"],
         ["git", "worktree", "list", "--porcelain"],
         ["git", "rev-parse", "--verify", "--quiet", "refs/heads/gdw/issue-9"],
-        ["git", "worktree", "add", "-b", "gdw/issue-9", str(path), "master"],
+        ["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/master"],
+        ["git", "worktree", "add", "-b", "gdw/issue-9", str(path), "origin/master"],
+    ]
+
+
+def test_ensure_issue_worktree_falls_back_to_the_local_branch_without_a_remote(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "issue" / "worktree"
+    runner = ScriptedRun(
+        [
+            _completed([], stdout=""),
+            _completed(
+                [], stdout="worktree /repo\nHEAD abc\nbranch refs/heads/master\n"
+            ),
+            _completed([], returncode=1),
+            _completed([], returncode=1),
+            _completed([]),
+        ]
+    )
+    gdw.GitRepository(tmp_path, runner).ensure_issue_worktree(
+        "gdw/issue-9", "master", path
+    )
+    assert runner.calls[-1][0] == [
+        "git",
+        "worktree",
+        "add",
+        "-b",
+        "gdw/issue-9",
+        str(path),
+        "master",
     ]
 
 

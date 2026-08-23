@@ -763,7 +763,15 @@ class GitRepository:
 
         Prunes registrations for worktrees whose directory disappeared, then
         resumes an already-registered worktree or an existing branch without
-        one, and only branches off `base_branch` when neither exists yet.
+        one, and only branches off the base when neither exists yet.
+
+        That base is `origin/<base_branch>` when the remote-tracking ref
+        exists, not the local branch of the same name. The ratchet and
+        diff-coverage gates measure against `origin/master`, so a run started
+        from a checkout whose local `master` had fallen behind produced a
+        worktree that failed CI on commits it did not contain — a failure no
+        agent can repair, because the fix is a merge the agent is told not to
+        make.
         """
 
         self._call("worktree", "prune")
@@ -787,7 +795,23 @@ class GitRepository:
         if verify.returncode == 0:
             self._call("worktree", "add", str(path), branch)
         else:
-            self._call("worktree", "add", "-b", branch, str(path), base_branch)
+            start = self._start_point(base_branch)
+            LOGGER.info("git: branching %s off %s", branch, start)
+            self._call("worktree", "add", "-b", branch, str(path), start)
+
+    def _start_point(self, base_branch: str) -> str:
+        """`origin/<base>` when it exists, else `<base>` for a remoteless repo."""
+
+        remote = f"origin/{base_branch}"
+        verify = self._run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}"],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        return remote if verify.returncode == 0 else base_branch
 
     def ci_gates(self) -> tuple[str, ...]:
         """The gates `make ci` will attempt, named by the Makefile itself.
