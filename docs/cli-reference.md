@@ -107,7 +107,8 @@ uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 validated object instead of raw text. Each backend CLI is given the flag it
 understands for this (`--json-schema` inline for `claude`/`grok`,
 `--output-schema <file>` for `codex`); OpenCode 1.18.21 has no CLI schema
-flag, so validation/repair enforces its reply.
+flag, so the schema is inlined in the prompt and validation/repair enforces
+its reply.
 
 **Schemas must be strict**: every object (including nested ones and array
 `items`) needs `"additionalProperties": false` and a `"required"` list

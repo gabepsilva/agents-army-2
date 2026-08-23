@@ -63,7 +63,7 @@ Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.
 | `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
 | `codex` | `codex exec` | `codex exec resume` | |
 | `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
-| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | prompt via stdin; schema enforced by validation/repair; tested minimum 1.18.21 |
+| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
 Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` — a CLI whose
 stdin is an inherited pipe rather than a terminal blocks until killed. OpenCode

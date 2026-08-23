@@ -29,8 +29,8 @@ passing the configured backend/model/effort so the call creates or asserts the
 agent before running the turn. The example does not import or construct the
 Python `Orchestrator` API. The orchestrator CLI then invokes the selected
 `claude`, `codex`, `grok`, or `opencode` backend CLI. OpenCode 1.18.21 is the
-tested minimum; its schema is enforced by the orchestrator's validation/repair
-loop.
+tested minimum; its schema is inlined in the prompt and enforced by the
+otherwise-shared validation/repair loop.
 
 The issue body is sent only for the initial expansion. Later clarification and
 specification turns receive the five latest non-workflow comments, preserving

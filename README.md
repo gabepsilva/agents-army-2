@@ -111,9 +111,11 @@ uv run orchestrator talk reviewer --schema verdict.json \
 Underneath, each CLI gets the flag it understands — `--json-schema` inline for
 `claude` and `grok`, `--output-schema <file>` for `codex`. OpenCode has no
 schema flag, so the shared validation and repair loop enforces its reply after
-the turn. The same extra prompt line is sent to every backend. OpenCode 1.18.21
-is the tested minimum because its NDJSON event envelope is not a stable public
-contract.
+the turn, and the schema document travels in the prompt because nothing else
+carries it there. Every backend gets the same instruction line; only the
+document itself is added, and only for a backend whose CLI cannot take it.
+OpenCode 1.18.21 is the tested minimum because its NDJSON event envelope is
+not a stable public contract.
 
 **Schemas must be strict.** `codex` rejects a lax schema with an HTTP 400
 before the turn runs, while `claude` and `grok` accept one, so the orchestrator
@@ -208,10 +210,11 @@ has to implement `name` and
 `run_turn(prompt, session_id, cwd, timeout, schema)`. `run_turn` starts a
 fresh CLI session when `session_id` is `None` and resumes it otherwise,
 returning a `TurnResult` with the reply and the session id for the next turn.
-`schema` is `None` unless `--schema` was used. Schema-capable backends pass it
-to their CLIs in whichever form those CLIs want and fill `TurnResult.structured`;
-OpenCode has no schema flag, so orchestrator validation and repair enforce its
-reply instead. Failures raise a `TurnError` subclass so `talk` can print the
+`schema` is `None` unless `--schema` was used. Schema-capable backends declare
+`enforces_schema = True`, pass the schema to their CLIs in whichever form those
+CLIs want, and fill `TurnResult.structured`; OpenCode declares it `False`, is
+sent the document inline in the prompt, and has its reply enforced by
+orchestrator validation and repair instead. Failures raise a `TurnError` subclass so `talk` can print the
 message without knowing which CLI ran.
 
 Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` to avoid blocking
@@ -236,7 +239,11 @@ The OpenCode backend runs `opencode run --format json --auto --dir <cwd>`
 with the prompt on stdin and resumes with `--session`. Its `--model` and
 `--variant` options map to the configured model and reasoning effort. Version
 1.18.21 is the tested minimum. Because OpenCode has no schema-enforcing flag,
-the orchestrator's validation and repair loop enforces schemas for it.
+the orchestrator's validation and repair loop enforces schemas for it, and the
+schema document is appended to the prompt so the reply it asks for is one the
+model has actually been shown. A reply that arrives wrapped in a ```json fence
+— the measured 1.18.21 behaviour — still yields its object: the adapter scans
+the reply for it rather than parsing the whole text.
 
 ### State
 

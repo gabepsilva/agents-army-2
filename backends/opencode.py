@@ -15,6 +15,7 @@ from backends.base import (
     TurnError,
     TurnResult,
     describe_command,
+    json_objects,
     structured_reply,
 )
 
@@ -39,6 +40,29 @@ def _events(stdout: str) -> list[dict]:
         if isinstance(event, dict):
             events.append(event)
     return events
+
+
+def _embedded_object(reply: str) -> dict | None:
+    """The JSON object an unconstrained reply wrapped in prose or a fence.
+
+    The other three CLIs are handed the schema and return the object as the
+    whole reply, so `structured_reply` can parse the text as it stands. This
+    one is not: the schema reaches the model as a line of prompt, and a model
+    that has been *asked* for JSON still answers the way it answers everything
+    else -- a ```json fence, or a sentence before the object.
+
+    Measured against opencode 1.18.21 on 2026-08-22: every attempt came back
+    fenced, `json.loads` of the whole reply failed each time, and the
+    orchestrator's repair loop could not converge because re-asking produced
+    the same fence. Without this scan the validate-and-repair fallback never
+    reaches the validator at all, and every schema turn fails.
+
+    The last object wins: a reply that reasons before answering puts the
+    answer last, and the schema check that follows is what decides whether it
+    is the right one.
+    """
+    candidates = json_objects(reply)
+    return candidates[-1] if candidates else None
 
 
 def _error_detail(event: dict) -> str | None:
@@ -185,7 +209,12 @@ class OpenCodeBackend(AgentBackend):
                 f"opencode did not report a sessionID\n"
                 f"stdout: {stdout[-2000:]}\nstderr: {stderr[-2000:]}"
             )
-        reply = "".join(part_text[part_id] for part_id in part_order)
+        # Newline-joined, not concatenated: each part is a *completed*
+        # block, so a turn that speaks either side of a tool call emits two
+        # of them. Gluing them produces run-on text ('...directory.rhubarb'
+        # in a live 1.18.21 turn) in a reply that is read by a human in a
+        # pull-request comment and re-fed to the next agent.
+        reply = "\n".join(part_text[part_id] for part_id in part_order)
         log.debug(
             "opencode turn: parsed session=%s parts=%d reply_chars=%d",
             session_id,
@@ -196,5 +225,5 @@ class OpenCodeBackend(AgentBackend):
             session_id=session_id,
             reply=reply,
             raw=stdout,
-            structured=structured_reply(schema, reply),
+            structured=structured_reply(schema, reply, _embedded_object(reply)),
         )

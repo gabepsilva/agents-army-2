@@ -70,6 +70,7 @@ from orchestrator import (
 from orchestrator import (
     cmd_talk as _cmd_talk,
 )
+from orchestrator.schema import compose_schema_prompt
 
 
 def _talk_options(argv: list[str]) -> argparse.Namespace:
@@ -491,7 +492,9 @@ class TestClaudeRunTurn:
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
-        assert str(excinfo.value) == f"claude exited 1\nstderr: {stderr[-2000:]}"
+        assert str(excinfo.value) == (
+            f"claude exited 1\nstderr: {stderr[-2000:]}\nstdout: "
+        )
 
     def test_malformed_json_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
@@ -701,6 +704,76 @@ class TestClaudeRunTurn:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("hello", None, tmp_path).structured is None
+
+    def test_nonzero_exit_reports_the_error_envelope_over_the_exit_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The envelope names the failure; the exit code only counts it."""
+        backend = ClaudeBackend()
+        stdout = json.dumps(
+            {"type": "result", "is_error": True, "result": "credit balance too low"}
+        )
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 1, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == "claude reported an error: credit balance too low"
+
+    def test_nonzero_exit_keeps_stdout_when_stderr_is_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure that prompted this: exit 1, stderr empty, and the only
+        thing the CLI said sitting unread on stdout."""
+        backend = ClaudeBackend()
+        stdout = "Invalid API key · Please run /login"
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 1, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (f"claude exited 1\nstderr: \nstdout: {stdout}")
+
+    def test_nonzero_exit_bounds_a_long_stdout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both ends of the dump, the same bound the parse failure uses."""
+        backend = ClaudeBackend()
+        stdout = "s" * 500 + "M" + "e" * 1999  # 2500 chars, not an envelope
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 2, stdout=stdout, stderr="boom")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == (
+            f"claude exited 2\nstderr: boom\nstdout: {stdout_for_error(stdout)}"
+        )
+
+    def test_nonzero_exit_ignores_a_non_error_envelope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`is_error` false with a non-zero exit is not a reported error, so the
+        exit code stays the headline rather than `result` being read as one."""
+        backend = ClaudeBackend()
+        stdout = json.dumps({"type": "result", "is_error": False, "result": "hi"})
+
+        def fake_run(args, **kwargs):
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            return subprocess.CompletedProcess(args, 3, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ClaudeTurnError) as excinfo:
+            backend.run_turn("x", None, tmp_path)
+        assert str(excinfo.value) == f"claude exited 3\nstderr: \nstdout: {stdout}"
 
 
 class TestParseClaudeStdout:
@@ -1659,7 +1732,7 @@ class TestOpenCodeRunTurn:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         backend = OpenCodeBackend()
-        reply = '{"verdict":"pass"}'
+        reply = '{"verdict":\n"pass"}'
         stdout = "\nnot json\n" + "\n".join(
             [
                 json.dumps({"type": "step-start", "sessionID": "s1"}),
@@ -1697,7 +1770,7 @@ class TestOpenCodeRunTurn:
         ]
         stdout = "\n".join(json.dumps(event) for event in events)
         monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
-        assert backend.run_turn("x", None, tmp_path).reply == "newtwo"
+        assert backend.run_turn("x", None, tmp_path).reply == "new\ntwo"
 
     @pytest.mark.parametrize("session_id", [None, "", " \t\n", 17])
     def test_invalid_session_id_raises(
@@ -1901,7 +1974,7 @@ class TestOpenCodeRunTurn:
             ]
         )
         monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
-        assert backend.run_turn("x", None, tmp_path).reply == "onetwo"
+        assert backend.run_turn("x", None, tmp_path).reply == "one\ntwo"
 
     def test_missing_session_error_preserves_both_output_tails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1946,6 +2019,107 @@ class TestOpenCodeRunTurn:
                     }
                 ),
             ]
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).structured is None
+
+    def test_two_completed_blocks_are_separated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A turn that speaks either side of a tool call emits two completed
+        parts. Concatenating them ran the sentences together in a live turn."""
+        backend = OpenCodeBackend()
+        events = [
+            {
+                "type": "text",
+                "sessionID": "s1",
+                "part": {"id": "a", "text": "I'll read marker.txt."},
+            },
+            {
+                "type": "tool_use",
+                "sessionID": "s1",
+                "part": {"id": "t", "tool": "read"},
+            },
+            {"type": "text", "sessionID": "s1", "part": {"id": "b", "text": "rhubarb"}},
+        ]
+        stdout = "\n".join(json.dumps(event) for event in events)
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path).reply == (
+            "I'll read marker.txt.\nrhubarb"
+        )
+
+    def test_a_fenced_reply_still_yields_the_structured_object(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The measured 1.18.21 behaviour: asked for JSON, it answers in a
+        ```json fence. `json.loads` of that whole reply fails, so without the
+        scan every schema turn burns its retries and then fails."""
+        backend = OpenCodeBackend()
+        reply = '```json\n{"verdict":"pass"}\n```'
+        stdout = json.dumps(
+            {"type": "text", "sessionID": "s1", "part": {"id": "a", "text": reply}}
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        result = backend.run_turn("x", None, tmp_path, schema=SCHEMA)
+        assert result.reply == reply
+        assert result.structured == {"verdict": "pass"}
+
+    def test_an_object_introduced_by_prose_is_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        reply = 'Here is the result:\n{"verdict":"pass"}'
+        stdout = json.dumps(
+            {"type": "text", "sessionID": "s1", "part": {"id": "a", "text": reply}}
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path, schema=SCHEMA).structured == {
+            "verdict": "pass"
+        }
+
+    def test_the_last_object_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A model that shows its working puts the answer last, and the schema
+        check downstream is what decides whether it is the right one."""
+        backend = OpenCodeBackend()
+        reply = 'Not this: {"verdict":"draft"}\nFinal: {"verdict":"pass"}'
+        stdout = json.dumps(
+            {"type": "text", "sessionID": "s1", "part": {"id": "a", "text": reply}}
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path, schema=SCHEMA).structured == {
+            "verdict": "pass"
+        }
+
+    def test_a_reply_with_no_object_is_none_not_an_exception(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not an object is a contract failure the validator retries, not a
+        parse error for the adapter to raise on."""
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "s1",
+                "part": {"id": "a", "text": "Sure! Here you go:"},
+            }
+        )
+        monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
+        assert backend.run_turn("x", None, tmp_path, schema=SCHEMA).structured is None
+
+    def test_a_fenced_reply_stays_unparsed_without_a_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The scan must not turn an ordinary reply that happens to quote JSON
+        into a structured object nobody asked for."""
+        backend = OpenCodeBackend()
+        stdout = json.dumps(
+            {
+                "type": "text",
+                "sessionID": "s1",
+                "part": {"id": "a", "text": '```json\n{"verdict":"pass"}\n```'},
+            }
         )
         monkeypatch.setattr(subprocess, "run", _completed(0, stdout))
         assert backend.run_turn("x", None, tmp_path).structured is None
@@ -2041,6 +2215,63 @@ class TestOrchestrator:
         assert _messages(caplog) == [
             "backend advisory: schema is enforced via validation/repair, not the CLI"
         ]
+
+    def test_a_non_enforcing_backend_is_sent_the_schema_document(
+        self, tmp_path: Path
+    ) -> None:
+        """The CLI has no flag to carry it, so the prompt has to. Without this
+        the model is told to conform to a schema it was never shown."""
+        seen: list[str] = []
+
+        class AdvisoryBackend(AgentBackend):
+            name = "advisory-prompt"
+            enforces_schema = False
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                seen.append(prompt)
+                return TurnResult(session_id="s1", reply="{}", raw="", structured={})
+
+        register_backend("advisory-prompt", AdvisoryBackend)
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch.spawn("agent", "advisory-prompt")
+        orch.talk("agent", "hello", schema=SCHEMA, retries=0)
+
+        assert seen == [compose_schema_prompt("hello", SCHEMA)]
+        assert SCHEMA.text in seen[0]
+
+    def test_an_enforcing_backend_is_not_sent_the_schema_document(
+        self, tmp_path: Path
+    ) -> None:
+        seen: list[str] = []
+
+        class EnforcingBackend(AgentBackend):
+            name = "enforcing-prompt"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                seen.append(prompt)
+                return TurnResult(session_id="s1", reply="{}", raw="", structured={})
+
+        register_backend("enforcing-prompt", EnforcingBackend)
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch.spawn("agent", "enforcing-prompt")
+        orch.talk("agent", "hello", schema=SCHEMA, retries=0)
+
+        assert seen == [compose_schema_prompt("hello")]
+        assert SCHEMA.text not in seen[0]
 
     def test_schema_warning_is_absent_without_schema_or_for_enforcing_backend(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

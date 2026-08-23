@@ -44,6 +44,11 @@ SCHEMA_INSTRUCTION = (
     "Reply with JSON conforming to the supplied output schema, and nothing else."
 )
 
+# Introduces the document on a backend whose CLI has no flag to carry it. The
+# heading is part of the prompt, so it names what follows rather than assuming
+# the model recognises a bare JSON Schema.
+SCHEMA_HEADING = "The output schema is:"
+
 # Keywords codex refuses outright, each measured as a 400 with a strict schema
 # on both branches. `anyOf` is deliberately absent: it was measured accepted.
 FORBIDDEN_KEYWORDS = ("oneOf", "allOf", "not")
@@ -245,15 +250,41 @@ def validate_reply(reply: str, structured: dict | None, schema: OutputSchema) ->
     return structured
 
 
-def compose_schema_prompt(prompt: str) -> str:
+def _instruction(unenforced: OutputSchema | None) -> str:
+    """The instruction, carrying the document itself when nothing else does.
+
+    "conforming to the supplied output schema" is a coherent sentence on a
+    backend whose CLI was handed the schema. On one that was not, it points at
+    something the model was never given, and a live opencode 1.18.21 turn said
+    so in as many words: "I don't have access to the output schema you're
+    referring to." An instruction that cannot be followed is not a hedge, so
+    the backend that has no flag to carry the document gets it here instead.
+
+    This is the one place backend-specific prompt text is written, and it is
+    keyed on `AgentBackend.enforces_schema` rather than on a backend name, so
+    it stays a property of the CLI's capability and not a special case.
+    """
+    if unenforced is None:
+        return SCHEMA_INSTRUCTION
+    return f"{SCHEMA_INSTRUCTION}\n\n{SCHEMA_HEADING}\n{unenforced.text}"
+
+
+def compose_schema_prompt(prompt: str, unenforced: OutputSchema | None = None) -> str:
     """The prompt the agent sees on the first attempt: user text, then the line."""
-    return f"{prompt}\n\n{SCHEMA_INSTRUCTION}"
+    return f"{prompt}\n\n{_instruction(unenforced)}"
 
 
-def repair_prompt(error: ReplyValidationError) -> str:
+def repair_prompt(
+    error: ReplyValidationError, unenforced: OutputSchema | None = None
+) -> str:
     """The prompt for a retry: what was wrong, then the same line again.
 
     The reply itself is not quoted back — the session already holds it, and
     the model's own text is data, not something to re-feed as instruction.
+
+    The schema *is* repeated, though, on a backend that needs it inline: the
+    session holds it too, and a model still lost it between attempts in the
+    measured run, answering the repair with "I don't have access to the output
+    schema" after having been shown it one turn earlier.
     """
-    return f"That reply was rejected: {error.correction}\n\n{SCHEMA_INSTRUCTION}"
+    return f"That reply was rejected: {error.correction}\n\n{_instruction(unenforced)}"

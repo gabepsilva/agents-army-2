@@ -100,6 +100,29 @@ def parse_claude_stdout(stdout: str) -> dict:
     return _pick_result_object(candidates)
 
 
+def _failed_turn_message(returncode: int, stdout: str, stderr: str) -> str:
+    """Prefer claude's own error envelope; fall back to the exit and both pipes.
+
+    A print-mode failure does not always write to stderr. One observed run
+    (2026-08-22, a griller turn in the development workflow) exited 1 with
+    stderr empty, so the only wording the orchestrator could log was
+    "claude exited 1\nstderr: " -- nothing to act on, and nothing to tell a
+    transient API failure from a rejected argument. Whatever the CLI did say
+    went to stdout and was dropped on the floor.
+    """
+    try:
+        payload = parse_claude_stdout(stdout)
+    except ClaudeTurnError:
+        payload = {}
+    if payload.get("is_error"):
+        return f"claude reported an error: {payload.get('result')}"
+    return (
+        f"claude exited {returncode}\n"
+        f"stderr: {stderr[-2000:]}\n"
+        f"stdout: {stdout_for_error(stdout)}"
+    )
+
+
 class ClaudeBackend(AgentBackend):
     """Backend for Anthropic's Claude Code CLI (`claude`)."""
 
@@ -160,7 +183,7 @@ class ClaudeBackend(AgentBackend):
         )
         if proc.returncode != 0:
             raise ClaudeTurnError(
-                f"claude exited {proc.returncode}\nstderr: {proc.stderr[-2000:]}"
+                _failed_turn_message(proc.returncode, proc.stdout, proc.stderr)
             )
         payload = parse_claude_stdout(proc.stdout)
 
