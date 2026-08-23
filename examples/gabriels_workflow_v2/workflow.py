@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -17,7 +19,9 @@ from examples.gabriels_workflow.development_workflow import (
     RoleOptions,
     WorkflowError,
     WorkflowStopped,
+    _outcome,
     _pull_request_number,
+    _shorten_home,
 )
 from examples.gabriels_workflow.development_workflow import (
     GitRepository as V1GitRepository,
@@ -31,9 +35,37 @@ from examples.gabriels_workflow_v2.contracts import (
     validate_handoff,
 )
 
+LEDGER_SUMMARY_CHARS = 400
 ISSUE_BODY_CHARS = 20_000
 ISSUE_COMMENT_CHARS = 3_000
 ISSUE_COMMENTS = 10
+
+
+def _conclusion(output: Mapping[str, Any]) -> str:
+    """A stage's reply as a GitHub check-run conclusion.
+
+    `neutral` is the one worth explaining: a reviewer asking for changes or a
+    griller asking for another round is the process working, not a failure,
+    and a run that reached publication had all of those resolved.
+    """
+
+    if output.get("status") == "blocked" or output.get("verdict") == "reject":
+        return "failure"
+    if output.get("decision") == "stop":
+        return "failure"
+    if output.get("verdict") in {"revise", "changes_requested"}:
+        return "neutral"
+    return "success"
+
+
+def _gate_digest(result: Mapping[str, Any]) -> str:
+    gates = result.get("gates")
+    if not isinstance(gates, list) or not gates:
+        return f"make ci exited {result.get('returncode')}"
+    passed = sum(1 for gate in gates if gate.get("status") == "passed")
+    failed = [str(gate.get("name")) for gate in gates if gate.get("status") == "failed"]
+    digested = f"{passed}/{len(gates)} gates passed"
+    return f"{digested}; failed: {', '.join(failed)}" if failed else digested
 
 
 class Publisher(Protocol):
@@ -63,8 +95,14 @@ class Publisher(Protocol):
 
     def update_pr(self, number: int, *, body: str) -> None: ...
 
+    def publish_checks(
+        self, head_sha: str, ledger: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
 
 class Repository(Protocol):
+    def head(self) -> str: ...
+
     def snapshot(self) -> str: ...
 
     def run_ci(self, timeout: int) -> CommandResult: ...
@@ -77,6 +115,9 @@ class Repository(Protocol):
 
 
 class Agents(Protocol):
+    @property
+    def workdir(self) -> Path: ...
+
     def options(self, role: str) -> RoleOptions: ...
 
     def ask(
@@ -128,6 +169,9 @@ class RelayAgentGateway(V1AgentGateway):
 
 class RelayRepository(V1GitRepository):
     """V1 git/CI mechanics plus a commit-independent content fingerprint."""
+
+    def head(self) -> str:
+        return self._call("rev-parse", "HEAD").strip()
 
     def common_git_dir(self) -> Path:
         """The repository's shared git directory, as an absolute path.
@@ -189,6 +233,9 @@ class DevelopmentWorkflowV2:
         self.repository = services.repository
         self.agents = services.agents
         self.root = Path(__file__).resolve().parent
+        # Rebuilt from checkpoints on every run, so a resumed run's ledger
+        # still reports the turns an earlier process paid for.
+        self.ledger: list[dict[str, Any]] = []
 
     def run(self) -> str:
         completed = self.completed_url()
@@ -254,11 +301,13 @@ class DevelopmentWorkflowV2:
         )
         self._require_complete(finalization, "finalization")
         number = _pull_request_number(url)
+        self._publish_checks(self.repository.head())
         self._publish_milestone(
             "final-summary",
             number,
             "Final implementation summary",
             self._without_handoff(finalization),
+            attribution=self._ledger_markdown(),
         )
         self.store.update_metadata(complete=True, pr_number=number, pr_url=url)
         return url
@@ -393,12 +442,38 @@ class DevelopmentWorkflowV2:
             before = self.repository.snapshot()
             key = f"ci-{prefix}-{before[:12]}"
             input_sha = digest({"snapshot": before, "timeout": self.budgets.ci_timeout})
-            result = self.store.load_checkpoint(key, input_sha)
-            if result is None:
+            cached = self.store.load_checkpoint(key, input_sha)
+            if cached is None:
+                started = datetime.now(UTC)
+                clock = time.monotonic()
                 result = self.repository.run_ci(self.budgets.ci_timeout).as_json()
+                turn = {
+                    "role": "driver",
+                    "backend": None,
+                    "model": None,
+                    "reasoning_effort": None,
+                    "skills": [],
+                    "started_at": started.isoformat(),
+                    "duration_seconds": round(time.monotonic() - clock, 1),
+                    "context_chars": 0,
+                    "output_chars": len(canonical_json(result)),
+                    "outcome": f"returncode={result.get('returncode')}",
+                    "conclusion": (
+                        "success" if result.get("returncode") == 0 else "failure"
+                    ),
+                    "summary": _gate_digest(result),
+                }
                 self.store.save_checkpoint(
-                    key, role="driver", input_sha256=input_sha, output=result
+                    key,
+                    role="driver",
+                    input_sha256=input_sha,
+                    output=result,
+                    turn=turn,
                 )
+                self._record(turn, key, reused=False)
+            else:
+                result = cached.output
+                self._record(cached.turn, key, reused=True)
             if result.get("returncode") == 0:
                 return result
             repair = self._work(
@@ -498,27 +573,65 @@ class DevelopmentWorkflowV2:
         input_sha = digest(contract)
         cached = self.store.load_checkpoint(stage.key, input_sha)
         if cached is not None:
-            return validate_handoff(cached)
+            self._record(cached.turn, stage.key, reused=True)
+            return validate_handoff(cached.output)
         self.store.reserve_turn(self.budgets.max_agent_turns)
+        context_json = canonical_json(stage.context)
+        started = datetime.now(UTC)
+        clock = time.monotonic()
         output = self.agents.ask(
             role=stage.role,
             prompt_name=stage.prompt,
             schema_name=stage.schema,
-            values={"CONTEXT_JSON": canonical_json(stage.context)},
+            values={"CONTEXT_JSON": context_json},
             skills=stage.skills,
             timeout=self.budgets.agent_timeout,
         )
+        elapsed = time.monotonic() - clock
         validate_handoff(output)
-        size = len(canonical_json(output))
-        if size > self.budgets.max_output_chars:
+        rendered = canonical_json(output)
+        if len(rendered) > self.budgets.max_output_chars:
             raise WorkflowError(
-                f"stage {stage.key} output has {size} characters; budget is "
+                f"stage {stage.key} output has {len(rendered)} characters; budget is "
                 f"{self.budgets.max_output_chars}"
             )
+        turn = {
+            "role": stage.role,
+            "backend": options.backend,
+            "model": options.model,
+            "reasoning_effort": options.reasoning_effort,
+            "skills": list(stage.skills),
+            "started_at": started.isoformat(),
+            "duration_seconds": round(elapsed, 1),
+            "context_chars": len(context_json),
+            "output_chars": len(rendered),
+            "outcome": _outcome(output),
+            "conclusion": _conclusion(output),
+            "summary": self._handoff_summary(output),
+        }
         self.store.save_checkpoint(
-            stage.key, role=stage.role, input_sha256=input_sha, output=output
+            stage.key,
+            role=stage.role,
+            input_sha256=input_sha,
+            output=output,
+            turn=turn,
         )
+        self._record(turn, stage.key, reused=False)
         return output
+
+    def _record(self, turn: dict[str, Any] | None, stage: str, *, reused: bool) -> None:
+        entry = dict(turn) if turn else {"role": "unknown"}
+        entry["stage"] = stage
+        entry["source"] = "reused" if reused else "ran"
+        self.ledger.append(entry)
+
+    @staticmethod
+    def _handoff_summary(output: Mapping[str, Any]) -> str:
+        handoff = output.get("handoff")
+        summary = handoff.get("summary") if isinstance(handoff, Mapping) else None
+        if not isinstance(summary, str):
+            summary = str(output.get("summary", ""))
+        return " ".join(summary.split())[:LEDGER_SUMMARY_CHARS]
 
     def _file_digest(self, directory: str, name: str) -> str:
         path = self.root / directory / name
@@ -529,13 +642,20 @@ class DevelopmentWorkflowV2:
         return hashlib.sha256(content).hexdigest()
 
     def _publish_milestone(
-        self, name: str, number: int, title: str, payload: object
+        self,
+        name: str,
+        number: int,
+        title: str,
+        payload: object,
+        attribution: str = "",
     ) -> None:
         if self.store.milestone_complete(name):
             return
         self.store.mark_milestone(name, "pending")
         self.publisher.collect_markers(number)
-        self.publisher.comment_once(number, name, title, payload)
+        self.publisher.comment_once(
+            number, name, title, payload, attribution=attribution
+        )
         self.store.mark_milestone(name, "complete")
 
     def _open_or_update_pull_request(
@@ -592,6 +712,68 @@ class DevelopmentWorkflowV2:
             "Generated by Gabriel's development workflow V2. Detailed handoffs "
             "and CI evidence remain in the local checkpoint store.\n"
         )
+
+    def _ledger_markdown(self) -> str:
+        """The run's process record: who ran, on what, for how long, and why.
+
+        V1 put these fields in a footer under every stage comment. V2 posts
+        two comments, so the same information is collected into one table
+        instead of being spread across eighteen.
+        """
+
+        def cell(value: object) -> str:
+            text = str(value).strip() if value is not None else ""
+            return f"`{text}`" if text else "_unset_"
+
+        rows = []
+        for index, entry in enumerate(self.ledger, 1):
+            skills = ", ".join(entry.get("skills") or [])
+            duration = entry.get("duration_seconds")
+            rows.append(
+                f"| {index} | `{entry.get('stage')}` | `{entry.get('role')}` | "
+                f"{cell(entry.get('backend'))} | {cell(entry.get('model'))} | "
+                f"{cell(entry.get('reasoning_effort'))} | "
+                f"{cell(skills) if skills else '_none_'} | "
+                f"{f'`{duration}s`' if duration is not None else '_unset_'} | "
+                f"{cell(entry.get('source'))} | {entry.get('outcome', '')} |"
+            )
+        handoffs = "\n".join(
+            f"- **`{entry.get('stage')}`** ({entry.get('role')}): "
+            f"{entry.get('summary') or '_no summary recorded_'}"
+            for entry in self.ledger
+        )
+        worktree = self.agents.workdir.resolve()
+        ran = sum(1 for entry in self.ledger if entry.get("source") == "ran")
+        return (
+            "\n---\n\n## Run ledger\n\n"
+            f"worktree: `{worktree.name}` - `{_shorten_home(worktree)}`  \n"
+            f"stages: `{ran}` executed this run, "
+            f"`{len(self.ledger) - ran}` reused from checkpoints  \n"
+            f"agent-turn budget: `{self.store.metadata.get('turns_used')}` / "
+            f"`{self.budgets.max_agent_turns}` "
+            "(CI runs are driver work and cost no turn)\n\n"
+            "| # | Stage | Role | Backend | Model | Effort | Skills | Duration "
+            "| Source | Outcome |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+            + "\n".join(rows)
+            + "\n\n<details>\n<summary>What each stage reported</summary>\n\n"
+            + handoffs
+            + "\n\n</details>\n"
+        )
+
+    def _publish_checks(self, head_sha: str) -> None:
+        """One check run per stage, so the fleet is visible in the Checks tab.
+
+        Best effort by design: the ledger comment already carries the same
+        record, so an App without `checks:write` loses a convenience, not
+        evidence, and must not cost a run that otherwise succeeded.
+        """
+
+        if self.store.milestone_complete("checks"):
+            return
+        self.store.mark_milestone("checks", "pending")
+        self.publisher.publish_checks(head_sha, self.ledger)
+        self.store.mark_milestone("checks", "complete")
 
     @staticmethod
     def _without_handoff(output: Mapping[str, Any]) -> dict[str, Any]:

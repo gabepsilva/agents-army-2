@@ -134,8 +134,9 @@ def _finalization(status: str = "complete") -> dict[str, Any]:
 class FakePublisher:
     def __init__(self) -> None:
         self.issue_calls = 0
+        self.checks: list[tuple[str, list[dict[str, Any]]]] = []
         self.collected: list[int] = []
-        self.comments: list[tuple[int, str, str, object]] = []
+        self.comments: list[tuple[int, str, str, object, str]] = []
         self.pr_calls: list[dict[str, Any]] = []
         self.updates: list[tuple[int, str]] = []
         self.issue_payload: dict[str, Any] | None = None
@@ -165,8 +166,7 @@ class FakePublisher:
         *,
         attribution: str = "",
     ) -> None:
-        del attribution
-        self.comments.append((number, key, title, payload))
+        self.comments.append((number, key, title, payload, attribution))
 
     def create_or_find_pr(self, **kwargs: Any) -> str:
         self.pr_calls.append(kwargs)
@@ -174,6 +174,9 @@ class FakePublisher:
 
     def update_pr(self, number: int, *, body: str) -> None:
         self.updates.append((number, body))
+
+    def publish_checks(self, head_sha: str, ledger) -> None:
+        self.checks.append((head_sha, [dict(entry) for entry in ledger]))
 
 
 class FakeRepository:
@@ -189,6 +192,9 @@ class FakeRepository:
         self.pushes: list[str] = []
         self.required: list[str] = []
         self.snapshots = deque(snapshots)
+
+    def head(self) -> str:
+        return "head-sha"
 
     def snapshot(self) -> str:
         if self.snapshots:
@@ -215,6 +221,7 @@ class FakeAgents:
     def __init__(self, replies: Sequence[dict[str, Any]]) -> None:
         self.replies = deque(replies)
         self.calls: list[dict[str, Any]] = []
+        self.workdir = Path("/tmp/gdw-v2-worktree")
         self.role_options = SimpleNamespace(
             backend="codex", model="test-model", reasoning_effort="low"
         )
@@ -337,7 +344,9 @@ def test_checkpoint_hashes_reject_stale_or_tampered_state(tmp_path: Path) -> Non
     store.initialize(1, "branch", "base")
     output = {"handoff": _handoff()}
     store.save_checkpoint("stage", role="expander", input_sha256="input", output=output)
-    assert store.load_checkpoint("stage", "input") == output
+    loaded = store.load_checkpoint("stage", "input")
+    assert loaded is not None
+    assert loaded.output == output
 
     with pytest.raises(WorkflowError, match="stale"):
         store.load_checkpoint("stage", "different")
@@ -584,6 +593,89 @@ def test_publisher_markers_do_not_collide_with_v1_comments() -> None:
     publisher.comment_once(7, "final-summary", "Final implementation summary", {"a": 1})
     assert len(posted) == 1
     assert posted[0].startswith("<!-- gdw-v2:7:final-summary -->\n## GDW V2 — ")
+
+
+def test_publisher_builds_one_check_run_per_stage_with_v1_footer_fields() -> None:
+    created: list[dict[str, Any]] = []
+    repository = SimpleNamespace(
+        create_check_run=lambda **kwargs: created.append(kwargs)
+    )
+    publisher = GitHubPublisher(cast(Any, repository))
+    ledger = [
+        {
+            "stage": "implementation",
+            "role": "implementer",
+            "backend": "claude",
+            "model": "sonnet",
+            "reasoning_effort": "medium",
+            "skills": ["code-simplification", "caveman"],
+            "started_at": "2026-08-23T09:00:00+00:00",
+            "duration_seconds": 39.2,
+            "outcome": "status=complete",
+            "conclusion": "success",
+            "summary": "implemented the width fix",
+            "source": "ran",
+        }
+    ]
+
+    publisher.publish_checks("abc123", ledger)
+
+    (call,) = created
+    assert call["name"] == "gdw-v2 / implementation"
+    assert call["head_sha"] == "abc123"
+    assert call["status"] == "completed"
+    assert call["conclusion"] == "success"
+    assert (call["completed_at"] - call["started_at"]).total_seconds() == pytest.approx(
+        39.2
+    )
+    assert call["output"]["title"] == "implementer - status=complete"
+    summary = call["output"]["summary"]
+    for line in (
+        "backend: `claude`",
+        "model: `sonnet`",
+        "reasoning_effort: `medium`",
+        "task_duration: `39.2s`",
+        "skills: `code-simplification, caveman`",
+        "source: `ran`",
+    ):
+        assert line in summary
+    assert "implemented the width fix" in summary
+
+
+def test_publisher_marks_unknown_fields_unset_and_defaults_the_conclusion() -> None:
+    created: list[dict[str, Any]] = []
+    repository = SimpleNamespace(
+        create_check_run=lambda **kwargs: created.append(kwargs)
+    )
+
+    GitHubPublisher(cast(Any, repository)).publish_checks(
+        "abc123",
+        [{"stage": "ci-implementation", "role": "driver", "started_at": "not-a-date"}],
+    )
+
+    (call,) = created
+    assert call["conclusion"] == "neutral"
+    assert call["completed_at"] == call["started_at"]
+    summary = call["output"]["summary"]
+    assert "backend: _unset_" in summary
+    assert "skills: _none_" in summary
+    assert "task_duration: _unset_" in summary
+
+
+def test_check_publication_failure_never_costs_a_finished_run(caplog) -> None:
+    def refuse(**_kwargs):
+        raise RuntimeError("Resource not accessible by integration")
+
+    repository = SimpleNamespace(create_check_run=refuse)
+
+    with caplog.at_level("WARNING", logger="gdw-v2"):
+        GitHubPublisher(cast(Any, repository)).publish_checks(
+            "abc123", [{"stage": "implementation"}, {"stage": "documentation"}]
+        )
+
+    assert "not accessible by integration" in caplog.text
+    # It gives up after the first refusal rather than retrying every stage.
+    assert caplog.text.count("not published") == 1
 
 
 def _role_payload() -> dict[str, dict[str, str]]:
@@ -1107,3 +1199,160 @@ def test_reviewers_are_told_which_commit_to_diff_against(tmp_path: Path) -> None
         context = json.loads(call["values"]["CONTEXT_JSON"])
         assert context["diff_against"] == "base-sha"
         assert "handoff" not in context["canonical_specification"]
+
+
+def test_ledger_records_how_every_turn_ran_and_survives_a_resume(
+    tmp_path: Path,
+) -> None:
+    replies = [
+        _proposal(),
+        _grill(),
+        _specification(),
+        _work(),
+        _work("documented"),
+        _review(),
+        _review(),
+        _finalization(),
+    ]
+    workflow, publisher, _repository, _agents = _workflow(tmp_path, replies)
+
+    workflow.run()
+
+    paid = [entry for entry in workflow.ledger if entry["source"] == "ran"]
+    assert len(paid) == 9  # eight agent turns plus the driver's CI run
+    expander = paid[0]
+    assert expander["role"] == "expander"
+    assert expander["backend"] == "codex"
+    assert expander["model"] == "test-model"
+    assert expander["reasoning_effort"] == "low"
+    assert expander["duration_seconds"] >= 0
+    assert expander["outcome"].startswith("decision=proceed")
+    assert expander["summary"] == "proposal handoff"
+    assert [entry["role"] for entry in workflow.ledger if entry["role"] == "driver"]
+
+    implementer = next(e for e in paid if e["stage"] == "implementation")
+    assert implementer["skills"] == ["code-simplification", "caveman"]
+
+    # A second process re-reads the same checkpoints and reports the turns the
+    # first one paid for, rather than an empty ledger.
+    resumed = DevelopmentWorkflowV2(
+        WorkflowOptions(
+            42, "master", "gdwv2/issue-42", True, digest("initial"), BudgetConfig()
+        ),
+        WorkflowServices(workflow.store, publisher, FakeRepository(), FakeAgents([])),
+    )
+    resumed.store.update_metadata(complete=False)
+    resumed.run()
+    assert [entry["source"] for entry in resumed.ledger] == ["reused"] * len(
+        resumed.ledger
+    )
+    assert (
+        next(e for e in resumed.ledger if e["stage"] == "expansion-1")["model"]
+        == "test-model"
+    )
+
+
+def test_final_summary_carries_the_ledger_table_and_stage_summaries(
+    tmp_path: Path,
+) -> None:
+    workflow, publisher, _repository, _agents = _workflow(
+        tmp_path,
+        [
+            _proposal(),
+            _grill(),
+            _specification(),
+            _work(),
+            _work("documented"),
+            _review(),
+            _review(),
+            _finalization(),
+        ],
+    )
+
+    workflow.run()
+
+    final = next(c for c in publisher.comments if c[1] == "final-summary")
+    ledger = final[4]
+    assert "## Run ledger" in ledger
+    assert "| # | Stage | Role | Backend | Model | Effort |" in ledger
+    assert "`expander`" in ledger
+    assert "`finalizer`" in ledger
+    assert "agent-turn budget: `8`" in ledger
+    assert "worktree: `gdw-v2-worktree`" in ledger
+    assert "<details>" in ledger
+    assert "proposal handoff" in ledger
+    # The specification milestone stays a clean decision record.
+    specification = next(c for c in publisher.comments if c[1] == "specification")
+    assert specification[4] == ""
+
+
+def test_check_runs_are_published_once_per_stage_against_the_pushed_commit(
+    tmp_path: Path,
+) -> None:
+    workflow, publisher, _repository, _agents = _workflow(
+        tmp_path,
+        [
+            _proposal(),
+            _grill(),
+            _specification(),
+            _work(),
+            _work("documented"),
+            _review(),
+            _review(),
+            _finalization(),
+        ],
+    )
+
+    workflow.run()
+
+    assert len(publisher.checks) == 1
+    head_sha, ledger = publisher.checks[0]
+    assert head_sha == "head-sha"
+    assert [entry["stage"] for entry in ledger][:2] == ["expansion-1", "grill-1"]
+    assert all(
+        entry["conclusion"] in {"success", "failure", "neutral"} for entry in ledger
+    )
+
+    workflow.store.update_metadata(complete=False)
+    workflow.run()
+    assert len(publisher.checks) == 1
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ({"status": "complete"}, "success"),
+        ({"verdict": "approve"}, "success"),
+        ({"decision": "proceed"}, "success"),
+        ({"status": "blocked"}, "failure"),
+        ({"verdict": "reject"}, "failure"),
+        ({"decision": "stop"}, "failure"),
+        ({"verdict": "revise"}, "neutral"),
+        ({"verdict": "changes_requested"}, "neutral"),
+    ],
+)
+def test_stage_conclusion_maps_replies_to_check_run_verdicts(
+    output: dict[str, Any], expected: str
+) -> None:
+    from examples.gabriels_workflow_v2.workflow import _conclusion
+
+    assert _conclusion(output) == expected
+
+
+def test_gate_digest_names_the_failing_gates() -> None:
+    from examples.gabriels_workflow_v2.workflow import _gate_digest
+
+    green = {
+        "returncode": 0,
+        "gates": [{"name": "lint", "status": "passed"}],
+    }
+    red = {
+        "returncode": 2,
+        "gates": [
+            {"name": "lint", "status": "passed"},
+            {"name": "types", "status": "failed"},
+        ],
+    }
+    assert _gate_digest(green) == "1/1 gates passed"
+    assert _gate_digest(red) == "1/2 gates passed; failed: types"
+    assert _gate_digest({"returncode": 2, "gates": []}) == "make ci exited 2"

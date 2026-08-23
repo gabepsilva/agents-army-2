@@ -60,6 +60,27 @@ Two comments, both driver-authored from validated schema fields:
 Plus the pull request itself, whose body is assembled from the specification,
 the two work summaries, and the CI and review verdicts.
 
+### Seeing which agents ran
+
+Two comments hide the fleet, so the process record is published alongside them
+rather than reconstructed from eighteen stage comments:
+
+- **A run ledger** appended to the final summary: one row per stage with its
+  role, backend, model, reasoning effort, skills, duration, and outcome — the
+  same fields V1 put in a per-comment attribution footer — plus whether the
+  stage ran or was reused from a checkpoint, the agent-turn budget consumed,
+  and a collapsed list of what each stage reported. CI runs appear as `driver`
+  rows; they cost no agent turn.
+- **One GitHub check run per stage**, so the Checks tab on the pull request
+  lists `gdw-v2 / expansion-1`, `gdw-v2 / grill-1`, … each with its duration
+  and conclusion. A reviewer asking for changes is `neutral`, not a failure.
+
+Check runs need `checks:write` on the App and are published after the commit
+is pushed, since a check run has to attach to a commit — so they are a record
+of the run, not a live progress bar. Publication is best effort: the ledger
+carries the same fields, so an App without the permission loses a convenience,
+never evidence, and never a run that already opened its pull request.
+
 Markers are prefixed `<!-- gdw-v2:...`, so a V2 run and a V1 run on the same
 issue never adopt or suppress each other's comments.
 
@@ -102,7 +123,7 @@ worktree:
   issue.json          the bounded issue, read from GitHub once
   agents/agents.json  orchestrator agent sessions
   agents/home/<agent>/ that agent's writable layer over its backend config
-  checkpoints/*.json  one per stage
+  checkpoints/*.json  one per stage, each carrying how its turn ran
   worktree/           the branch gdwv2/issue-<n> develops on
 ```
 
@@ -128,6 +149,8 @@ draft: true
 github_app:
   app_id: 123456
   private_key: gdw-v2.pem   # a .pem path beside this file, or an inline PEM
+                            # needs issues, pull requests, contents, and
+                            # checks:write for the per-stage check runs
 
 budgets:
   max_agent_turns: 24

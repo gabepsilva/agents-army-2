@@ -56,6 +56,14 @@ def validate_handoff(output: object) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
+class Checkpoint:
+    """A stage's validated output plus how the turn that produced it ran."""
+
+    output: dict[str, Any]
+    turn: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class Stage:
     key: str
     role: str
@@ -137,7 +145,7 @@ class CheckpointStore:
         self._write(self.issue_path, issue)
         return issue
 
-    def load_checkpoint(self, key: str, input_sha256: str) -> dict[str, Any] | None:
+    def load_checkpoint(self, key: str, input_sha256: str) -> Checkpoint | None:
         path = self.checkpoint_path(key)
         if not path.exists():
             return None
@@ -153,22 +161,32 @@ class CheckpointStore:
             raise WorkflowError(f"checkpoint {key} failed its output hash")
         if not isinstance(output, dict):
             raise WorkflowError(f"checkpoint {key} output is not an object")
-        return output
+        # The turn is how the stage ran, not what it decided, so it is kept
+        # outside the hashed output and is optional: a checkpoint written
+        # before the ledger existed still loads, and reports what it knows.
+        turn = envelope.get("turn")
+        return Checkpoint(output, turn if isinstance(turn, dict) else None)
 
     def save_checkpoint(
-        self, key: str, *, role: str, input_sha256: str, output: dict[str, Any]
+        self,
+        key: str,
+        *,
+        role: str,
+        input_sha256: str,
+        output: dict[str, Any],
+        turn: dict[str, Any] | None = None,
     ) -> None:
-        self._write(
-            self.checkpoint_path(key),
-            {
-                "format_version": FORMAT_VERSION,
-                "stage": key,
-                "role": role,
-                "input_sha256": input_sha256,
-                "output_sha256": digest(output),
-                "output": output,
-            },
-        )
+        envelope = {
+            "format_version": FORMAT_VERSION,
+            "stage": key,
+            "role": role,
+            "input_sha256": input_sha256,
+            "output_sha256": digest(output),
+            "output": output,
+        }
+        if turn is not None:
+            envelope["turn"] = turn
+        self._write(self.checkpoint_path(key), envelope)
 
     def milestone_complete(self, name: str) -> bool:
         milestones = self.metadata.get("milestones", {})
