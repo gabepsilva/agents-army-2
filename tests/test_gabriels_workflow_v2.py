@@ -133,7 +133,6 @@ def _finalization(status: str = "complete") -> dict[str, Any]:
 
 class FakePublisher:
     def __init__(self) -> None:
-        self.markers: set[str] = set()
         self.issue_calls = 0
         self.collected: list[int] = []
         self.comments: list[tuple[int, str, str, object]] = []
@@ -216,7 +215,6 @@ class FakeAgents:
     def __init__(self, replies: Sequence[dict[str, Any]]) -> None:
         self.replies = deque(replies)
         self.calls: list[dict[str, Any]] = []
-        self.workdir = Path("/tmp/gdw-v2-test-worktree")
         self.role_options = SimpleNamespace(
             backend="codex", model="test-model", reasoning_effort="low"
         )

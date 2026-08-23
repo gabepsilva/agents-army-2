@@ -37,8 +37,6 @@ ISSUE_COMMENTS = 10
 
 
 class Publisher(Protocol):
-    markers: set[str]
-
     def issue(self, number: int) -> dict[str, Any]: ...
 
     def collect_markers(self, number: int) -> None: ...
@@ -79,9 +77,6 @@ class Repository(Protocol):
 
 
 class Agents(Protocol):
-    @property
-    def workdir(self) -> Path: ...
-
     def options(self, role: str) -> RoleOptions: ...
 
     def ask(
