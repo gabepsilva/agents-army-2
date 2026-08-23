@@ -108,8 +108,9 @@ def format_skill_listing(catalog: dict[str, list[Path]]) -> str:
     """
     if not catalog:
         return "no skills"
+    width = max(20, max(len(name) for name in catalog))
     lines: list[str] = []
     for name in sorted(catalog):
         for path in catalog[name]:
-            lines.append(f"{name:20} {path}")
+            lines.append(f"{name:{width}} {path}")
     return "\n".join(lines)

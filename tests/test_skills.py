@@ -343,6 +343,19 @@ class TestFormatSkillListing:
         listing = format_skill_listing(index_skills(root))
         assert listing == f"{'clash':20} {hyphen}\n{'clash':20} {slash}"
 
+    def test_aligns_columns_for_long_names(self, tmp_path: Path) -> None:
+        long_name = "a-very-long-skill-name-exceeding-twenty"
+        foo_path = tmp_path / "foo.md"
+        long_path = tmp_path / "long.md"
+        catalog = {"foo": [foo_path], long_name: [long_path]}
+        listing = format_skill_listing(catalog)
+        path_col = len(long_name) + 1
+        assert listing == (
+            f"{long_name} {long_path}\n{'foo':{path_col - 1}} {foo_path}"
+        )
+        for line, path in zip(listing.splitlines(), (long_path, foo_path), strict=True):
+            assert line.index(str(path)) == path_col
+
 
 class TestListCommand:
     @pytest.fixture
@@ -360,6 +373,21 @@ class TestListCommand:
         via_flag = capsys.readouterr().out
         assert via_flag == via_command
         assert via_flag == "a                    backend=echo   session=-\n"
+
+    def test_list_agents_aligns_columns_for_long_names(
+        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        long_name = "gdw-58-reviewer-specification"
+        orch.spawn("a", "echo")
+        orch.spawn(long_name, "echo")
+        _cmd_list(orch, _options(["list", "agents"]))
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 2
+        backend_offsets = {line.index("backend=") for line in lines}
+        session_offsets = {line.index("session=") for line in lines}
+        assert len(backend_offsets) == 1
+        assert len(session_offsets) == 1
+        assert backend_offsets.pop() == len(long_name) + 1
 
     def test_list_agents_empty(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
