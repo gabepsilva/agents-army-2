@@ -931,22 +931,23 @@ def _print_dependency_check() -> None:
 def _resolve_talk_prompt(
     opts: argparse.Namespace, tail: list[str], separator_present: bool
 ) -> None:
-    prompt_sources = (
+    sources = (
         opts.prompt is not None,
         opts.prompt_file is not None,
         separator_present,
     )
-    if sum(prompt_sources) != 1:
+    if sum(sources) != 1:
         opts._parser.error("talk requires exactly one prompt source")
-
     if opts.prompt_file is not None:
-        path = Path(opts.prompt_file)
+        path = Path(opts.prompt_file).resolve()
         try:
-            prompt = path.read_text(encoding="utf-8")
+            prompt = Path(opts.prompt_file).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            opts._parser.error(f"cannot read prompt file {path.resolve()}: {exc}")
+            opts._parser.error(f"cannot read prompt file {path}: {exc}")
+    elif separator_present:
+        prompt = " ".join(tail)
     else:
-        prompt = " ".join(tail) if separator_present else opts.prompt
+        prompt = opts.prompt
     prompt = prompt.strip()
     if not prompt:
         opts._parser.error("talk prompt must not be empty")

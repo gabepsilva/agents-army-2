@@ -48,8 +48,8 @@ uv run orchestrator talk -b codex --model gpt-5 --reasoning-effort high \
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer -p "what did we decide about issue #23?"
 
-# Read a long or multi-line prompt from a UTF-8 file
-uv run orchestrator talk reviewer --prompt-file prompt.txt
+# Read the prompt from a file instead of a flag argument or -- tail
+uv run orchestrator talk reviewer --prompt-file ./prompts/issue-23-summary.txt
 
 # Talk with one or more skills: each name is resolved to a markdown file
 # under SKILLS/ (any subfolder) and that path is prepended to the prompt

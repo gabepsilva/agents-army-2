@@ -4071,6 +4071,69 @@ def test_prompt_file_errors_are_exact_and_prevent_side_effects(
         assert expected in error
 
 
+def test_prompt_file_errors_have_exact_messages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parser = orchestrator._build_parser()
+
+    missing_path = tmp_path / "missing.txt"
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(missing_path)])
+    with pytest.raises(SystemExit) as missing:
+        orchestrator._resolve_talk_prompt(options, [], False)
+    assert missing.value.code == 2
+    resolved_missing = missing_path.resolve()
+    assert (
+        f"orchestrator talk: error: cannot read prompt file {resolved_missing}: "
+        in capsys.readouterr().err
+    )
+
+    directory_path = tmp_path / "adir"
+    directory_path.mkdir()
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(directory_path)])
+    with pytest.raises(SystemExit) as is_dir:
+        orchestrator._resolve_talk_prompt(options, [], False)
+    assert is_dir.value.code == 2
+    resolved_dir = directory_path.resolve()
+    assert (
+        f"orchestrator talk: error: cannot read prompt file {resolved_dir}: "
+        in capsys.readouterr().err
+    )
+
+    binary_path = tmp_path / "binary.txt"
+    binary_path.write_bytes(b"\xff\xfe\x00not utf-8")
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(binary_path)])
+    with pytest.raises(SystemExit) as bad_decode:
+        orchestrator._resolve_talk_prompt(options, [], False)
+    assert bad_decode.value.code == 2
+    resolved_binary = binary_path.resolve()
+    assert (
+        f"orchestrator talk: error: cannot read prompt file {resolved_binary}: "
+        in capsys.readouterr().err
+    )
+
+    blank_path = tmp_path / "blank.txt"
+    blank_path.write_text(" \n\t \n", encoding="utf-8")
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(blank_path)])
+    with pytest.raises(SystemExit) as blank:
+        orchestrator._resolve_talk_prompt(options, [], False)
+    assert blank.value.code == 2
+    assert (
+        "orchestrator talk: error: talk prompt must not be empty"
+        in capsys.readouterr().err
+    )
+
+
+def test_prompt_file_strips_outer_whitespace_and_keeps_interior_newlines(
+    tmp_path: Path,
+) -> None:
+    parser = orchestrator._build_parser()
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("  line one\nline two  \n", encoding="utf-8")
+    options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_path)])
+    orchestrator._resolve_talk_prompt(options, [], False)
+    assert options.prompt == "line one\nline two"
+
+
 def test_separator_error_and_cli_error_without_arguments_are_exact(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
