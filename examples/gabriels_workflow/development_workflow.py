@@ -8,7 +8,6 @@ GitHub, full CI, commits, pushes, workflow state, and all stage transitions.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -107,12 +106,35 @@ WRITABLE_ROLES = frozenset({"implementer", "documenter"})
 # missing entry just loses that convenience for one backend — the base
 # `--ro-bind / /` already leaves the real path readable, so turn correctness
 # never depends on this mapping being exact.
+# Every directory a backend CLI reads its login from or writes its session
+# to. More than one each, because these tools follow XDG: opencode keeps
+# config in `~/.config`, conversations in `~/.local/share`, and locks in
+# `~/.local/state`. Overlaying only the first left "Session not found" on the
+# second turn of every opencode agent. Paths are resolved under the real
+# `$HOME`; a host that relocates them with `XDG_*` is not supported, because
+# `--clearenv` means the sandboxed CLI looks under `$HOME` regardless.
 BACKEND_HOME_DIRS = {
-    "claude": ".claude",
-    "codex": ".codex",
-    "grok": ".grok",
-    "opencode": ".config/opencode",
+    "claude": (".claude",),
+    "codex": (".codex", ".local/state/codex"),
+    "grok": (".grok",),
+    "opencode": (
+        ".config/opencode",
+        ".local/share/opencode",
+        ".local/state/opencode",
+        ".cache/opencode",
+    ),
 }
+# Single-file configs that sit beside, not inside, the directories above.
+# `bwrap` overlays a directory, never a file, so these are copied once into
+# the issue's own layer and bound from there.
+BACKEND_HOME_FILES = {
+    "claude": (".claude.json",),
+}
+# An agent name becomes a directory name under the state directory, and it
+# reaches here from configuration, so it is checked rather than trusted.
+AGENT_NAME_CHARACTERS = frozenset(
+    "-_.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 # Shadowed with `--ro-bind /dev/null <path>` when present on the host, so an
 # agent turn cannot read them regardless of which env var points at them.
 SENSITIVE_HOME_RELATIVE_PATHS = (
@@ -584,9 +606,13 @@ def _attribution(
 
 
 def _render_comment(
-    marker: str, title: str, payload: object, attribution: str = ""
+    marker: str,
+    title: str,
+    payload: object,
+    attribution: str = "",
+    heading: str = "GDW",
 ) -> str:
-    rendered = f"{marker}\n## GDW — {title}\n\n{_markdown(payload)}\n"
+    rendered = f"{marker}\n## {heading} — {title}\n\n{_markdown(payload)}\n"
     return rendered + attribution if attribution else rendered
 
 
@@ -749,7 +775,15 @@ class GitRepository:
 
         Prunes registrations for worktrees whose directory disappeared, then
         resumes an already-registered worktree or an existing branch without
-        one, and only branches off `base_branch` when neither exists yet.
+        one, and only branches off the base when neither exists yet.
+
+        That base is `origin/<base_branch>` when the remote-tracking ref
+        exists, not the local branch of the same name. The ratchet and
+        diff-coverage gates measure against `origin/master`, so a run started
+        from a checkout whose local `master` had fallen behind produced a
+        worktree that failed CI on commits it did not contain — a failure no
+        agent can repair, because the fix is a merge the agent is told not to
+        make.
         """
 
         self._call("worktree", "prune")
@@ -773,7 +807,23 @@ class GitRepository:
         if verify.returncode == 0:
             self._call("worktree", "add", str(path), branch)
         else:
-            self._call("worktree", "add", "-b", branch, str(path), base_branch)
+            start = self._start_point(base_branch)
+            LOGGER.info("git: branching %s off %s", branch, start)
+            self._call("worktree", "add", "-b", branch, str(path), start)
+
+    def _start_point(self, base_branch: str) -> str:
+        """`origin/<base>` when it exists, else `<base>` for a remoteless repo."""
+
+        remote = f"origin/{base_branch}"
+        verify = self._run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}"],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        return remote if verify.returncode == 0 else base_branch
 
     def ci_gates(self) -> tuple[str, ...]:
         """The gates `make ci` will attempt, named by the Makefile itself.
@@ -1169,20 +1219,16 @@ class GitHub:
         return proc.stdout
 
 
-def _lock_paths_for(state_file: Path, agent_name: str) -> tuple[Path, Path]:
-    """The two lock files `orchestrator` touches for one agent's turns.
+def _layer_name(relative: str) -> str:
+    """A flat, filesystem-safe directory name for one overlaid config path."""
 
-    Mirrors `Orchestrator._lock_path`/`_agent_lock_path` in
-    `orchestrator/__init__.py` exactly: the state lock guards the whole file,
-    the per-agent lock (named by a hash of the agent name, since a name is
-    free text and would not survive being used as a filename) serializes one
-    agent's turns without blocking every other agent.
-    """
+    return relative.replace("/", "-")
 
-    state_lock = state_file.with_name(state_file.name + ".lock")
-    digest = hashlib.sha256(agent_name.encode()).hexdigest()
-    agent_lock = state_file.with_name(f"{state_file.name}.{digest}.lock")
-    return state_lock, agent_lock
+
+def _within(path: Path, other: Path) -> bool:
+    """Whether `path` is `other` or lives under it. Both must be resolved."""
+
+    return path == other or other in path.parents
 
 
 @dataclass(frozen=True)
@@ -1192,7 +1238,8 @@ class SandboxContext:
     role: str
     backend: str
     worktree: Path
-    state_paths: Sequence[Path]
+    state_dir: Path
+    agent_home: Path
     schema_path: Path
     environment: Mapping[str, str]
     ephemeral_home: Path
@@ -1261,28 +1308,49 @@ def _private_tmpfs_flags() -> list[str]:
 
 
 def _ephemeral_home_flags(context: SandboxContext) -> list[str]:
+    """The per-turn `$HOME`, with the backend's config overlaid into it.
+
+    The backend's real config directory is the overlay's lower layer, so a
+    turn reads the login and settings it would outside the sandbox but cannot
+    write them. Writes land in the issue's own upper layer instead, which is
+    what makes a session resumable: the CLIs record a conversation under their
+    config directory, and a turn that could only write a `tmpfs` destroyed at
+    exit would leave the next turn's `--resume` with no conversation to find.
+    """
+
     # Re-bound after `_private_tmpfs_flags`'s `--tmpfs /tmp`, since `bwrap`
     # resolves a bind's source against the host filesystem at the time each
     # flag runs, not against the sandbox's own already-`tmpfs`'d view.
     flags = ["--ro-bind", str(context.isolation_dir), str(context.isolation_dir)]
     flags += ["--tmpfs", str(context.ephemeral_home)]
-    backend_dir = BACKEND_HOME_DIRS.get(context.backend)
-    if backend_dir is not None:
-        source = context.real_home / backend_dir
-        if source.exists():
-            flags += [
-                "--ro-bind",
-                str(source),
-                str(context.ephemeral_home / backend_dir),
-            ]
+    for relative in BACKEND_HOME_DIRS.get(context.backend, ()):
+        source = context.real_home / relative
+        if not source.exists():
+            continue
+        layer = context.agent_home / _layer_name(relative)
+        flags += [
+            "--overlay-src",
+            str(source),
+            "--overlay",
+            str(layer / "upper"),
+            str(layer / "work"),
+            str(context.ephemeral_home / relative),
+        ]
+    for name in BACKEND_HOME_FILES.get(context.backend, ()):
+        carried = context.agent_home / "files" / name
+        if carried.exists():
+            flags += ["--bind", str(carried), str(context.ephemeral_home / name)]
     return flags
 
 
 def _bind_flags(context: SandboxContext) -> list[str]:
     bind_flag = "--bind" if context.role in WRITABLE_ROLES else "--ro-bind"
     flags = [bind_flag, str(context.worktree), str(context.worktree)]
-    for state_path in context.state_paths:
-        flags += ["--bind", str(state_path), str(state_path)]
+    # The whole directory, not the state file alone: the orchestrator persists
+    # through a sibling `.tmp` and a rename, and takes sibling lock files, none
+    # of which a per-file bind can host. It holds nothing but agent session
+    # state, so nothing else becomes writable by giving it up.
+    flags += ["--bind", str(context.state_dir), str(context.state_dir)]
     flags += ["--ro-bind", str(context.schema_path), str(context.schema_path)]
     return flags
 
@@ -1382,6 +1450,16 @@ class AgentGateway:
         # in it had changed, and the run died at `commit` with "produced no
         # commits". A caller that forgets this argument now fails to build.
         self.workdir = workdir
+        # The state directory is bound read-write for every role, including
+        # the ones whose worktree bind is read-only. If the two overlapped,
+        # that later rw bind would silently hand a reviewer a writable tree.
+        state_dir = state_file.parent.resolve()
+        tree = workdir.resolve()
+        if _within(state_dir, tree) or _within(tree, state_dir):
+            raise WorkflowError(
+                f"agent state directory {state_dir} overlaps the worktree "
+                f"{tree}; they must be separate"
+            )
         self.prompts = example_root / "prompts"
         self.validations = example_root / "validations"
         self._run_process = run
@@ -1490,15 +1568,15 @@ class AgentGateway:
         *,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
-        state_lock, agent_lock = _lock_paths_for(self.state_file, turn.agent_name)
-        for bound_path in (self.state_file, state_lock, agent_lock):
-            bound_path.parent.mkdir(parents=True, exist_ok=True)
-            bound_path.touch(exist_ok=True)
+        state_dir = self.state_file.parent
+        state_dir.mkdir(parents=True, exist_ok=True)
+        agent_home = self._agent_home(turn.agent_name, turn.backend)
         context = SandboxContext(
             role=turn.role,
             backend=turn.backend,
             worktree=self.workdir,
-            state_paths=(self.state_file, state_lock, agent_lock),
+            state_dir=state_dir,
+            agent_home=agent_home,
             schema_path=turn.schema_path,
             environment=environment,
             ephemeral_home=turn.ephemeral_home,
@@ -1526,6 +1604,37 @@ class AgentGateway:
             LOGGER.error("orchestrator: '%s' failed: %s", args[0], message)
             raise WorkflowError(f"orchestrator CLI failed: {message}")
         return result
+
+    def _agent_home(self, agent_name: str, backend: str) -> Path:
+        """This agent's writable layer over its backend's config directory.
+
+        Per agent, not per backend, for two reasons. A session belongs to one
+        agent, so that is the granularity the layer that carries it should
+        have. And `overlayfs` refuses a second mount sharing a live upperdir
+        (EBUSY) — some backend CLIs leave a server running past the turn that
+        started it, so two agents on one backend sharing a layer means the
+        second one's turn fails to start.
+
+        `upper` and `work` must be on one filesystem for `overlayfs`; `files`
+        carries the single-file configs, copied once so the real ones are
+        never written.
+        """
+
+        if not agent_name or set(agent_name) - AGENT_NAME_CHARACTERS:
+            raise WorkflowError(f"unusable agent name {agent_name!r}")
+        home = self.state_file.parent / "home" / agent_name
+        (home / "files").mkdir(parents=True, exist_ok=True)
+        for relative in BACKEND_HOME_DIRS.get(backend, ()):
+            layer = home / _layer_name(relative)
+            for name in ("upper", "work"):
+                (layer / name).mkdir(parents=True, exist_ok=True)
+        for name in BACKEND_HOME_FILES.get(backend, ()):
+            carried = home / "files" / name
+            source = Path.home() / name
+            if not carried.exists() and source.is_file():
+                carried.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, carried)
+        return home
 
     def _prompt(self, name: str, values: Mapping[str, str]) -> str:
         """Fill one prompt template, judging completeness by the template alone.

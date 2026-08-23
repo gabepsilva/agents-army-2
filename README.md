@@ -321,6 +321,13 @@ in [`examples/gabriels_workflow/README.md`](examples/gabriels_workflow/README.md
 > for what is isolated, what stays visible read-only, and the current network
 > posture (credential/socket/path descope only).
 
+[`examples/gabriels_workflow_v2/`](examples/gabriels_workflow_v2/README.md) runs
+the same eight roles as a driver-mediated relay instead. Execution state lives in
+a local, hash-checked checkpoint store; each agent receives a compact handoff from
+the stage before it alongside the canonical artifact it depends on; every loop is
+bounded by an explicit budget; and GitHub receives two milestone comments rather
+than a comment per stage.
+
 ## Quality gates
 
 This project is developed mainly by AI agents, so its checks are
