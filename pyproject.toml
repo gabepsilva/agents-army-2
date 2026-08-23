@@ -6,9 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
     "PyYAML>=6",
-    "PyJWT>=2",
-    "cryptography>=42",
     "jsonschema>=4",
+    # Brings pyjwt[crypto] with it, which is what the App auth below signs
+    # with; neither is imported here, so neither is declared here.
     "pygithub>=2.9,<3",
 ]
 

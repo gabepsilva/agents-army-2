@@ -11,21 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from examples.gabriels_workflow.development_workflow import (
-    AgentGateway as V1AgentGateway,
-)
-from examples.gabriels_workflow.development_workflow import (
-    CommandResult,
-    RoleOptions,
-    WorkflowError,
-    WorkflowStopped,
-    _outcome,
-    _pull_request_number,
-    _shorten_home,
-)
-from examples.gabriels_workflow.development_workflow import (
-    GitRepository as V1GitRepository,
-)
 from examples.gabriels_workflow_v2.config import BudgetConfig
 from examples.gabriels_workflow_v2.contracts import (
     CheckpointStore,
@@ -34,11 +19,39 @@ from examples.gabriels_workflow_v2.contracts import (
     digest,
     validate_handoff,
 )
+from examples.gabriels_workflow_v2.errors import WorkflowError, WorkflowStopped
+from examples.gabriels_workflow_v2.gates import CommandResult
+from examples.gabriels_workflow_v2.gateway import AgentGateway, RoleOptions
+from examples.gabriels_workflow_v2.git import GitRepository
+from examples.gabriels_workflow_v2.github_app import pull_request_number
 
 LEDGER_SUMMARY_CHARS = 400
 ISSUE_BODY_CHARS = 20_000
 ISSUE_COMMENT_CHARS = 3_000
 ISSUE_COMMENTS = 10
+
+
+def _outcome(result: Mapping[str, object]) -> str:
+    """A one-line digest of a structured reply, for the progress log."""
+
+    fields = [
+        f"{key}={result[key]}"
+        for key in ("decision", "verdict", "status", "needs_another_round")
+        if key in result
+    ]
+    return ", ".join(fields) if fields else "no outcome fields"
+
+
+def _shorten_home(path: Path) -> str:
+    resolved_path = path.resolve()
+    home = Path.home().resolve()
+    if resolved_path == home:
+        return "~"
+    try:
+        relative = resolved_path.relative_to(home)
+    except ValueError:
+        return str(resolved_path)
+    return f"~/{relative.as_posix()}"
 
 
 def _conclusion(output: Mapping[str, Any]) -> str:
@@ -150,8 +163,8 @@ class WorkflowServices:
     agents: Agents
 
 
-class RelayAgentGateway(V1AgentGateway):
-    """Reuse the hardened V1 sandbox while enforcing a bounded V2 prompt."""
+class RelayAgentGateway(AgentGateway):
+    """Reuse the hardened sandbox while enforcing a bounded prompt."""
 
     def __init__(self, *, max_prompt_chars: int, **kwargs: Any) -> None:
         self.max_prompt_chars = max_prompt_chars
@@ -167,8 +180,8 @@ class RelayAgentGateway(V1AgentGateway):
         return prompt
 
 
-class RelayRepository(V1GitRepository):
-    """V1 git/CI mechanics plus a commit-independent content fingerprint."""
+class RelayRepository(GitRepository):
+    """Git and CI mechanics plus a commit-independent content fingerprint."""
 
     def head(self) -> str:
         return self._call("rev-parse", "HEAD").strip()
@@ -300,7 +313,7 @@ class DevelopmentWorkflowV2:
             )
         )
         self._require_complete(finalization, "finalization")
-        number = _pull_request_number(url)
+        number = pull_request_number(url)
         self._publish_checks(self.repository.head())
         self._publish_milestone(
             "final-summary",
@@ -682,9 +695,9 @@ class DevelopmentWorkflowV2:
                 body=body,
                 draft=self.draft,
             )
-            number = _pull_request_number(url)
+            number = pull_request_number(url)
             self.store.update_metadata(pr_url=url, pr_number=number)
-        number = _pull_request_number(url)
+        number = pull_request_number(url)
         self.publisher.update_pr(number, body=body)
         self.store.mark_milestone("pull-request", "complete")
         return url
@@ -716,9 +729,10 @@ class DevelopmentWorkflowV2:
     def _ledger_markdown(self) -> str:
         """The run's process record: who ran, on what, for how long, and why.
 
-        V1 put these fields in a footer under every stage comment. V2 posts
-        two comments, so the same information is collected into one table
-        instead of being spread across eighteen.
+        A driver that comments per stage can carry these fields in a footer
+        under each one. This one posts two comments, so the same information
+        is collected into a single table instead of being spread across
+        eighteen.
         """
 
         def cell(value: object) -> str:

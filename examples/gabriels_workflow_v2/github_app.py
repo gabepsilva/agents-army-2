@@ -1,19 +1,80 @@
-"""GitHub App communication for the linear development-workflow example."""
+"""GitHub App communication, and the markdown one comment is rendered from.
+
+The renderer lives here rather than beside the workflow because `comment_once`
+is its only caller, and a comment is not a thing the workflow itself formats.
+"""
 
 from __future__ import annotations
 
-import logging
+import re
+from collections.abc import Mapping
 from typing import Any
 
 from github import Auth, Github, GithubIntegration
 from github.Repository import Repository
 
-from examples.gabriels_workflow.development_workflow import (
-    WorkflowError,
-    _pull_request_number,
-)
+from examples.gabriels_workflow_v2.errors import LOGGER, WorkflowError
 
-LOGGER = logging.getLogger("gdw")
+
+def _markdown_label(value: object) -> str:
+    return str(value).replace("_", " ").strip().title()
+
+
+def _markdown_scalar(value: object) -> str:
+    if value is None:
+        return "_None._"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    rendered = str(value)
+    return rendered if rendered.strip() else "_None._"
+
+
+def _markdown(value: object, heading_level: int = 3) -> str:
+    if isinstance(value, Mapping):
+        sections = []
+        for key, item in value.items():
+            heading = "#" * min(heading_level, 6)
+            sections.append(
+                f"{heading} {_markdown_label(key)}\n\n"
+                f"{_markdown(item, heading_level + 1)}"
+            )
+        return "\n\n".join(sections) if sections else "_None._"
+    if isinstance(value, list):
+        if not value:
+            return "_None._"
+        if all(not isinstance(item, (Mapping, list)) for item in value):
+            return "\n".join(
+                f"- {_markdown_scalar(item).replace(chr(10), chr(10) + '  ')}"
+                for item in value
+            )
+        sections = []
+        for index, item in enumerate(value, start=1):
+            heading = "#" * min(heading_level, 6)
+            sections.append(
+                f"{heading} Item {index}\n\n{_markdown(item, heading_level + 1)}"
+            )
+        return "\n\n".join(sections)
+    return _markdown_scalar(value)
+
+
+def _render_comment(
+    marker: str,
+    title: str,
+    payload: object,
+    attribution: str = "",
+    heading: str = "GDW",
+) -> str:
+    rendered = f"{marker}\n## {heading} — {title}\n\n{_markdown(payload)}\n"
+    return rendered + attribution if attribution else rendered
+
+
+def pull_request_number(url: str) -> int:
+    match = re.search(r"/(\d+)/?$", url.strip())
+    if match is None:
+        raise WorkflowError(
+            f"GitHub returned a pull-request URL without a number: {url!r}"
+        )
+    return int(match.group(1))
 
 
 class GitHubAppClient:
@@ -126,8 +187,6 @@ class GitHubAppClient:
         if marker in self.markers:
             LOGGER.info("github-app: comment '%s' already posted, skipping", key)
             return
-        from examples.gabriels_workflow.development_workflow import _render_comment
-
         LOGGER.info("github-app: commenting '%s' on #%s", key, number)
         self.comment(
             number,
@@ -181,7 +240,7 @@ class GitHubAppClient:
             if not title:
                 raise WorkflowError("GitHub returned an empty pull-request title")
             url = self._text(pull.html_url, "pull-request URL")
-            if not url or _pull_request_number(url) != number:
+            if not url or pull_request_number(url) != number:
                 raise WorkflowError(
                     f"GitHub returned pull-request identity that does not match #{number}"
                 )

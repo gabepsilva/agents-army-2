@@ -1,12 +1,14 @@
 # Gabriel's development workflow V2
 
-Same eight roles as V1. What changed is where the run's truth lives and how
-much of it each agent is asked to read.
+Eight roles drive a raw GitHub issue to a draft pull request. What
+distinguishes this driver is where the run's truth lives and how much of it
+each agent is asked to read.
 
-V1 published every stage to GitHub and rebuilt each prompt from issue and
-pull-request context. V2 keeps execution state in a local checkpoint store,
-hands each agent a **compact handoff** from the stage before it, and posts to
-GitHub only twice — the validated specification, and the final summary.
+Execution state is a local checkpoint store, not the issue thread. Each agent
+gets a **compact handoff** from the stage before it, and GitHub is posted to
+only twice — the validated specification, and the final summary. The V1 driver
+this replaced published every stage to GitHub and rebuilt each prompt from
+issue and pull-request context.
 
 ## The relay
 
@@ -66,9 +68,9 @@ Two comments hide the fleet, so the process record is published alongside them
 rather than reconstructed from eighteen stage comments:
 
 - **A run ledger** appended to the final summary: one row per stage with its
-  role, backend, model, reasoning effort, skills, duration, and outcome — the
-  same fields V1 put in a per-comment attribution footer — plus whether the
-  stage ran or was reused from a checkpoint, the agent-turn budget consumed,
+  role, backend, model, reasoning effort, skills, duration, and outcome, plus
+  whether the stage ran or was reused from a checkpoint, the agent-turn budget
+  consumed,
   and a collapsed list of what each stage reported. CI runs appear as `driver`
   rows; they cost no agent turn.
 - **One GitHub check run per stage**, so the Checks tab on the pull request
@@ -86,8 +88,8 @@ of the run, not a live progress bar. Publication is best effort: the ledger
 carries the same fields, so an App without the permission loses a convenience,
 never evidence, and never a run that already opened its pull request.
 
-Markers are prefixed `<!-- gdw-v2:...`, so a V2 run and a V1 run on the same
-issue never adopt or suppress each other's comments.
+Markers are prefixed `<!-- gdw-v2:...`, so this driver never adopts or
+suppresses comments left by anything else reading the same issue.
 
 Full CI logs, agent replies, and every handoff stay local under
 `.git/gdw-v2/issue-<n>/`. They are what the repair agent reads; they are not
@@ -194,11 +196,11 @@ model is paid for.
 
 ## Sandboxing
 
-Unchanged from V1, and shared with it: every agent turn runs inside a
-`bubblewrap` sandbox, the worktree is writable only for `implementer` and
+Every agent turn runs inside a `bubblewrap` sandbox built by
+[`gateway.py`](gateway.py): the worktree is writable only for `implementer` and
 `documenter`, and GitHub credentials never enter a turn. See
-[`../gabriels_workflow/README.md`](../gabriels_workflow/README.md) for the full
-description of what is isolated and what is deliberately left visible.
+[`../../docs/security.md`](../../docs/security.md) for the full description of
+what is isolated and what is deliberately left visible.
 
 `agents/` is its own directory because the sandbox binds it read-write for
 every role; nothing else in the state directory is reachable from a turn.
@@ -208,13 +210,19 @@ Handoffs do not weaken that boundary. Every prompt wraps its context in
 previous agent — it is data the next agent evaluates, never instructions it
 obeys.
 
-## Relation to V1
+## Module layout
 
-V1 remains at [`../gabriels_workflow/`](../gabriels_workflow/); its behavior is
-unchanged. V2 reuses its hardened pieces directly — the sandboxed
-`AgentGateway`, git and CI mechanics, the GitHub App client, and the
-`WorkflowError`/`WorkflowStopped` vocabulary — and replaces the parts that
-decide what an agent is told.
+The relay itself is [`workflow.py`](workflow.py); everything it stands on is a
+leaf module beside it, so a driver that decides differently can reuse the
+mechanics without inheriting the decisions:
 
-The two write to different state directories, different branches, and different
-comment markers, so the same issue can be run under either.
+- [`errors.py`](errors.py) — `WorkflowError`/`WorkflowStopped` and the logger
+- [`gates.py`](gates.py) — what one `make ci` log says each gate did
+- [`gateway.py`](gateway.py) — one sandboxed agent turn
+- [`git.py`](git.py) — branch, worktree, commit, push, and running CI
+- [`github_app.py`](github_app.py) — reading and updating the repository as the
+  installed GitHub App, and the markdown one comment is rendered from
+- [`contracts.py`](contracts.py) / [`config.py`](config.py) —
+  the checkpoint store and handoff schema, and the workflow's own configuration
+
+These were extracted from the V1 driver this replaced, which has been removed.

@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-from examples.gabriels_workflow.development_workflow import WorkflowError
+from examples.gabriels_workflow_v2.errors import WorkflowError
 
 AGENT_ROLES = frozenset(
     {
@@ -37,9 +37,9 @@ DEFAULT_CONFIG_PATH = Path(__file__).with_name("workflow.local")
 class GitHubAppConfig(BaseModel):
     """The single App identity V2 publishes its milestones as.
 
-    V1 gave every role its own App so each stage comment carried an author.
-    V2 posts milestones, not stage comments, so one identity is enough and
-    seven fewer Apps have to be installed before a run.
+    Giving every role its own App is what makes each stage comment carry an
+    author. This driver posts milestones rather than stage comments, so one
+    identity is enough and seven fewer Apps have to be installed before a run.
     """
 
     model_config = ConfigDict(extra="forbid")

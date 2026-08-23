@@ -7,11 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from examples.gabriels_workflow.development_workflow import (
-    WorkflowError,
-    configure_logging,
-)
 from examples.gabriels_workflow_v2.config import DEFAULT_CONFIG_PATH, load_config
+from examples.gabriels_workflow_v2.errors import WorkflowError, configure_logging
 from examples.gabriels_workflow_v2.setup import prepare_workflow
 
 
