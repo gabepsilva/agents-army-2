@@ -50,6 +50,18 @@ def _completed(
     return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
 
 
+@pytest.fixture
+def available_bwrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulate the external sandbox capability for gateway unit tests."""
+
+    monkeypatch.setattr(gdw.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        gdw.subprocess,
+        "run",
+        lambda args, **_kwargs: _completed(args),
+    )
+
+
 def _bare_turn_sandbox(tmp_path: Path) -> gdw.TurnSandbox:
     """The `TurnSandbox` `_run_cli` needs to build a `bwrap` argv.
 
@@ -1250,7 +1262,7 @@ def test_github_app_client_collects_pr_markers_and_updates_the_body() -> None:
 
 
 def test_agent_gateway_validates_prompt_and_removes_github_access(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_bwrap: None
 ) -> None:
     calls: list[tuple[list[str], dict]] = []
 
@@ -1372,7 +1384,7 @@ def test_agent_gateway_validates_prompt_and_removes_github_access(
 
 
 def test_agent_turns_run_in_the_worktree_not_the_directory_the_driver_started_in(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_bwrap: None
 ) -> None:
     """Agents develop in the tree git and CI use, whatever the process's cwd.
 
@@ -1419,7 +1431,9 @@ def test_agent_turns_run_in_the_worktree_not_the_directory_the_driver_started_in
     assert calls[0]["env"]["AGENTS_ARMY_HOME"] != str(driver_cwd)
 
 
-def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> None:
+def test_agent_gateway_rejects_bad_prompts_backend_and_reply(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     example_root = tmp_path / "example"
     (example_root / "prompts").mkdir(parents=True)
     (example_root / "validations").mkdir()
@@ -1469,7 +1483,9 @@ def test_agent_gateway_rejects_bad_prompts_backend_and_reply(tmp_path: Path) -> 
         gateway.ask(role="role", prompt_name="ok", schema_name="expansion", values={})
 
 
-def test_agent_gateway_fills_prompts_with_brace_bearing_values(tmp_path: Path) -> None:
+def test_agent_gateway_fills_prompts_with_brace_bearing_values(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     """Braces in a substituted value are text, not an unfilled placeholder."""
 
     example_root = tmp_path / "example"
@@ -1516,7 +1532,7 @@ def test_agent_gateway_fills_prompts_with_brace_bearing_values(tmp_path: Path) -
 
 
 def test_agent_gateway_names_the_placeholder_no_value_was_given_for(
-    tmp_path: Path,
+    tmp_path: Path, available_bwrap: None
 ) -> None:
     example_root = tmp_path / "example"
     (example_root / "prompts").mkdir(parents=True)
@@ -1555,7 +1571,7 @@ def test_agent_gateway_names_the_placeholder_no_value_was_given_for(
     ],
 )
 def test_agent_gateway_rejects_malformed_cli_output(
-    tmp_path: Path, turn_stdout: str, message: str
+    tmp_path: Path, turn_stdout: str, message: str, available_bwrap: None
 ) -> None:
     replies = deque(
         [
@@ -1593,7 +1609,7 @@ def test_agent_gateway_rejects_malformed_cli_output(
     [OSError("missing executable"), subprocess.TimeoutExpired("orchestrator", 3)],
 )
 def test_agent_gateway_reports_cli_launch_failures(
-    tmp_path: Path, failure: BaseException
+    tmp_path: Path, failure: BaseException, available_bwrap: None
 ) -> None:
     def failing_run(_args: list[str], **_kwargs):
         raise failure
@@ -1612,7 +1628,9 @@ def test_agent_gateway_reports_cli_launch_failures(
         )
 
 
-def test_agent_gateway_reports_cli_exit_without_stderr(tmp_path: Path) -> None:
+def test_agent_gateway_reports_cli_exit_without_stderr(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     gateway = gdw.AgentGateway(
         roles={},
         issue=1,
@@ -1627,7 +1645,9 @@ def test_agent_gateway_reports_cli_exit_without_stderr(tmp_path: Path) -> None:
         )
 
 
-def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) -> None:
+def test_agent_gateway_uses_each_roles_backend_model_and_effort(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     calls: list[list[str]] = []
     configured = RoleConfig(
         backend="grok",
@@ -1689,7 +1709,9 @@ def test_agent_gateway_uses_each_roles_backend_model_and_effort(tmp_path: Path) 
         )
 
 
-def test_agent_gateway_attaches_skills_only_when_given(tmp_path: Path) -> None:
+def test_agent_gateway_attaches_skills_only_when_given(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     calls: list[list[str]] = []
 
     def fake_run(args: list[str], **_kwargs):
@@ -1774,7 +1796,7 @@ def _bind_pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize("role", sorted(gdw.WRITABLE_ROLES))
 def test_agent_gateway_binds_worktree_writable_for_writable_roles(
-    tmp_path: Path, role: str
+    tmp_path: Path, role: str, available_bwrap: None
 ) -> None:
     argv, _kwargs = _sandboxed_argv(tmp_path, role=role)
     worktree = str(tmp_path / "worktree")
@@ -1784,7 +1806,7 @@ def test_agent_gateway_binds_worktree_writable_for_writable_roles(
 
 @pytest.mark.parametrize("role", sorted(gdw.AGENT_ROLES - gdw.WRITABLE_ROLES))
 def test_agent_gateway_binds_worktree_read_only_for_other_roles(
-    tmp_path: Path, role: str
+    tmp_path: Path, role: str, available_bwrap: None
 ) -> None:
     argv, _kwargs = _sandboxed_argv(tmp_path, role=role)
     worktree = str(tmp_path / "worktree")
@@ -1793,7 +1815,7 @@ def test_agent_gateway_binds_worktree_read_only_for_other_roles(
 
 
 def test_agent_gateway_bwrap_argv_binds_state_and_both_lock_files_rw(
-    tmp_path: Path,
+    tmp_path: Path, available_bwrap: None
 ) -> None:
     argv, _kwargs = _sandboxed_argv(tmp_path, role="implementer")
     state_file = tmp_path / "agents.json"
@@ -1807,7 +1829,7 @@ def test_agent_gateway_bwrap_argv_binds_state_and_both_lock_files_rw(
 
 
 def test_agent_gateway_bwrap_argv_ends_with_terminator_before_payload(
-    tmp_path: Path,
+    tmp_path: Path, available_bwrap: None
 ) -> None:
     argv, _kwargs = _sandboxed_argv(tmp_path, role="implementer")
     terminator = argv.index("--")
@@ -1816,7 +1838,7 @@ def test_agent_gateway_bwrap_argv_ends_with_terminator_before_payload(
 
 
 def test_agent_gateway_bwrap_shadows_sensitive_paths_that_exist(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_bwrap: None
 ) -> None:
     fake_home = tmp_path / "fake-home"
     (fake_home / ".ssh").mkdir(parents=True)
@@ -1831,7 +1853,7 @@ def test_agent_gateway_bwrap_shadows_sensitive_paths_that_exist(
 
 
 def test_agent_gateway_bwrap_shadows_ssh_auth_sock_only_when_it_exists(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_bwrap: None
 ) -> None:
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir()
@@ -1854,7 +1876,7 @@ def test_agent_gateway_bwrap_shadows_ssh_auth_sock_only_when_it_exists(
 
 
 def test_agent_gateway_bwrap_argv_skips_backend_home_rebind_for_unknown_backend(
-    tmp_path: Path,
+    tmp_path: Path, available_bwrap: None
 ) -> None:
     argv, _kwargs = _sandboxed_argv(
         tmp_path, role="implementer", backend="carrier-pigeon"
@@ -1943,7 +1965,9 @@ def test_agent_gateway_requires_bwrap_self_test_to_pass(
     assert calls == []
 
 
-def test_all_workflow_schemas_are_strict_and_prompts_resolve(tmp_path: Path) -> None:
+def test_all_workflow_schemas_are_strict_and_prompts_resolve(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     example_root = Path(gdw.__file__).parent
     schema_names = (
         "expansion",
@@ -3273,7 +3297,9 @@ def test_both_github_clients_adopt_markers(tmp_path: Path) -> None:
     assert app.markers == {"grill-1", "grill-2"}
 
 
-def test_finalization_schema_and_prompt_are_strict(tmp_path: Path) -> None:
+def test_finalization_schema_and_prompt_are_strict(
+    tmp_path: Path, available_bwrap: None
+) -> None:
     example_root = Path(gdw.__file__).parent
     schema = load_schema(example_root / "validations" / "finalization.json")
     payload = _finalization()
