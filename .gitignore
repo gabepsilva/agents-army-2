@@ -23,6 +23,7 @@ site/
 # Runtime state
 orchestrator_state.json
 orchestrator_state.json*.lock
+orchestrator_state.json.locks/
 orchestrator_state.json.tmp
 examples/gabriels_workflow_v3/*.log
 examples/gabriels_workflow_v3/spectacle.prompt

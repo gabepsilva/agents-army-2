@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -2614,12 +2618,11 @@ class TestOrchestrator:
         assert held == [(True, False)]
         assert _flock_is_held(orch._agent_lock_path("a")) is False
 
-    def test_agent_lock_paths_sit_beside_the_state_file(self, tmp_path: Path) -> None:
+    def test_agent_lock_paths_sit_in_the_locks_dir(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "state.json")
         first = orch._agent_lock_path("a")
-        assert first.parent == tmp_path
-        assert first.name.startswith("state.json.")
-        assert first.name.endswith(".lock")
+        assert first.parent == tmp_path / "state.json.locks"
+        assert first.name == hashlib.sha256(b"a").hexdigest()
         assert first != orch._agent_lock_path("b")
         assert first != orch._lock_path()
 
@@ -2700,6 +2703,253 @@ class TestOrchestrator:
         with pytest.raises(KeyError, match="no agent named 'a'"):
             orch.talk("a", "hi")
         assert Orchestrator(state_file=state_file).list_agents() == []
+
+    def test_delete_on_an_idle_agent_unlinks_its_lock_file(
+        self, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "echo")
+        orch.talk("a", "hi")
+        lock_path = orch._agent_lock_path("a")
+        assert lock_path.is_file()
+
+        orch.delete("a")
+        assert not lock_path.exists()
+
+    def test_delete_during_its_own_turn_keeps_the_lock_file(
+        self, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Gate(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "gate-self"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                entered.set()
+                release.wait(timeout=5)
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("gate-self", Gate)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "gate-self")
+
+        def run_turn() -> None:
+            # Deleting the agent mid-turn (below) makes the registry entry
+            # this turn resumes into vanish before it persists, which is the
+            # pre-existing AgentNotFoundError path this test isn't about —
+            # the reclaim-on-that-path is covered separately, below.
+            with pytest.raises(orchestrator.AgentNotFoundError):
+                orch.talk("a", "hi")
+
+        turn_thread = threading.Thread(target=run_turn)
+        turn_thread.start()
+        assert entered.wait(timeout=5)
+        lock_path = orch._agent_lock_path("a")
+        assert lock_path.is_file()
+
+        # The probe loses to the in-flight turn and backs off rather than
+        # refusing: `delete` never fails and never changes its exit code.
+        agent = orch.delete("a")
+        assert agent.name == "a"
+        assert lock_path.is_file()
+
+        release.set()
+        turn_thread.join(timeout=5)
+        # Once the turn ends, its own AgentNotFoundError handler reclaims
+        # what delete's probe could not — see the next test.
+        assert not lock_path.exists()
+
+    def test_a_turn_reclaims_its_lock_when_deleted_mid_turn(
+        self, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+
+        class DeleteDuring(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "delduring-reclaim"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                # Runs with the outer talk() holding the agent lock, so this
+                # delete's own reclaim probe backs off (previous test); the
+                # file is left for talk()'s AgentNotFoundError handler.
+                Orchestrator(state_file=state_file).delete("a")
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("delduring-reclaim", DeleteDuring)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "delduring-reclaim")
+        with pytest.raises(orchestrator.AgentNotFoundError):
+            orch.talk("a", "hi")
+        assert list(orch._locks_dir().iterdir()) == []
+
+    def test_delete_during_a_sibling_agents_turn_still_reclaims(
+        self, tmp_path: Path
+    ) -> None:
+        """Rules out a home-wide lock: only the deleted agent's own turn
+        should block a reclaim, not an unrelated agent's."""
+        state_file = tmp_path / "state.json"
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Gate(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "gate-sibling"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                entered.set()
+                release.wait(timeout=5)
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("gate-sibling", Gate)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("bob", "gate-sibling")
+        orch.spawn("alice", "echo")
+        orch.talk("alice", "warm up")
+
+        turn_thread = threading.Thread(target=lambda: orch.talk("bob", "hi"))
+        turn_thread.start()
+        assert entered.wait(timeout=5)
+
+        alice_lock = orch._agent_lock_path("alice")
+        assert alice_lock.is_file()
+        orch.delete("alice")
+        assert not alice_lock.exists()
+
+        release.set()
+        turn_thread.join(timeout=5)
+
+    def test_a_queued_lock_reacquires_after_reclaim_without_overlap(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression for the race in the PR description.
+
+        A waiter blocked in `flock()` on an agent lock's inode must not
+        proceed once that inode has been reclaimed (unlinked) underneath it
+        — it has to revalidate and re-acquire, so it never ends up running
+        concurrently with whoever opens the path next.
+        """
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        lock_path = orch._agent_lock_path("bob")
+
+        reclaimer_ready = threading.Event()
+        let_reclaimer_unlink = threading.Event()
+        waiter_entered = threading.Event()
+
+        active: list[str] = []
+        active_guard = threading.Lock()
+        overlapped = False
+        inodes: dict[str, int] = {}
+
+        def record(who: str, entered: threading.Event | None = None) -> None:
+            nonlocal overlapped
+            with active_guard:
+                active.append(who)
+                if len(active) > 1:
+                    overlapped = True
+            if entered is not None:
+                entered.set()
+            inodes[who] = os.stat(lock_path).st_ino
+            time.sleep(0.05)
+            with active_guard:
+                active.remove(who)
+
+        def reclaimer() -> None:
+            # Wins the lock because nothing else holds it yet, exactly like
+            # `_reclaim_agent_lock`'s non-blocking probe mid-`delete`.
+            with orchestrator._flock(lock_path, fcntl.LOCK_EX | fcntl.LOCK_NB):
+                reclaimer_ready.set()
+                let_reclaimer_unlink.wait(timeout=5)
+                lock_path.unlink()
+            # Exiting the `with` releases the flock, waking whoever queued
+            # on this inode while it was held.
+
+        def waiter() -> None:
+            # Opens (and blocks flock()-ing) the path before the reclaimer
+            # unlinks it, so it shares the reclaimer's inode.
+            reclaimer_ready.wait(timeout=5)
+            with orch._agent_lock("bob"):
+                record("waiter", entered=waiter_entered)
+
+        def late_arrival() -> None:
+            # Only opens the path once the waiter has fully re-acquired past
+            # its own revalidation, so this either contends with the
+            # waiter's fresh inode or (if it lost that race) opens the same
+            # one the waiter already recreated — either way, one inode.
+            waiter_entered.wait(timeout=5)
+            with orch._agent_lock("bob"):
+                record("late")
+
+        t_reclaim = threading.Thread(target=reclaimer)
+        t_wait = threading.Thread(target=waiter)
+        t_late = threading.Thread(target=late_arrival)
+
+        t_reclaim.start()
+        assert reclaimer_ready.wait(timeout=5)
+        t_wait.start()
+        time.sleep(0.2)  # let the waiter open the pre-unlink path and queue
+        let_reclaimer_unlink.set()
+        t_late.start()
+
+        for t in (t_reclaim, t_wait, t_late):
+            t.join(timeout=5)
+
+        assert not overlapped
+        assert inodes["waiter"] == inodes["late"]
+
+    def test_talk_on_an_unknown_agent_leaves_no_lock_file(self, tmp_path: Path) -> None:
+        """Written against `Orchestrator.talk` directly: `cmd_talk` creates
+        the agent first, so `main(["talk", ...])` would assert something
+        false here."""
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        with pytest.raises(orchestrator.AgentNotFoundError):
+            orch.talk("ghost", "hi")
+        assert list(orch._locks_dir().iterdir()) == []
+
+    def test_locks_dir_holds_one_file_per_live_agent(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "echo")
+        orch.spawn("b", "echo")
+        orch.talk("a", "hi")
+        orch.talk("b", "hi")
+
+        locks_dir = orch._locks_dir()
+        assert sorted(p.name for p in locks_dir.iterdir()) == sorted(
+            path.name
+            for path in (orch._agent_lock_path("a"), orch._agent_lock_path("b"))
+        )
+
+        orch.delete("a")
+        orch.delete("b")
+        assert list(locks_dir.iterdir()) == []
 
 
 class TestCLI:
