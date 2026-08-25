@@ -288,7 +288,7 @@ A team lives under `$AGENTS_ARMY_TEAMS_DIR/<team>/`:
 
 ```
 $AGENTS_ARMY_TEAMS_DIR/<team>/
-    agents/          # orchestrator_state.json + its lock + per-agent turn locks
+    agents/          # orchestrator_state.json + its lock + the per-agent locks/ dir
     worktree/        # WORKDIR for every agent in the team — a git worktree you create
     .lock            # the team lock
 ```
@@ -320,9 +320,9 @@ uv run orchestrator list agents --team issue-73
 
 `delete --team NAME agent` removes one agent from that team's registry.
 `delete --team NAME` with no agent name tears the whole team down: it
-removes `agents/` (the state file, its lock, and every leaked per-agent turn
-lock) and nothing else. It never touches `worktree/` — that is a git working
-tree, and removing it is `git worktree remove`, the caller's call:
+removes `agents/` (the state file, its lock, and the directory of per-agent
+turn locks) and nothing else. It never touches `worktree/` — that is a git
+working tree, and removing it is `git worktree remove`, the caller's call:
 
 ```sh
 uv run orchestrator delete --team issue-73

@@ -11,7 +11,11 @@ export issue_url
 
 issue_number=${issue_url##*/}
 team="issue-$issue_number"
-export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+# Outside the repository, not under .git/. Nested, the driver's own checkout is
+# a parent directory of the agents' cwd, and an agent that wanders up into it
+# is editing the code this script is running from, mid-run: the #80 run had
+# devin editing seven files there and finding the live run's logs and state.
+export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/gdw-v3"
 
 git fetch origin --quiet
 git worktree prune
@@ -39,7 +43,7 @@ aarmy talk owen --team "$team" -b claude -m opus -e high -v \
 
 
 envsubst < spectacle.prompt.tmpl > spectacle.prompt
-aarmy talk spectacle --team "$team" -b claude -m opus -e high --prompt-file spectacle.prompt &> spectacle.log
+aarmy talk spectacle --team "$team" -b claude -m opus -e high -v --prompt-file spectacle.prompt &> spectacle.log
 
 
 # Both agents stop by labelling the issue. Wake whoever has not labelled yet,
@@ -53,8 +57,8 @@ for i in {1..10}; do
 
     [ $owen_done = 0 ] && [ $spectacle_done = 0 ] && break
 
-    [ $owen_done = 0 ] || aarmy talk owen --team "$team" -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> owen.log
-    [ $spectacle_done = 0 ] || aarmy talk spectacle --team "$team" -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> spectacle.log
+    [ $owen_done = 0 ] || aarmy talk owen --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> owen.log
+    [ $spectacle_done = 0 ] || aarmy talk spectacle --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> spectacle.log
 done
 
 # Only two happy labels mean the issue converged. A blocked label, or a missing
@@ -75,7 +79,7 @@ git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
 
 # The draft PR description is the whole handoff: the developer implements from
 # it and never opens the issue, so nothing may be left implicit or unresolved.
-aarmy talk spectacle --team "$team" -p "\
+aarmy talk spectacle --team "$team" -v -p "\
     The issue '$issue_url' has converged. Open a draft PR against the default branch and write its description. \
     Change no files - an empty commit on a new branch is all the PR needs to exist. The description is the deliverable. \
     Link the PR to the issue, but write the description so it stands completely on its own: \
@@ -103,7 +107,7 @@ export pr_url=$(gh pr list --draft --limit 50 --json url,body \
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" reset -q --hard
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
 
-aarmy talk devin --team "$team" --timeout 10800 -b claude -m sonnet -e high \
+aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
     -s implement,tdd,code-review-and-quality \
     -p "\
     You are a lead software engineer. \
@@ -112,8 +116,8 @@ aarmy talk devin --team "$team" --timeout 10800 -b claude -m sonnet -e high \
     Good quality and good design practices are paramount. \
     The PR URL is: '$pr_url' use gh cli and git to implement its description. \
     The description is the whole spec. Do not read the issue it links to, or any issue comments. \
-    It is a draft PR with an empty commit - push your implementation to its branch, but leave as draft for now. \
-    Monitor it for comments. A reviewr will give feedback,
+    It is a draft PR with an empty commit - push your implementation to its branch, \
+    but leave as draft for now. A reviewr will give feedback, \
     you have the choice to accept or pushback, but always do justify your decision with \
     code facts and using the skills provided.
     You goals is to converge to a solution that satisfies the PR description and that is Okay \
@@ -126,7 +130,7 @@ aarmy talk devin --team "$team" --timeout 10800 -b claude -m sonnet -e high \
 # line. talk blocks on his lock, so a nudge sent mid-turn just waits its turn.
 for i in {1..5}; do
 
-    aarmy talk devin --team "$team" --timeout 10800 -s code-review-and-quality \
+    aarmy talk devin --team "$team" -v --timeout 10800 -s code-review-and-quality \
     -p "Review your own diff across the five axes first. \
     Then: is the code something you are proud of, a solution you stand behind? \
     Judge that against your own standard, not the skill's 'improves code health' bar. \
@@ -142,14 +146,20 @@ done
 # app, which is the app that opened the PR, and GitHub will not let an account
 # approve its own PR - so the label is the approval, not a review verdict.
 # Review first, then check, so devin is not nudged after an approval.
+# --timeout matches devin's: a review that runs `make ci` costs what building
+# it did, and the default hour cuts the turn off mid-gate.
+head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
+
 for i in {1..10}; do
 
-    aarmy talk code-reviewer --team "$team" -b claude -m opus -e high -s code-review-and-quality \
+    aarmy talk code-reviewer --team "$team" -v --timeout 10800 -b claude -m opus -e high -s code-review-and-quality \
     -p "You are the code reviewer for the PR '$pr_url'. \
     Its description is the spec - review the diff against it, and against the five axes. \
     Every finding cites something re-checkable: a path and line, a command and its output, an API response. \
     Say which findings block merging and which are optional. \
     Do not change any code yourself - the developer fixes, you review. \
+    Verify with 'make ci' here - the local run is far quicker than the same gates on GitHub, \
+    so check the code yourself rather than waiting on the remote checks. \
     Where the developer pushed back, weigh the argument on its code facts and concede plainly when it is right. \
     otherwise push back with code facts and continue the review. \
     When nothing left blocks merging, and nite are solved, add the label 'reviewer-approves' to the PR, \
@@ -160,14 +170,24 @@ for i in {1..10}; do
 
     gh pr view $pr_url --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' && break
 
-    aarmy talk devin --team "$team" --timeout 10800 -s implement,tdd \
-    -p "There is new review feedback on '$pr_url'. \
-    Read the review comment and answer it: fix it, or push back with code facts. \
-    Reply saying which you did and why. \
-    Commit and push your fixes to the PR branch. \
-    Post as the github app: \
-    app_id: 4579193 \
-    private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &>> devin.log
+    # Nudge until the branch actually moves. A turn can end with the work
+    # uncommitted - devin started `make ci` in the background and returned
+    # waiting for a notification a one-shot turn can never deliver, twice in
+    # the #77 run - and the reviewer would then spend a full opus turn
+    # re-reading a commit it has already reviewed.
+    for j in {1..3}; do
+        aarmy talk devin --team "$team" -v --timeout 10800 -s implement,tdd \
+        -p "There is new review feedback on '$pr_url'. \
+        Read the review comment and answer it: fix it, or push back with code facts. \
+        Reply saying which you did and why. \
+        Commit and push your fixes to the PR branch. \
+        Post as the github app: \
+        app_id: 4579193 \
+        private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &>> devin.log
+
+        new_head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
+        [ "$new_head" != "$head" ] && head=$new_head && break
+    done
 done
 
 # The approval is the gate: code the reviewer never signed off gets no release
@@ -176,7 +196,7 @@ gh pr view $pr_url --json labels --jq '.labels[].name' | grep -qx 'reviewer-appr
 
 # Doku writes for whoever will use this, not for whoever reviewed it: what the
 # new version does for them, how to run it, and what will bite them.
-aarmy talk doku --team "$team" -b claude -m opus -e high \
+aarmy talk doku --team "$team" -v -b claude -m opus -e high \
     -p "You are the documentation writer for the PR '$pr_url'. \
     Read its description and its diff, and read README.md and docs/ to see how the project describes itself today. \
     Post one comment on the PR telling a user of this project what this version changes for them. \
@@ -195,5 +215,5 @@ aarmy talk doku --team "$team" -b claude -m opus -e high \
 # clean up
 
 aarmy delete --team "$team"
-git worktree remove "$AGENTS_ARMY_TEAMS_DIR/$team/worktree"
+git worktree remove --force "$AGENTS_ARMY_TEAMS_DIR/$team/worktree"
 rm -rf "$AGENTS_ARMY_TEAMS_DIR/$team"

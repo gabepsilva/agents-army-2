@@ -33,6 +33,11 @@ detect them — or boundary mutants whose difference is unobservable:
     or of under one second, at the instant it is read. A test can only reach
     either by scripting the clock to a specific number of reads, which asserts
     on how many times the loop looks at the time rather than on what it does.
+  * `path.unlink(missing_ok=True)` -> `missing_ok=False` / `None` in
+    Orchestrator._reclaim_agent_lock and talk's AgentNotFoundError handler:
+    both unlink a path this same call just opened (via `_flock`) or has held
+    open and live since a validated acquire, so the file always exists at
+    that point and `missing_ok` never has anything to do.
 
 Do not chase this last 1.2%, and do not silence it with
 `# pragma: no mutate` either — an equivalent mutant is evidence the code is
