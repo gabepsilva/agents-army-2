@@ -52,7 +52,7 @@ locking model, and worked examples.
 
 ## State
 
-The entire registry lives in one JSON file:
+Without `--team`, the entire registry lives in one JSON file:
 
 ```json
 {
