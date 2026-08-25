@@ -268,6 +268,46 @@ def _pause_first_flock(
     return opened, proceed
 
 
+class _OverlapState:
+    """Results from `_overlap_recorder`, read after every thread joins."""
+
+    def __init__(self) -> None:
+        self.overlapped = False
+        self.inodes: dict[str, int] = {}
+
+
+def _overlap_recorder(
+    lock_path: Path,
+) -> tuple[Callable[..., None], _OverlapState]:
+    """Build a `record(who, entered=None)` that marks `who` active for a
+    beat, capturing which inode `lock_path` currently names.
+
+    Shared by the two concurrency tests below, each of which calls `record`
+    from more than one thread contending for the same agent lock:
+    `state.overlapped` is true if two callers were ever active at once, and
+    `state.inodes[who]` is what each one saw. A closure rather than a class
+    with one method, so each test gets its own `active`/guard/`inodes`
+    without instantiating anything.
+    """
+    active: list[str] = []
+    active_guard = threading.Lock()
+    state = _OverlapState()
+
+    def record(who: str, entered: threading.Event | None = None) -> None:
+        with active_guard:
+            active.append(who)
+            if len(active) > 1:
+                state.overlapped = True
+        if entered is not None:
+            entered.set()
+        state.inodes[who] = os.stat(lock_path).st_ino
+        time.sleep(0.05)
+        with active_guard:
+            active.remove(who)
+
+    return record, state
+
+
 def _assert_subprocess_kwargs(
     kwargs: dict,
     cwd: Path,
@@ -2799,7 +2839,10 @@ class TestOrchestrator:
             with pytest.raises(orchestrator.AgentNotFoundError):
                 orch.talk("a", "hi")
 
-        turn_thread = threading.Thread(target=run_turn)
+        # daemon=True on both threads below: several asserts run before
+        # their matching join(), and one firing must not leave a thread
+        # running past this test.
+        turn_thread = threading.Thread(target=run_turn, daemon=True)
         turn_thread.start()
         assert entered.wait(timeout=5)
         lock_path = orch._agent_lock_path("a")
@@ -2815,7 +2858,7 @@ class TestOrchestrator:
         # else's turn, so that has to be checked, not assumed.
         results: list[Agent] = []
         delete_thread = threading.Thread(
-            target=lambda: results.append(orch.delete("a"))
+            target=lambda: results.append(orch.delete("a")), daemon=True
         )
         with caplog.at_level("DEBUG", logger="orchestrator"):
             delete_thread.start()
@@ -2854,9 +2897,23 @@ class TestOrchestrator:
             ) -> TurnResult:
                 # Runs with the outer talk() holding the agent lock, so this
                 # delete's own reclaim probe backs off (BlockingIOError,
-                # caught inside _reclaim_agent_lock); the file is left for
-                # talk()'s AgentNotFoundError handler to clean up instead.
-                Orchestrator(state_file=state_file).delete("a")
+                # caught inside _reclaim_agent_lock) rather than blocking on
+                # a lock this very thread already holds through a different
+                # fd — flock() isn't reentrant, so a probe that regressed
+                # into blocking would deadlock this thread against itself,
+                # not just wait. Run on its own thread and joined with a
+                # timeout so that shows up as a clean failure instead; the
+                # file is left for talk()'s AgentNotFoundError handler to
+                # clean up.
+                delete_thread = threading.Thread(
+                    target=lambda: Orchestrator(state_file=state_file).delete("a"),
+                    daemon=True,
+                )
+                delete_thread.start()
+                delete_thread.join(timeout=5)
+                assert not delete_thread.is_alive(), (
+                    "delete blocked instead of backing off"
+                )
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
         register_backend("delduring-reclaim", DeleteDuring)
@@ -2891,7 +2948,11 @@ class TestOrchestrator:
         orch.spawn("alice", "echo")
         orch.talk("alice", "warm up")
 
-        turn_thread = threading.Thread(target=lambda: orch.talk("bob", "hi"))
+        # daemon=True: the asserts below run before this thread's own
+        # join(), and one firing must not leave it running past this test.
+        turn_thread = threading.Thread(
+            target=lambda: orch.talk("bob", "hi"), daemon=True
+        )
         turn_thread.start()
         assert entered.wait(timeout=5)
 
@@ -2906,7 +2967,7 @@ class TestOrchestrator:
     def test_a_reclaim_racing_its_own_toctou_does_not_evict_a_fresh_acquirer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression for a TOCTOU a reviewer found in `_reclaim_agent_lock`.
+        """Regression for a TOCTOU in `_reclaim_agent_lock`.
 
         `_flock`'s open() and its flock() are two syscalls, not one: a probe
         can end up holding a lock on an inode a *different*, legitimate
@@ -2915,12 +2976,14 @@ class TestOrchestrator:
         destroys the live acquirer's file instead of the dead one the probe
         actually holds.
 
-        Exercises the real `_reclaim_agent_lock`, not a hand-rolled stand-in
-        — an earlier version of this test drove `_flock` directly and missed
-        exactly this, which is why the review caught it and this test didn't.
+        Exercises the real `_reclaim_agent_lock`, not a hand-rolled stand-in:
+        driving `_flock` directly instead misses this entirely, since
+        nothing about a bare `_flock` call reproduces the probe's own
+        open()-then-flock() window.
         """
         orch = Orchestrator(state_file=tmp_path / "state.json")
         lock_path = orch._agent_lock_path("bob")
+        record, state = _overlap_recorder(lock_path)
 
         # Pauses the reclaimer thread's first flock() call, after its
         # `_flock` has already open()ed the path — the window the bug lives
@@ -2931,24 +2994,6 @@ class TestOrchestrator:
             monkeypatch, "reclaimer"
         )
         waiter_entered = threading.Event()
-
-        active: list[str] = []
-        active_guard = threading.Lock()
-        overlapped = False
-        inodes: dict[str, int] = {}
-
-        def record(who: str, entered: threading.Event | None = None) -> None:
-            nonlocal overlapped
-            with active_guard:
-                active.append(who)
-                if len(active) > 1:
-                    overlapped = True
-            if entered is not None:
-                entered.set()
-            inodes[who] = os.stat(lock_path).st_ino
-            time.sleep(0.05)
-            with active_guard:
-                active.remove(who)
 
         def reclaimer() -> None:
             orch._reclaim_agent_lock("bob")
@@ -2961,7 +3006,11 @@ class TestOrchestrator:
             with orch._agent_lock("bob"):
                 record("late")
 
-        t_reclaim = threading.Thread(target=reclaimer, name="reclaimer")
+        # daemon=True: several asserts below run before their matching
+        # join(); one firing must not leave a thread running past this test
+        # (a paused one, via _pause_first_flock, would otherwise survive it
+        # by however long its own wait(timeout=...) takes to give up).
+        t_reclaim = threading.Thread(target=reclaimer, name="reclaimer", daemon=True)
         t_reclaim.start()
         assert reclaimer_opened.wait(timeout=5)
 
@@ -2970,29 +3019,29 @@ class TestOrchestrator:
         # and releases — a plain `delete` on an idle agent.
         orch._reclaim_agent_lock("bob")
 
-        t_wait = threading.Thread(target=waiter)
+        t_wait = threading.Thread(target=waiter, daemon=True)
         t_wait.start()
         assert waiter_entered.wait(timeout=5)
 
         let_reclaimer_flock.set()
         t_reclaim.join(timeout=5)
 
-        t_late = threading.Thread(target=late_arrival)
+        t_late = threading.Thread(target=late_arrival, daemon=True)
         t_late.start()
         t_wait.join(timeout=5)
         t_late.join(timeout=5)
 
-        assert not overlapped
-        assert inodes["waiter"] == inodes["late"]
+        assert not state.overlapped
+        assert state.inodes["waiter"] == state.inodes["late"]
 
     def test_a_waiter_blocked_on_a_reclaimed_inode_reacquires_without_overlap(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression for the original race in the PR description (§1/§2.2):
-        a distinct mechanism from the TOCTOU above, and from a genuinely
-        distinct bug — losing this test (by replacing it with the one above
-        instead of adding alongside it) let `_agent_lock`'s `revalidate=True`
-        go untested entirely, which a reviewer caught in round 2.
+        """Regression for the original race in the PR description: a
+        distinct mechanism from the TOCTOU above, and from a genuinely
+        distinct bug. Replacing this test with the TOCTOU one above,
+        instead of adding it alongside, would leave `_agent_lock`'s
+        `revalidate=True` completely untested.
 
         `_agent_lock`'s `flock()` can be granted on an inode a reclaimer has
         already unlinked and released out from under it — `flock` binds to
@@ -3003,30 +3052,13 @@ class TestOrchestrator:
         """
         orch = Orchestrator(state_file=tmp_path / "state.json")
         lock_path = orch._agent_lock_path("bob")
+        record, state = _overlap_recorder(lock_path)
 
         # Pauses the waiter's first flock() call, after its `_agent_lock`
         # has already open()ed the still-existing path — so it shares
         # whatever inode the reclaim below is about to unlink and release.
         waiter_opened, let_waiter_flock = _pause_first_flock(monkeypatch, "waiter")
         waiter_entered = threading.Event()
-
-        active: list[str] = []
-        active_guard = threading.Lock()
-        overlapped = False
-        inodes: dict[str, int] = {}
-
-        def record(who: str, entered: threading.Event | None = None) -> None:
-            nonlocal overlapped
-            with active_guard:
-                active.append(who)
-                if len(active) > 1:
-                    overlapped = True
-            if entered is not None:
-                entered.set()
-            inodes[who] = os.stat(lock_path).st_ino
-            time.sleep(0.05)
-            with active_guard:
-                active.remove(who)
 
         def waiter() -> None:
             with orch._agent_lock("bob"):
@@ -3036,7 +3068,8 @@ class TestOrchestrator:
             with orch._agent_lock("bob"):
                 record("late")
 
-        t_wait = threading.Thread(target=waiter, name="waiter")
+        # daemon=True: see the same note in the TOCTOU test above.
+        t_wait = threading.Thread(target=waiter, name="waiter", daemon=True)
         t_wait.start()
         assert waiter_opened.wait(timeout=5)
 
@@ -3047,13 +3080,13 @@ class TestOrchestrator:
         let_waiter_flock.set()
         assert waiter_entered.wait(timeout=5)
 
-        t_late = threading.Thread(target=late_arrival)
+        t_late = threading.Thread(target=late_arrival, daemon=True)
         t_late.start()
         t_wait.join(timeout=5)
         t_late.join(timeout=5)
 
-        assert not overlapped
-        assert inodes["waiter"] == inodes["late"]
+        assert not state.overlapped
+        assert state.inodes["waiter"] == state.inodes["late"]
 
     def test_talk_on_an_unknown_agent_leaves_no_lock_file(self, tmp_path: Path) -> None:
         """Written against `Orchestrator.talk` directly: `cmd_talk` creates
