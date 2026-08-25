@@ -124,6 +124,10 @@ verify-regression:
 # mutmut re-runs a mutant when its source changed but not when the tests did,
 # so a test-only edit is served from cache and the score never moves. Clear it
 # first when the selected tests no longer hash the same.
+# Every mutant mutmut times out dies from SIGXCPU, which dumps core, which on
+# a desktop is a "process crashed" toast per timeout. tools/nodump clears
+# PR_SET_DUMPABLE at interpreter startup so the kernel skips the dump; see
+# that module for why the run itself is unaffected.
 mutation:
 	$(gate)
 	mkdir -p reports
@@ -132,6 +136,7 @@ mutation:
 	uv run mutmut export-cicd-stats
 	uv run python tools/mutation_gate.py
 	uv run python tools/mutation_cache.py --record
+mutation: export PYTHONPATH := tools/nodump
 
 # --network none keeps this hermetic and deterministic: no registry rule
 # packs (p/python, p/security-audit) that could change or go unreachable
