@@ -1547,19 +1547,44 @@ class TestMutationCache:
     score it reports was reached by a suite that no longer exists."""
 
     @staticmethod
-    def _project(root: Path, selection: list[str]) -> Path:
+    def _project(
+        root: Path,
+        selection: list[str],
+        *,
+        source_paths: list[str] | None = None,
+        also_copy: list[str] | None = None,
+        ini_options: dict[str, object] | None = None,
+    ) -> Path:
         pyproject = root / "pyproject.toml"
         entries = ", ".join(f'"{name}"' for name in selection)
-        pyproject.write_text(
-            f"[tool.mutmut]\npytest_add_cli_args_test_selection = [{entries}]\n",
-            encoding="utf-8",
+        sources = ", ".join(f'"{name}"' for name in (source_paths or []))
+        copies = ", ".join(f'"{name}"' for name in (also_copy or []))
+        text = (
+            "[tool.mutmut]\n"
+            f"pytest_add_cli_args_test_selection = [{entries}]\n"
+            f"source_paths = [{sources}]\n"
+            f"also_copy = [{copies}]\n"
         )
+        if ini_options is not None:
+            options = "\n".join(
+                f"{key} = {value!r}" for key, value in ini_options.items()
+            )
+            text += f"\n[tool.pytest.ini_options]\n{options}\n"
+        pyproject.write_text(text, encoding="utf-8")
         return pyproject
 
     @staticmethod
     def _wire(monkeypatch: pytest.MonkeyPatch, root: Path, pyproject: Path) -> Path:
+        # Check A walks the on-disk tree the way mutmut's copytree does, via
+        # `git ls-files --others --exclude-standard`, so it needs a real
+        # (if empty) repository under root.
+        _git(root, "init")
         monkeypatch.setattr(mutation_cache, "PYPROJECT_PATH", pyproject)
         monkeypatch.setattr(mutation_cache, "MUTANTS_DIR", root / "mutants")
+        # Real DIGEST_EXCLUSIONS names a file in *this* repository; a test
+        # project built under tmp_path does not have it, so Check B would
+        # fail every test here that does not care about exclusions.
+        monkeypatch.setattr(mutation_cache, "DIGEST_EXCLUSIONS", {})
         digest_path = root / "reports" / "mutation-test-inputs.sha256"
         monkeypatch.setattr(mutation_cache, "DIGEST_PATH", digest_path)
         return digest_path
@@ -1608,9 +1633,36 @@ class TestMutationCache:
         assert not digest_path.exists()
 
         assert mutation_cache.main(["--record"]) == 0
-        assert digest_path.read_text(encoding="utf-8").strip() == mutation_cache.digest(
-            [tmp_path / "test_a.py"]
-        )
+        assert digest_path.exists()
+
+        # The recorded value must be the one a later bare run recognizes as
+        # current -- prove it round-trips rather than comparing against the
+        # same function main() uses internally to produce it.
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        capsys.readouterr()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        assert "reusing cached mutant results" in capsys.readouterr().out
+
+    def test_matching_digest_with_no_mutants_dir_does_not_claim_a_reuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A recorded digest can outlive its mutants/ (a fresh checkout that
+        restored the digest file but not the cache, say); "reusing cached
+        mutant results" would be false when there is nothing to reuse."""
+        test_file = tmp_path / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        capsys.readouterr()
+
+        assert mutation_cache.main([]) == 0
+        out = capsys.readouterr().out
+        assert "reusing cached mutant results" not in out
+        assert "no mutants/ to reuse" in out
 
     def test_the_makefile_records_only_after_mutmut_has_measured(self) -> None:
         recipe = (REPO / "Makefile").read_text(encoding="utf-8")
@@ -1649,7 +1701,20 @@ class TestMutationCache:
         self._wire(monkeypatch, tmp_path, pyproject)
 
         assert mutation_cache.main([]) == 1
-        assert "cannot hash the mutmut test selection" in capsys.readouterr().out
+        assert "cannot hash the mutation cache inputs" in capsys.readouterr().out
+
+    def test_a_malformed_pyproject_fails_loudly_instead_of_crashing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Checks A-C read pyproject.toml before compute_digest does, so they
+        need their own guard against a missing or unparsable file rather than
+        relying on the one around compute_digest."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("not valid toml [[[", encoding="utf-8")
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        assert "cannot read the mutation cache configuration" in capsys.readouterr().out
 
     def test_the_real_makefile_clears_the_cache_before_measuring(self) -> None:
         recipe = (REPO / "Makefile").read_text(encoding="utf-8")
@@ -1657,6 +1722,458 @@ class TestMutationCache:
 
         assert "tools/mutation_cache.py" in mutation
         assert mutation.index("tools/mutation_cache.py") < mutation.index("mutmut run")
+
+    def test_the_real_makefile_puts_nodump_on_the_mutation_recipes_pythonpath(
+        self,
+    ) -> None:
+        """IMPLICIT_WATCHED_ROOTS watches tools/nodump/ because sitecustomize.py
+        there runs inside every step of this recipe via PYTHONPATH -- bind that
+        claim to the actual Makefile line, so repointing PYTHONPATH away from
+        tools/nodump fails here instead of silently going stale."""
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert "mutation: export PYTHONPATH := tools/nodump" in mutation
+
+    # -- Digest widening (§4.1): everything besides source_paths that can
+    # decide a mutant's verdict must move the digest. ------------------------
+
+    def test_a_tests_conftest_edit_drops_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """mutmut's own git-change detection drops .py files outright, so
+        nothing but this digest would have caught a conftest.py edit."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tests" / "conftest.py", "# fixtures\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        capsys.readouterr()
+
+        _write(tmp_path / "tests" / "conftest.py", "# fixtures changed\n")
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+        assert "tests changed since the cached run" in capsys.readouterr().out
+
+    def test_a_non_mutated_also_copy_module_edit_drops_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "backends" / "__init__.py", "VERSION = 1\n")
+        _write(tmp_path / "backends" / "registry.py", "REGISTRY = {}\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(test_file)],
+            source_paths=["backends/registry.py"],
+            also_copy=["backends/"],
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        capsys.readouterr()
+
+        _write(tmp_path / "backends" / "__init__.py", "VERSION = 2\n")
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+
+    def test_a_tools_nodump_sitecustomize_edit_drops_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Python imports sitecustomize.py at interpreter startup, so it runs
+        inside every step of the mutation recipe, gate included."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tools" / "nodump" / "sitecustomize.py", "# v1\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        capsys.readouterr()
+
+        _write(tmp_path / "tools" / "nodump" / "sitecustomize.py", "# v2\n")
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+
+    def test_a_pytest_ini_options_edit_drops_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(
+            tmp_path, [str(test_file)], ini_options={"addopts": ["-q"]}
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        capsys.readouterr()
+
+        self._project(tmp_path, [str(test_file)], ini_options={"addopts": ["-q", "-x"]})
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+
+    def test_a_source_paths_edit_does_not_drop_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """The negative control: without it the suite cannot tell a correct
+        digest from one that simply hashes everything mutmut copies."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "backends" / "registry.py", "REGISTRY = {}\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(test_file)],
+            source_paths=["backends/registry.py"],
+            also_copy=["backends/"],
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        assert mutation_cache.main([]) == 0
+        capsys.readouterr()
+
+        _write(tmp_path / "backends" / "registry.py", "REGISTRY = {'a': 1}\n")
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        assert "reusing cached mutant results" in capsys.readouterr().out
+
+    # -- Check A: closure. ----------------------------------------------------
+
+    def test_check_a_untracked_non_py_file_under_watched_root_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tests" / "fixture.json", "{}\n")  # untracked, not .py
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/fixture.json" in out
+        assert "not covered" in out
+
+    def test_check_a_overrides_core_excludes_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """`--exclude-standard` also honors core.excludesFile, which is
+        user/host config, not this repository's own .gitignore -- so
+        `repo_files` overrides it with `-c core.excludesFile=/dev/null`.
+        Set here as a repo-local config value (the override applies to any
+        scope git would read it from -- global, system, or, as planted
+        here, local) so the test needs no state outside its own tmp_path."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tests" / "fixture.json", "{}\n")
+        excludes = tmp_path / "excludes"
+        _write(excludes, "*.json\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        _git(tmp_path, "config", "core.excludesFile", str(excludes))
+
+        assert mutation_cache.main([]) == 1
+        assert "tests/fixture.json" in capsys.readouterr().out
+
+    @staticmethod
+    def _unavailable_git(_cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args, returncode=128, stdout="", stderr="fatal: not a git repository"
+        )
+
+    def test_check_a_fails_loudly_when_git_is_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """§4.1: 'If git cannot answer, fail -- do not skip.' A no-op here
+        would let the closure guarantee stop applying, silently, on any
+        checkout git can't answer for, rather than failing the gate."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(mutation_cache, "_git", self._unavailable_git)
+
+        assert mutation_cache.main([]) == 1
+        assert (
+            "cannot list repository files: git is unavailable"
+            in capsys.readouterr().out
+        )
+
+    def test_digest_inputs_fails_loudly_when_git_is_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A defensive guard for a direct caller of digest_inputs/
+        compute_digest that skips Check A -- unreachable through main()
+        today, since Check A always runs first there, but not through
+        digest_inputs's own contract."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(mutation_cache, "_git", self._unavailable_git)
+
+        with pytest.raises(RuntimeError, match="cannot list repository files"):
+            mutation_cache.digest_inputs(pyproject)
+
+    def test_check_a_new_py_file_under_watched_root_is_auto_covered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tests" / "helpers.py", "X = 1\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_a_excluded_file_does_not_fail_closure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        _write(tmp_path / "tests" / "fixture.json", "{}\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/fixture.json": "static fixture data, never executed"},
+        )
+
+        assert mutation_cache.main([]) == 0
+
+    # -- Check B: exclusion bounds. --------------------------------------------
+
+    def test_check_b_glob_exclusion_fails_with_two_messages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache, "DIGEST_EXCLUSIONS", {"tests/*": "silence the tree"}
+        )
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "looks like a glob" in out
+        assert "names no file" in out
+
+    def test_check_b_missing_reason_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        excused = tmp_path / "tests" / "excused.py"
+        _write(excused, "# stand-in\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache, "DIGEST_EXCLUSIONS", {"tests/excused.py": "  "}
+        )
+
+        assert mutation_cache.main([]) == 1
+        assert "has no reason" in capsys.readouterr().out
+
+    def test_check_b_names_no_file_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/not_yet_created.py": "will be added alongside this exclusion"},
+        )
+
+        assert mutation_cache.main([]) == 1
+        assert "names no file" in capsys.readouterr().out
+
+    # -- Check C: the copy invariant. ------------------------------------------
+
+    def test_check_c_narrowed_also_copy_names_every_uncovered_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        backend_entries = [
+            "backends/base.py",
+            "backends/claude.py",
+            "backends/codex.py",
+            "backends/grok.py",
+            "backends/opencode.py",
+            "backends/registry.py",
+        ]
+        pyproject = self._project(
+            tmp_path,
+            [str(test_file)],
+            source_paths=backend_entries,
+            also_copy=["orchestrator/"],
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        for entry in backend_entries:
+            assert entry in out
+
+    def test_check_c_also_copy_without_a_trailing_slash_does_not_swallow_a_sibling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A bare string-prefix match on an unnormalized also_copy entry
+        would let "backends" cover the unrelated "backends_extra/", silently
+        defeating the whole point of the check."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(test_file)],
+            source_paths=["backends_extra/evil.py"],
+            also_copy=["backends"],  # deliberately no trailing slash
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        assert "backends_extra/evil.py" in capsys.readouterr().out
+
+    # -- Check D: the gate's own input cannot survive a run that measured
+    # nothing. -----------------------------------------------------------------
+
+    def test_check_d_stale_cicd_stats_cannot_survive_into_the_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        mutants = tmp_path / "mutants"
+        mutants.mkdir()
+        stale_stats = mutants / "mutmut-cicd-stats.json"
+        stale_stats.write_text(
+            json.dumps(
+                {
+                    "killed": 100,
+                    "survived": 0,
+                    "total": 100,
+                    "suspicious": 0,
+                    "timeout": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # A bare run must clear the stale file before anything else reads it,
+        # whether or not it goes on to reuse or drop mutants/ itself.
+        assert mutation_cache.main([]) == 0
+        assert not stale_stats.exists()
+
+        # If this run's own export produced nothing, the gate must see that
+        # as missing input, never as the seeded score.
+        monkeypatch.setattr(mutation_gate, "STATS_PATH", stale_stats)
+        assert mutation_gate.main() == 1
+        assert "is missing" in capsys.readouterr().out
+
+    # -- .github/workflows/ci.yml consistency (not a gate; see AGENTS.md). ----
+
+    def test_ci_workflow_restores_and_saves_the_mutation_cache_around_the_gate(
+        self,
+    ) -> None:
+        source = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        block = ratchet_gate._job_block(source, "mutation")
+        assert block is not None
+
+        restore = re.search(
+            r"- name: Restore mutation cache\n(?:.+\n)+?\s*key: (.+)\n"
+            r"(?:.+\n)*?\s*restore-keys: \|\n((?:\s{12}.+\n)+)",
+            block,
+        )
+        gate_step = block.index("run: make verify-mutation")
+        save = re.search(
+            r"- name: Save mutation cache\n\s*if: (.+)\n"
+            r"(?:.+\n)+?\s*key: (.+)\n",
+            block,
+        )
+        assert restore is not None
+        assert save is not None
+
+        # 1. restore precedes the gate, the gate precedes save.
+        assert (
+            block.index("- name: Restore mutation cache")
+            < gate_step
+            < block.index("- name: Save mutation cache")
+        )
+
+        # 2. save only runs for a lane that both succeeded and did not
+        #    already have an exact cache hit.
+        assert save.group(1).strip() == (
+            "success() && steps.mutation-cache.outputs.cache-hit != 'true'"
+        )
+
+        # 3. the two keys are byte-identical.
+        restore_key = restore.group(1).strip()
+        save_key = save.group(2).strip()
+        assert restore_key == save_key
+
+        # 4. the key names its format version, the OS, the interpreter, and
+        #    the lockfile/config that decide what mutmut measured against.
+        required_components = (
+            "mutation-v1",
+            "runner.os",
+            "steps.setup-python.outputs.python-version",
+            "hashFiles('uv.lock', 'pyproject.toml')",
+        )
+        for component in required_components:
+            assert component in restore_key
+
+        # 5. every restore-keys line is a strict prefix of key AND still
+        #    carries every required component. Prefix alone is not enough:
+        #    "mutation-" textually satisfies str.startswith against any key
+        #    that begins with it, so a line widened down to the bare format
+        #    version would pass a prefix-only check while matching every
+        #    cache in scope, including one measured under a different
+        #    lockfile -- exactly what this assertion exists to catch. All
+        #    lines are checked, not just the first: a second, broader
+        #    fallback line must not slip past unnoticed.
+        restore_keys = restore.group(2)
+        prefixes = re.findall(r"\s{12}(.+)\n", restore_keys)
+        assert prefixes
+        for prefix in prefixes:
+            assert restore_key.startswith(prefix)
+            assert restore_key != prefix
+            for component in required_components:
+                assert component in prefix
+
+        # 6. exactly the two paths this gate reads and writes are cached, on
+        #    both steps -- a regex matching neither would pass this loop
+        #    vacuously, so the count is checked too.
+        paths = re.findall(r"path: \|\n((?:\s{12}.+\n)+)", block)
+        assert len(paths) == 2
+        for path_block in paths:
+            entries = {line.strip() for line in path_block.splitlines()}
+            assert entries == {"mutants", "reports/mutation-test-inputs.sha256"}
 
 
 class TestCiGateAnnouncements:
