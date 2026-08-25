@@ -122,8 +122,10 @@ source_paths = [
 also_copy = ["backends/", "orchestrator/"]
 pytest_add_cli_args_test_selection = [
     "tests/test_backends.py",
+    "tests/test_cli_surface.py",
     "tests/test_schema.py",
     "tests/test_skills.py",
+    "tests/test_teams.py",
 ]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]
 

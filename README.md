@@ -261,7 +261,8 @@ the reply for it rather than parsing the whole text.
 
 ### State
 
-The entire registry lives in one JSON file, `orchestrator_state.json`:
+Without `--team`, the entire registry lives in one JSON file,
+`orchestrator_state.json`:
 
 ```json
 {
@@ -288,6 +289,73 @@ Skill files are read from `SKILLS/` next to that same home. `--skill tdd`
 walks the whole tree and attaches the matching markdown path to the prompt.
 A skill name must be unique across every subfolder; a collision is an error.
 To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
+
+### Teams
+
+`--team NAME`, accepted by `create`, `talk`, `list`, and `delete`, runs
+against a named team instead of the teamless layout above: its own registry,
+its own working directory, isolated from every other team. This is what
+lets two fleets work two different GitHub issues at once without both
+running `git checkout`/`commit`/`gh pr create` against the same tree.
+
+A team lives under `$AGENTS_ARMY_TEAMS_DIR/<team>/`:
+
+```
+$AGENTS_ARMY_TEAMS_DIR/<team>/
+    agents/          # orchestrator_state.json + its lock + per-agent turn locks
+    worktree/        # WORKDIR for every agent in the team — a git worktree you create
+    .lock            # the team lock
+```
+
+State and workspace are siblings, never nested — a state file and its locks
+sitting inside the worktree would show up as untracked litter in every `git
+status` an agent runs, and would follow the branch around.
+
+`AGENTS_ARMY_TEAMS_DIR` has **no default** — an in-checkout default gets
+deleted by `git clean -xdff` if left ignored, or pollutes every `git status`
+if not; a machine-global default collides across repos sharing one checkout.
+Set it yourself, typically once per clone:
+
+```sh
+export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+```
+
+The orchestrator never runs `git` itself — you create the worktree, and
+`--team` refuses to run `create`/`talk`/`list` against a team whose
+`worktree/` doesn't exist yet:
+
+```sh
+git worktree add -B issue-73 "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree" origin/master
+
+uv run orchestrator create owen --team issue-73 -b claude
+uv run orchestrator talk owen --team issue-73 -p "start"
+uv run orchestrator list agents --team issue-73
+```
+
+`delete --team NAME agent` removes one agent from that team's registry.
+`delete --team NAME` with no agent name tears the whole team down: it
+removes `agents/` (the state file, its lock, and every leaked per-agent turn
+lock) and nothing else. It never touches `worktree/` — that is a git working
+tree, and removing it is `git worktree remove`, the caller's call:
+
+```sh
+uv run orchestrator delete --team issue-73
+git worktree remove "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree"
+rm -rf "$AGENTS_ARMY_TEAMS_DIR/issue-73"
+```
+
+Teardown takes an exclusive, non-blocking lock on the team, so it refuses
+(exit 1) rather than run underneath another command still using that team.
+`--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
+`AGENTS_ARMY_STATE_FILE` — under `--team`, both are derived from the team
+root, so an explicit value alongside `--team` could only be a stale export
+worth surfacing rather than silently overriding.
+
+A team is an isolation boundary **between** teams, not inside one: a team's
+agents share one worktree, so concurrent agents in the same team can still
+write the same files. See [`docs/configuration.md`](docs/configuration.md)
+and [`docs/cli-reference.md`](docs/cli-reference.md) for the full flag and
+environment-variable reference.
 
 ## Project layout
 

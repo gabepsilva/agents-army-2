@@ -7,6 +7,7 @@
 | `AGENTS_ARMY_HOME` | current working directory | base folder for state and, unless overridden, skills |
 | `AGENTS_ARMY_STATE_FILE` | `$AGENTS_ARMY_HOME/orchestrator_state.json` | the registry file's exact path |
 | `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS` | the skill catalog root that `--skill` and `list skills` search |
+| `AGENTS_ARMY_TEAMS_DIR` | **no default** | root under which `--team NAME` resolves `$AGENTS_ARMY_TEAMS_DIR/NAME/{agents,worktree}` — see [Teams](#teams) |
 
 When the Gabriel's Development Workflow runs an agent turn, `AGENTS_ARMY_HOME`
 and `AGENTS_ARMY_STATE_FILE` are re-exported into the `bwrap` sandbox via
@@ -21,6 +22,33 @@ AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
 # catalog where they are
 AGENTS_ARMY_STATE_FILE=/tmp/state.json uv run orchestrator list
 ```
+
+## Teams
+
+`--team NAME` (on `create`, `talk`, `list`, `delete`) points `STATE_FILE`,
+`WORKDIR`, and (unless `AGENTS_ARMY_SKILLS` is set) `SKILLS_DIR` at
+`$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json`,
+`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree`, and
+`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` respectively — a named group of
+agents gets its own registry and its own working directory, isolated from
+every other team.
+
+`AGENTS_ARMY_TEAMS_DIR` has no default; export it once per clone:
+
+```sh
+export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+```
+
+`--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
+`AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead), and
+`create`/`talk`/`list`/`delete NAME --team` all require
+`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` to already exist — the orchestrator
+never runs `git` itself, so the caller creates it with `git worktree add`.
+`delete --team NAME` with no agent name tears the whole team down: it
+removes `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/` and nothing else, leaving
+`worktree/` (and its git metadata) untouched. See the
+[README's Teams section](../README.md#teams) for the full layout, the
+locking model, and worked examples.
 
 ## State
 

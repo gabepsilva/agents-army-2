@@ -16,13 +16,14 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -56,6 +57,13 @@ STATE_FILE = Path(
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
 SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", HOME / "SKILLS"))
+# Team roots: $TEAMS_DIR/<team>/{agents/,worktree/} — state and workspace as
+# siblings, never nested. No default: see README.
+TEAMS_DIR = (
+    Path(os.environ["AGENTS_ARMY_TEAMS_DIR"])
+    if "AGENTS_ARMY_TEAMS_DIR" in os.environ
+    else None
+)
 # The backend an agent gets when none is named: by `create`, and by the agent a
 # talk creates for a name that does not exist yet.
 DEFAULT_BACKEND = "claude"
@@ -147,6 +155,23 @@ class Agent:
         if result.session_id is not None:
             self.session_id = result.session_id
         return result
+
+
+@contextmanager
+def _flock(path: Path, mode: int = fcntl.LOCK_EX) -> Iterator[None]:
+    """Hold an flock on `path`, creating its parent directory first.
+
+    Module-level rather than a method on `Orchestrator` so `main()` can take
+    the team lock before an `Orchestrator` exists: `Orchestrator._locked`
+    delegates here too, so there is exactly one flock implementation.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), mode)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class Orchestrator:
@@ -361,13 +386,8 @@ class Orchestrator:
 
     @contextmanager
     def _locked(self, path: Path) -> Iterator[None]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with _flock(path):
+            yield
 
     def _exclusive(self) -> AbstractContextManager[None]:
         """Serialize reads and writes of the state file."""
@@ -432,6 +452,21 @@ class Orchestrator:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _add_team_option(parser: argparse.ArgumentParser) -> None:
+    # Its own helper, deliberately not folded into _add_agent_config_options:
+    # that trio feeds _agent_config/_ensure_agent, which *assert* a stored
+    # agent's configuration matches the flags. A team is a namespace to
+    # select, not configuration to assert. Long flag only — no -t: it would
+    # sit next to talk's --timeout, a footgun for a flag scripts pass once.
+    parser.add_argument(
+        "--team",
+        help=(
+            "run against $AGENTS_ARMY_TEAMS_DIR/<team>/{agents,worktree} "
+            "instead of the teamless layout"
+        ),
+    )
 
 
 def _add_agent_config_options(parser: argparse.ArgumentParser) -> None:
@@ -577,7 +612,24 @@ def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(format_skill_listing(catalog))
 
 
+def _teardown_team(team: str) -> None:
+    """Remove a team's registry, leaving its worktree and git metadata alone.
+
+    Scoped to `agents/`: that directory holds the state file, its lock, and
+    every leaked per-agent turn lock. `worktree/` is a git working tree —
+    removing it is `git worktree remove`, and it is the caller's call, not
+    teardown's. The team lock's own file, a sibling of `agents/`, survives.
+    """
+    agents_dir = cast(Path, TEAMS_DIR) / team / "agents"
+    if agents_dir.exists():
+        shutil.rmtree(agents_dir)
+    print(f"deleted team '{team}'")
+
+
 def cmd_delete(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+    if opts.team is not None and opts.name is None:
+        _teardown_team(opts.team)
+        return
     agent = orchestrator.delete(opts.name)
     print(f"deleted agent '{agent.name}' backend={agent.backend.name}")
 
@@ -696,6 +748,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_verbosity_argument(create, "verbosity_after")
     create.add_argument("name")
     _add_agent_config_options(create)
+    _add_team_option(create)
     create.set_defaults(_parser=create)
 
     talk = _add_verb_parser(
@@ -718,6 +771,7 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument("--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT)
     talk.add_argument("-p", "--prompt")
     talk.add_argument("--prompt-file")
+    _add_team_option(talk)
     talk.set_defaults(_parser=talk)
 
     list_parser = _add_verb_parser(subparsers, "list")
@@ -726,12 +780,16 @@ def _build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument(
         "target", nargs="?", choices=("agents", "skills"), default="agents"
     )
+    _add_team_option(list_parser)
     list_parser.set_defaults(_parser=list_parser)
 
     delete = _add_verb_parser(subparsers, "delete")
     _add_version_argument(delete)
     _add_verbosity_argument(delete, "verbosity_after")
-    delete.add_argument("name")
+    # nargs="?": `--team T` alone tears the whole team down (see cmd_delete);
+    # a name deletes one agent. Neither is an error — bare `delete` is.
+    delete.add_argument("name", nargs="?")
+    _add_team_option(delete)
     delete.set_defaults(_parser=delete)
 
     doctor = _add_verb_parser(subparsers, "doctor")
@@ -955,6 +1013,87 @@ def _resolve_talk_prompt(
     opts.prompt = prompt
 
 
+# A team name becomes a directory name; an agent name never does (see
+# Orchestrator._agent_lock_path, which digests it for exactly that reason).
+# '.' and '..' match the charset below but must still be rejected: they
+# escape TEAMS_DIR (Path('/teams') / '..' / 'agents' == Path('/teams/../agents')).
+_TEAM_NAME_RE = re.compile(r"[-_.A-Za-z0-9]+")
+
+
+def _team_lock_path(team_root: Path) -> Path:
+    return team_root / ".lock"
+
+
+def _resolve_team(
+    opts: argparse.Namespace, teardown: bool
+) -> AbstractContextManager[None]:
+    """Point STATE_FILE/WORKDIR/SKILLS_DIR at a team's paths and lock it.
+
+    Teamless commands (`opts.team is None`) are untouched: this returns
+    `nullcontext()` and leaves the three globals exactly as they were.
+
+    Every check here runs before `Orchestrator()` is constructed and reports
+    through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
+    already does — except for teardown of a team that no longer exists, which
+    is not a usage error and is left to raise `OrchestratorError` (exit 1),
+    the same as any other `delete` of something that isn't there.
+
+    Reassigning the globals here, once, rather than threading a `Paths`
+    object through `Orchestrator`/`Agent.talk`/every `cmd_*`, is deliberate:
+    each constant is read at call time at exactly four sites, and `WORKDIR =
+    HOME` at import time means reassigning `orchestrator.HOME` alone would
+    move nothing — all three must be set individually.
+    """
+    global STATE_FILE, WORKDIR, SKILLS_DIR
+    team = opts.team
+    if team is None:
+        return nullcontext()
+    if TEAMS_DIR is None:
+        opts._parser.error(
+            "--team requires AGENTS_ARMY_TEAMS_DIR to be set; export it "
+            "first, e.g.:\n"
+            '  export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse '
+            '--path-format=absolute --git-common-dir)/gdw-v3"'
+        )
+    if not _TEAM_NAME_RE.fullmatch(team) or team in (".", ".."):
+        opts._parser.error(
+            f"invalid team name {team!r}: must match "
+            f"{_TEAM_NAME_RE.pattern!r} and not be '.' or '..'"
+        )
+    if "AGENTS_ARMY_STATE_FILE" in os.environ:
+        opts._parser.error(
+            "--team cannot be combined with an explicit AGENTS_ARMY_STATE_FILE "
+            "(unset it, or drop --team)"
+        )
+    if "AGENTS_ARMY_HOME" in os.environ:
+        opts._parser.error(
+            "--team cannot be combined with an explicit AGENTS_ARMY_HOME "
+            "(unset it, or drop --team)"
+        )
+    team_root = cast(Path, TEAMS_DIR) / team
+    worktree = team_root / "worktree"
+    if teardown:
+        # V5 does not apply to teardown: teardown must stay possible after
+        # `git worktree remove`, or a team's state is orphaned forever. Only
+        # the team root itself — not the worktree — has to still be there.
+        if not team_root.is_dir():
+            raise OrchestratorError(f"team '{team}' not found at {team_root}")
+    elif not worktree.is_dir():
+        opts._parser.error(
+            f"team workspace {worktree} does not exist; create it first with "
+            f"'git worktree add {worktree} ...'"
+        )
+    STATE_FILE = team_root / "agents" / "orchestrator_state.json"
+    WORKDIR = worktree
+    SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", worktree / "SKILLS"))
+    # LOCK_SH for every team verb but teardown, so concurrent turns in one
+    # team don't serialize on each other; LOCK_EX|LOCK_NB for teardown, so a
+    # team must not be torn down while a command in it is running, and a
+    # busy team fails fast (flock has no writer fairness — see main()).
+    mode = fcntl.LOCK_EX | fcntl.LOCK_NB if teardown else fcntl.LOCK_SH
+    return _flock(_team_lock_path(team_root), mode)
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_argv = sys.argv[1:] if argv is None else argv
     separator_index = raw_argv.index("--") if "--" in raw_argv else len(raw_argv)
@@ -980,11 +1119,29 @@ def main(argv: list[str] | None = None) -> None:
     log.debug("cli: %d argument(s) after flag splitting", len(head) + len(tail))
     if opts.verb == "talk":
         _resolve_talk_prompt(opts, tail, separator_present)
+    if opts.verb == "delete" and opts.team is None and opts.name is None:
+        opts._parser.error("delete requires NAME or --team")
 
+    # Only `delete` with no NAME tears a team down; create/talk always
+    # require NAME, so this is False for them without inspecting opts.team.
+    teardown = opts.verb == "delete" and opts.name is None
     try:
-        orch = Orchestrator()
-        log.debug("cli: dispatching '%s'", opts.verb)
-        VERBS[opts.verb](orch, opts)
+        team_lock = _resolve_team(opts, teardown)
+        with team_lock:
+            orch = Orchestrator()
+            log.debug("cli: dispatching '%s'", opts.verb)
+            VERBS[opts.verb](orch, opts)
+    except BlockingIOError:
+        # Linux flock has no writer fairness — a blocking LOCK_EX here could
+        # wait indefinitely behind a stream of shared locks. Failing fast and
+        # naming the team is the right behavior for a teardown that lost the
+        # race, not exit 2: this is a busy resource, not a usage mistake.
+        print(
+            f"team '{opts.team}' is in use by another command; try again "
+            "once it finishes",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
     except _CLI_ERRORS as exc:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)

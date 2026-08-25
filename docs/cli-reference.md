@@ -27,7 +27,7 @@ going before turning it on.
 
 ```
 orchestrator create NAME [-b/--backend {claude,codex,grok,opencode}] [-m/--model MODEL]
-                          [-e/--reasoning-effort EFFORT]
+                          [-e/--reasoning-effort EFFORT] [--team NAME]
 ```
 
 | flag | meaning |
@@ -36,6 +36,7 @@ orchestrator create NAME [-b/--backend {claude,codex,grok,opencode}] [-m/--model
 | `-b`, `--backend` | backend to bind the agent to; defaults to `claude` |
 | `-m`, `--model` | model name to pass to the backend CLI |
 | `-e`, `--reasoning-effort` | reasoning-effort value to pass to the backend CLI |
+| `--team` | run against `$AGENTS_ARMY_TEAMS_DIR/NAME`'s registry and worktree instead of the teamless layout — see [Teams](#teams) |
 
 ```sh
 uv run orchestrator create reviewer -b claude
@@ -53,6 +54,7 @@ Backend, model, and reasoning effort are fixed at creation (or at the first
 ```
 orchestrator talk NAME [-b/--backend ...] [-m/--model ...] [-e/--reasoning-effort ...]
                        [-s/--skill NAMES] [--schema PATH] [--retries N] [--timeout SECONDS]
+                       [--team NAME]
                        (-p/--prompt TEXT | --prompt-file PATH | -- PROMPT...)
 ```
 
@@ -73,6 +75,7 @@ possibly-new agent without a separate `create` step.
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
+| `--team` | run against `$AGENTS_ARMY_TEAMS_DIR/NAME`'s registry and worktree instead of the teamless layout — see [Teams](#teams) |
 
 Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
 passing more than one, or none, is an error.
@@ -132,30 +135,79 @@ one turn's `--timeout`.
 ## `list` — show agents or the skill catalog
 
 ```
-orchestrator list [agents|skills]
+orchestrator list [agents|skills] [--team NAME]
 ```
 
-Defaults to `agents` when no target is given.
+Defaults to `agents` when no target is given. `--team NAME` reads that
+team's registry (`list agents`) or indexes its worktree's `SKILLS/`
+(`list skills`) instead of the teamless layout.
 
 ```sh
 uv run orchestrator list           # same as: list agents
 uv run orchestrator list agents    # name, backend, session id for every agent
 uv run orchestrator list skills    # the SKILLS/ catalog
+uv run orchestrator list agents --team issue-73   # only that team's agents
 ```
 
-## `delete` — remove an agent
+## `delete` — remove an agent, or tear a team down
 
 ```
-orchestrator delete NAME
+orchestrator delete [NAME] [--team NAME]
 ```
 
 ```sh
 uv run orchestrator delete reviewer
 # deleted agent 'reviewer' backend=claude
+
+uv run orchestrator delete reviewer --team issue-73
+# deleted agent 'reviewer' backend=claude   (from that team's registry)
+
+uv run orchestrator delete --team issue-73
+# deleted team 'issue-73'
 ```
 
 Deleting an agent drops it from the registry; it does not touch the
 underlying CLI's own session storage.
+
+`NAME` is optional only so `--team NAME` alone can mean **teardown**: it
+removes that team's `agents/` directory (the state file, its lock, and every
+leaked per-agent turn lock) and nothing else — `worktree/` and its git
+metadata are left for the caller to remove with `git worktree remove`.
+Neither `--team` alone nor a bare `NAME` is an error; `delete` with
+**neither** is (exit 2). Teardown takes an exclusive, non-blocking lock on
+the team and refuses (exit 1) if another command is using it; it also exits
+1 if the named team doesn't exist. See
+[Teams](#teams) below.
+
+## Teams
+
+`--team NAME`, on `create`/`talk`/`list`/`delete`, points the command at
+`$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json` for state and
+`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` for the backend's working directory
+(and, unless `AGENTS_ARMY_SKILLS` is set, its skill catalog) instead of the
+teamless layout — a named group of agents gets its own registry and its own
+working directory, isolated from every other team.
+
+```sh
+export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+git worktree add -B issue-73 "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree" origin/master
+
+uv run orchestrator create owen --team issue-73 -b claude
+uv run orchestrator talk owen --team issue-73 -p "start"
+uv run orchestrator list agents --team issue-73
+uv run orchestrator delete --team issue-73          # teardown: agents/ only
+git worktree remove "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree"
+```
+
+| exit code | meaning |
+|---|---|
+| `2` | `AGENTS_ARMY_TEAMS_DIR` is unset, the team name is invalid, `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE`, or (for `create`/`talk`/`list`/`delete NAME`) the team's `worktree/` doesn't exist yet |
+| `1` | teardown (`delete --team NAME` with no agent name) found no such team, or another command currently holds the team's lock |
+
+See the [README's Teams section](../README.md#teams) for the full
+`agents/`/`worktree/`/`.lock` layout and the locking model, and
+[Configuration](configuration.md#teams) for the environment-variable
+reference.
 
 ## `doctor` — check local setup
 

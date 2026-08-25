@@ -2307,9 +2307,13 @@ class TestOrchestrator:
     def test_spawn_talk_persists_and_resumes(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
         seen_session_ids: list[str | None] = []
+        # A literal, not orchestrator.WORKDIR: comparing the module constant
+        # against itself would pass whatever it happened to be set to.
+        workdir = tmp_path / "workdir"
+        monkeypatch.setattr(orchestrator, "WORKDIR", workdir)
 
         def fake_backend_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, orchestrator.WORKDIR)
+            _assert_subprocess_kwargs(kwargs, workdir)
             return subprocess.CompletedProcess(
                 args,
                 0,
@@ -2466,9 +2470,13 @@ class TestOrchestrator:
 
     def test_delete_agent(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
+        # A literal, not orchestrator.WORKDIR: comparing the module constant
+        # against itself would pass whatever it happened to be set to.
+        workdir = tmp_path / "workdir"
+        monkeypatch.setattr(orchestrator, "WORKDIR", workdir)
 
         def fake_backend_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, orchestrator.WORKDIR)
+            _assert_subprocess_kwargs(kwargs, workdir)
             return subprocess.CompletedProcess(
                 args,
                 0,
@@ -3064,8 +3072,10 @@ class TestCLI:
     def test_cmd_delete_missing_name_reports_its_own_prog(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # `name` is nargs="?" now (`--team T` alone tears a team down), so
+        # argparse itself no longer rejects a bare `delete`; main() does.
         with pytest.raises(SystemExit, match="2"):
-            _options(["delete"])
+            main(["delete"])
         assert capsys.readouterr().err.startswith("usage: orchestrator delete ")
 
     def test_main_no_args_prints_usage_and_exits(
