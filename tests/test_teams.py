@@ -31,6 +31,7 @@ def _protect_module_globals(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "WORKDIR", orchestrator.WORKDIR)
     monkeypatch.setattr(orchestrator, "SKILLS_DIR", orchestrator.SKILLS_DIR)
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", orchestrator.TEAMS_DIR)
+    monkeypatch.setattr(orchestrator, "ROOT", orchestrator.ROOT)
 
 
 def _make_recording_backend(sink: list[Path]) -> type[AgentBackend]:
@@ -102,6 +103,24 @@ def _init_repo(root: Path) -> None:
 
 def _read_state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _make_team(
+    root: Path,
+    *parts: str,
+    agents: dict[str, str] | None = None,
+    worktree: bool = True,
+) -> Path:
+    """Write a minimal team directory (`agents/orchestrator_state.json`,
+    optionally `worktree/`) at `root/<parts>` and return its path."""
+    team_dir = root.joinpath(*parts)
+    agents_dir = team_dir / "agents"
+    agents_dir.mkdir(parents=True)
+    payload = {name: {"backend": backend} for name, backend in (agents or {}).items()}
+    (agents_dir / "orchestrator_state.json").write_text(json.dumps(payload))
+    if worktree:
+        (team_dir / "worktree").mkdir()
+    return team_dir
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +213,7 @@ def test_v1_missing_teams_dir_env_exits_2_and_names_the_variable(
     assert (
         "orchestrator list: error: --team requires AGENTS_ARMY_TEAMS_DIR to "
         "be set; export it first, e.g.:\n"
-        '  export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse '
-        '--path-format=absolute --git-common-dir)/gdw-v3"\n' in err
+        '  export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/<repo>/<workflow>"\n' in err
     )
 
 
@@ -554,3 +572,403 @@ def test_teardown_overlapping_a_held_shared_lock_exits_nonzero_and_removes_nothi
         "team 't1' is in use by another command; try again once it finishes\n"
     )
     assert captured.out == ""
+
+
+# ---------------------------------------------------------------------------
+# `list teams` (discovery under AGENTS_ARMY_ROOT)
+# ---------------------------------------------------------------------------
+
+
+def test_list_teams_empty_root_prints_no_teams_and_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(orchestrator, "ROOT", tmp_path / "does-not-exist")
+    monkeypatch.setattr(
+        orchestrator,
+        "STATE_FILE",
+        tmp_path / "does-not-exist" / "orchestrator_state.json",
+    )
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    assert capsys.readouterr().out == "no teams\n"
+
+
+def test_list_teams_several_teams_under_one_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "repo-a", "gdw-v3", "issue-1", agents={"dev": "claude"})
+    _make_team(
+        root, "repo-a", "gdw-v3", "issue-2", agents={"dev": "claude", "rev": "codex"}
+    )
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "repo-a/gdw-v3/issue-1" in out
+    assert "1 agent" in out
+    assert "dev/claude" in out
+    assert "repo-a/gdw-v3/issue-2" in out
+    assert "2 agents" in out
+    assert "rev/codex" in out
+
+
+def test_list_teams_namespaced_root_and_flat_root_in_same_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "repo-a", "gdw-v3", "issue-1", agents={"dev": "claude"})
+    _make_team(root, "flat", agents={"ops": "codex"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "repo-a/gdw-v3/issue-1" in out
+    assert "flat" in out
+
+
+def test_list_teams_directory_without_agents_dir_is_not_a_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    (root / "not-a-team" / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    assert "not-a-team" not in capsys.readouterr().out
+
+
+def test_list_teams_flags_a_team_missing_its_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "orphan", agents={"dev": "claude"}, worktree=False)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "orphan" in out
+    assert "[worktree missing]" in out
+
+
+def test_list_teams_team_with_intact_worktree_is_not_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "healthy", agents={"dev": "claude"}, worktree=True)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    assert "[worktree missing]" not in capsys.readouterr().out
+
+
+def test_list_teams_decoy_worktree_with_its_own_registry_yields_one_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A team is never descended into, so a decoy `agents/orchestrator_state.json`
+    inside its own `worktree/` must not be discovered as a second team."""
+    root = tmp_path / "root"
+    team = _make_team(root, "issue-1", agents={"dev": "claude"})
+    decoy_agents = team / "worktree" / "agents"
+    decoy_agents.mkdir(parents=True)
+    (decoy_agents / "orchestrator_state.json").write_text(
+        json.dumps({"decoy": {"backend": "codex"}})
+    )
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert out.count("issue-1") == 1
+    assert "(1 agent: dev/claude)" in out
+    assert "decoy/codex" not in out
+
+
+def test_list_teams_depth_bound_finds_depth_4_but_not_depth_5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    # Depth 4: $ROOT/a/b/c/d — exactly the team-then-worktree headroom the
+    # namespaced layout needs (see teams.SEARCH_DEPTH's comment).
+    _make_team(root, "a", "b", "c", "d", agents={"dev": "claude"})
+    # Depth 5, nested one level past the bound: never reached, because a
+    # depth-4 candidate is only ever stat'd, never scandir'd.
+    _make_team(root, "x", "y", "z", "w", "v", agents={"dev": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "a/b/c/d" in out
+    assert "x/y/z/w/v" not in out
+    assert "no teams" not in out
+
+
+def test_list_teams_symlink_loop_terminates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A symlink is never treated as a directory to scan (`follow_symlinks=False`),
+    so one pointing back at an ancestor cannot turn the walk into a loop."""
+    root = tmp_path / "root"
+    loopy = root / "loopy"
+    loopy.mkdir(parents=True)
+    (loopy / "self").symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])  # must return, not hang
+
+    assert capsys.readouterr().out == "no teams\n"
+
+
+def test_list_teams_out_of_root_teams_dir_is_its_own_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    teams_dir = tmp_path / "elsewhere"
+    _make_team(teams_dir, "t1", agents={"dev": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert str(root) in out
+    assert str(teams_dir) in out
+    assert "t1" in out
+
+
+def test_list_teams_teams_dir_under_root_is_not_a_second_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    teams_dir = root / "nested"
+    _make_team(teams_dir, "t1", agents={"dev": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert out.count("t1") == 1
+    assert out.count(str(root)) == 1
+
+
+def test_list_teams_finds_a_team_outside_root_when_teams_dir_is_an_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reverse nesting of the case above: AGENTS_ARMY_TEAMS_DIR is an
+    ancestor of AGENTS_ARMY_ROOT rather than the usual descendant.
+
+    A team inside ROOT and a team outside it but still under TEAMS_DIR must
+    both show up, exactly once each. An earlier fix skipped the whole
+    TEAMS_DIR group whenever it overlapped ROOT at all, which silently
+    dropped `outside_team` (still resolvable via `--team`) from a command
+    whose whole job is "show me everything".
+    """
+    teams_dir = tmp_path / "teams_dir"
+    root = teams_dir / "root"
+    _make_team(root, "inside_team", agents={"dev": "claude"})
+    _make_team(teams_dir, "outside_team", agents={"ops": "codex"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert out.count("inside_team") == 1
+    assert out.count("outside_team") == 1
+    assert "ops/codex" in out
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("invalid json", "not json"),
+        ("top-level list, not an object", '["not", "a", "dict"]'),
+        ("entry is not an object", '{"dev": "claude"}'),
+    ],
+)
+def test_list_teams_unreadable_team_registry_does_not_abort_the_walk(
+    label: str,
+    payload: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "broken", worktree=False)
+    (root / "broken" / "agents" / "orchestrator_state.json").write_text(payload)
+    _make_team(root, "healthy", agents={"dev": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "registry unreadable" in out, label
+    assert "broken" in out
+    assert "healthy" in out
+    assert "dev/claude" in out
+
+
+def test_list_teams_unreadable_teamless_registry_does_not_abort_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "healthy", agents={"dev": "claude"})
+    (root / "orchestrator_state.json").write_text("not json")
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "healthy" in out
+    assert "dev/claude" in out
+    assert "(teamless)" in out
+    assert "registry unreadable" in out
+
+
+def test_list_teams_unreadable_teamless_registry_is_not_hidden_behind_no_teams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A corrupt teamless registry with zero teams elsewhere must still be
+    flagged, not collapsed into the same 'no teams' as a genuinely empty
+    root — `list agents` on the same file fails loudly, so `list teams`
+    silently reporting success here would be misleading."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "orchestrator_state.json").write_text("not json")
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert out != "no teams\n"
+    assert "(teamless)" in out
+    assert "registry unreadable" in out
+
+
+def test_list_teams_teamless_group_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "orchestrator_state.json").write_text(
+        json.dumps({"tir": {"backend": "codex"}})
+    )
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "(teamless)" in out
+    assert "tir" in out
+    assert "backend=codex" in out
+    assert f"(teamless) {root / 'orchestrator_state.json'}" in out
+
+
+def test_list_teams_teamless_group_reads_state_file_not_bare_root_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `(teamless)` group must report the registry `list agents`/`talk`
+    actually use — STATE_FILE, wherever an explicit AGENTS_ARMY_HOME or
+    AGENTS_ARMY_STATE_FILE relocated it — not always `$ROOT/orchestrator_state.json`.
+    A stray file sitting at that bare path when STATE_FILE points elsewhere
+    must not be reported at all."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "orchestrator_state.json").write_text(
+        json.dumps({"decoy": {"backend": "codex"}})
+    )
+    relocated = tmp_path / "home" / "orchestrator_state.json"
+    relocated.parent.mkdir(parents=True)
+    relocated.write_text(json.dumps({"realagent": {"backend": "claude"}}))
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", relocated)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert f"(teamless) {relocated}" in out
+    assert "realagent" in out
+    assert "decoy" not in out
+
+
+def test_list_teams_teamless_group_present_but_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "orchestrator_state.json").write_text("{}")
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "(teamless)" in out
+    assert "0 agents" in out
+    assert "registry unreadable" not in out
+
+
+def test_list_teams_teamless_group_absent_when_no_bare_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "t1", agents={"dev": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    assert "(teamless)" not in capsys.readouterr().out
+
+
+def test_list_teams_with_team_option_exits_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["list", "teams", "--team", "x"])
+
+    assert excinfo.value.code == 2
+    assert (
+        "orchestrator list: error: list teams cannot be combined with --team\n"
+        in capsys.readouterr().err
+    )

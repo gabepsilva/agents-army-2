@@ -271,6 +271,10 @@ AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
 To relocate only the registry file while leaving the backend working directory
 and skill catalog unchanged, set `AGENTS_ARMY_STATE_FILE` to an explicit path.
 
+`orchestrator list teams` walks `$AGENTS_ARMY_ROOT` (and, if it points
+somewhere else, `$AGENTS_ARMY_TEAMS_DIR`) to show every team on the machine
+in one shot — see [Teams](#teams) below.
+
 Skill files are read from `SKILLS/` next to that same home. `--skill tdd`
 walks the whole tree and attaches the matching markdown path to the prompt.
 A skill name must be unique across every subfolder; a collision is an error.
@@ -299,12 +303,25 @@ status` an agent runs, and would follow the branch around.
 
 `AGENTS_ARMY_TEAMS_DIR` has **no default** — an in-checkout default gets
 deleted by `git clean -xdff` if left ignored, or pollutes every `git status`
-if not; a machine-global default collides across repos sharing one checkout.
-Set it yourself, typically once per clone:
+if not; a machine-global default collides across repos sharing one checkout,
+since a bare team name like `issue-94` from two different clones would then
+be one team root for two projects. Namespace it by repo yourself, typically
+once per clone:
 
 ```sh
-export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")
+export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/$repo/gdw-v3"
 ```
+
+Do not export `$(git rev-parse --path-format=absolute
+--git-common-dir)/gdw-v3` (no `$HOME/.agents-army` component) — that resolves
+*inside* `.git/`, and commit `bc95578` moved
+`examples/gabriels_workflow_v3/go.sh` off exactly that value: nested there,
+the driver's own checkout is a parent directory of every agent's working
+directory, and an agent that wanders up into it edits the code the running
+script came from — the #80 run had an agent editing seven files there. This
+doc kept recommending the broken value after `go.sh` itself moved on; that is
+fixed here too.
 
 The orchestrator never runs `git` itself — you create the worktree, and
 `--team` refuses to run `create`/`talk`/`list` against a team whose
@@ -335,7 +352,35 @@ Teardown takes an exclusive, non-blocking lock on the team, so it refuses
 `--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
 `AGENTS_ARMY_STATE_FILE` — under `--team`, both are derived from the team
 root, so an explicit value alongside `--team` could only be a stale export
-worth surfacing rather than silently overriding.
+worth surfacing rather than silently overriding. `AGENTS_ARMY_ROOT` is not on
+that list: it is the teamless registry's own fallback (see [State](#state)),
+orthogonal to teams, so it stays compatible with `--team`.
+
+### Listing every team
+
+`orchestrator list teams` finds every team on the machine without needing to
+know `AGENTS_ARMY_TEAMS_DIR` up front. It walks `$AGENTS_ARMY_ROOT` up to 4
+levels deep — enough for the namespaced `$AGENTS_ARMY_ROOT/<repo>/<workflow>/
+<team>/` layout above — treating any directory containing
+`agents/orchestrator_state.json` as a team and never looking inside a team it
+has already found (so a team's own `worktree/` is never mistaken for a second
+team). If `$AGENTS_ARMY_TEAMS_DIR` is set, it is walked too and any team not
+already found under `$AGENTS_ARMY_ROOT` is reported as its own group —
+whether `$AGENTS_ARMY_TEAMS_DIR` sits outside `$AGENTS_ARMY_ROOT` or is an
+ancestor of it, so a team only the wider one reaches is never dropped just
+because the two overlap. `STATE_FILE` (the registry `list agents`/`talk`
+actually use — see [State](#state)) is reported as a `(teamless)` group
+headed by its own path, when it exists. Each team is printed with its agent
+count, its agents' names and backends, and a flag when its `worktree/` is
+missing — the state `delete --team NAME` (with no agent name) deliberately
+leaves behind:
+
+```sh
+uv run orchestrator list teams
+```
+
+`--team` is rejected on `list teams` (exit 2): it names one team to resolve,
+which contradicts listing all of them.
 
 A team is an isolation boundary **between** teams, not inside one: a team's
 agents share one worktree, so concurrent agents in the same team can still

@@ -4,6 +4,7 @@
 
 | variable | default | controls |
 |---|---|---|
+| `AGENTS_ARMY_ROOT` | `~/.agents-army` | the one folder agents-army owns in `$HOME`: default home of the teamless registry, and the root `list teams` walks — see [Teams](#teams) |
 | `AGENTS_ARMY_HOME` | current working directory | base folder for state and, unless overridden, skills |
 | `AGENTS_ARMY_STATE_FILE` | `$AGENTS_ARMY_HOME/orchestrator_state.json` | the registry file's exact path |
 | `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS` | the skill catalog root that `--skill` and `list skills` search |
@@ -28,22 +29,46 @@ AGENTS_ARMY_STATE_FILE=/tmp/state.json uv run orchestrator list
 agents gets its own registry and its own working directory, isolated from
 every other team.
 
-`AGENTS_ARMY_TEAMS_DIR` has no default; export it once per clone:
+`AGENTS_ARMY_TEAMS_DIR` has no default; export it once per clone, namespaced
+by repo so two clones sharing one `$AGENTS_ARMY_ROOT` don't collide on the
+same team name:
 
 ```sh
-export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")
+export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/$repo/gdw-v3"
 ```
 
 `--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
-`AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead), and
-`create`/`talk`/`list`/`delete NAME --team` all require
-`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` to already exist — the orchestrator
-never runs `git` itself, so the caller creates it with `git worktree add`.
-`delete --team NAME` with no agent name tears the whole team down: it
-removes `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/` and nothing else, leaving
-`worktree/` (and its git metadata) untouched. See the
-[README's Teams section](../README.md#teams) for the full layout, the
+`AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead) —
+`AGENTS_ARMY_ROOT` is not on that list, since it is the teamless registry's
+own fallback and stays compatible with `--team`. `create`/`talk`/`list`/
+`delete NAME --team` all require `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` to
+already exist — the orchestrator never runs `git` itself, so the caller
+creates it with `git worktree add`. `delete --team NAME` with no agent name
+tears the whole team down: it removes `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/`
+and nothing else, leaving `worktree/` (and its git metadata) untouched. See
+the [README's Teams section](../README.md#teams) for the full layout, the
 locking model, and worked examples.
+
+### `list teams`
+
+```
+orchestrator list teams
+```
+
+Walks `$AGENTS_ARMY_ROOT` (up to 4 levels deep — enough for
+`$AGENTS_ARMY_ROOT/<repo>/<workflow>/<team>/`) for every directory containing
+`agents/orchestrator_state.json`, never looking inside a team it has already
+found. If `$AGENTS_ARMY_TEAMS_DIR` is set, it is walked too and any team not
+already found under `$AGENTS_ARMY_ROOT` is printed as its own group — whether
+`$AGENTS_ARMY_TEAMS_DIR` sits outside `$AGENTS_ARMY_ROOT` or is an ancestor
+of it, so an overlap between the two never drops a team that only the wider
+one reaches. `STATE_FILE` (the registry `list agents`/`talk` actually use)
+is reported as a `(teamless)` group headed by its own path, when it exists.
+Each team is printed with its agent count, its agents' names and backends,
+and a flag when `worktree/` is missing (the state `delete --team NAME`
+leaves behind). `--team` is rejected on `list teams` (exit 2) — it names
+one team to resolve, which contradicts listing all of them.
 
 ## State
 
