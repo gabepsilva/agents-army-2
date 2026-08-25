@@ -20,9 +20,14 @@ rules:
     severity: ERROR
     message: >-
       subprocess call inside AgentGateway, or one launching the agent CLI
-      (orchestrator/bwrap) by a literal argv, does not pass env=. Agent
-      turns must run under an explicit, sandboxed environment, never the
-      host's inherited one -- pass env=<mapping>.
+      (orchestrator/bwrap) by a literal argv, does not pass env=. This
+      guards a Python driver that spawns the agent CLI on the project's
+      behalf, by requiring an explicit env=. The driver it was written for
+      was removed in #80, and its replacement is a shell script, so this
+      rule currently matches nothing in this tree and is held for the next
+      Python one. It is not a statement about today's agent turns:
+      backends/*.py spawn the CLIs with the host environment inherited,
+      deliberately, because each CLI needs its login under the real $HOME.
     patterns:
       - pattern-either:
           # Any subprocess launch inside AgentGateway, whatever the argv

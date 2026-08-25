@@ -4,12 +4,7 @@ version = "0.1.0"
 description = "Orchestrator that runs coding-agent CLIs as a GitHub-issue conversation."
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2",
-    "PyYAML>=6",
     "jsonschema>=4",
-    # Brings pyjwt[crypto] with it, which is what the App auth below signs
-    # with; neither is imported here, so neither is declared here.
-    "pygithub>=2.9,<3",
 ]
 
 [project.scripts]

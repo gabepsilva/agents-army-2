@@ -13,6 +13,7 @@ issue_number=${issue_url##*/}
 team="issue-$issue_number"
 export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
 
+git fetch origin --quiet
 git worktree prune
 git worktree add -B "gdwv3/$team" "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
 
@@ -65,6 +66,13 @@ grep -qx 'spectacle-is-happy' <<< "$labels" || exit 1
 
 echo "Issue converged. Opening draft PR."
 
+# owen and spectacle share this worktree with devin and use it as scratch to
+# check their claims. `git commit --allow-empty` commits a staged index, so
+# whatever they left behind would land in the PR as somebody else's work.
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" reset -q --hard
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
+
+
 # The draft PR description is the whole handoff: the developer implements from
 # it and never opens the issue, so nothing may be left implicit or unresolved.
 aarmy talk spectacle --team "$team" -p "\
@@ -84,10 +92,18 @@ aarmy talk spectacle --team "$team" -p "\
 
 
 # The draft PR spectacle just wrote, found by the issue number it links back to.
-export pr_url=$(gh pr list --draft --search "${issue_url##*/} in:body" --limit 1 --json url --jq '.[0].url')
+# --search hits GitHub's *indexed* search, which lags PR creation by up to
+# minutes and would report no PR for one spectacle just opened. The list API
+# is read-your-writes, so filter its bodies here instead.
+export pr_url=$(gh pr list --draft --limit 50 --json url,body \
+    --jq "[.[] | select(.body | test(\"(#|issues/)${issue_number}\\\\b\"))] | .[0].url // empty")
 [ -z "$pr_url" ] && exit 2
 
-aarmy talk devin --team "$team" -b claude -m sonnet -e high \
+# Same again: devin implements from the PR description, on a clean tree.
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" reset -q --hard
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
+
+aarmy talk devin --team "$team" --timeout 10800 -b claude -m sonnet -e high \
     -s implement,tdd,code-review-and-quality \
     -p "\
     You are a lead software engineer. \
@@ -104,13 +120,13 @@ aarmy talk devin --team "$team" -b claude -m sonnet -e high \
     it it take a few iterations. \
     Post as the github app: \
     app_id: 4579193 \
-    private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &> devin.log &
+    private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &> devin.log
 
 # Leaving draft is how devin says he stands behind the code, so it is the finish
 # line. talk blocks on his lock, so a nudge sent mid-turn just waits its turn.
 for i in {1..5}; do
 
-    aarmy talk devin --team "$team" -s code-review-and-quality \
+    aarmy talk devin --team "$team" --timeout 10800 -s code-review-and-quality \
     -p "Review your own diff across the five axes first. \
     Then: is the code something you are proud of, a solution you stand behind? \
     Judge that against your own standard, not the skill's 'improves code health' bar. \
@@ -144,7 +160,7 @@ for i in {1..10}; do
 
     gh pr view $pr_url --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' && break
 
-    aarmy talk devin --team "$team" -s implement,tdd \
+    aarmy talk devin --team "$team" --timeout 10800 -s implement,tdd \
     -p "There is new review feedback on '$pr_url'. \
     Read the review comment and answer it: fix it, or push back with code facts. \
     Reply saying which you did and why. \
