@@ -17,11 +17,19 @@ team="issue-$issue_number"
 # devin editing seven files there and finding the live run's logs and state.
 export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/gdw-v3"
 
+# The logs go next to the team, not into the repo. Redirects are relative to
+# whatever directory the run was launched from, so a run started at the
+# repository root used to drop every agent's log there, outside the path-scoped
+# ignore rule that was meant to catch them. .gitignore now ignores *.log
+# repo-wide as a backstop; this keeps them out of the tree in the first place.
+log_dir="$AGENTS_ARMY_TEAMS_DIR/$team/logs"
+mkdir -p "$log_dir"
+
 git fetch origin --quiet
 git worktree prune
 git worktree add -B "gdwv3/$team" "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
 
-aarmy talk owen --team "$team" -b claude -m opus -e high -v \
+aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     -p "Look issue '$issue_url' \
     You are now taking the role of the Issue Author. State that in you first message.\
     You are also responsible for the decissions from now on, there will be no human in the loop. \
@@ -39,11 +47,17 @@ aarmy talk owen --team "$team" -b claude -m opus -e high -v \
     - "owens-is-happy"
     Post as the github app: \
     app_id: 4578638 \
-    private_key: ~/keys/owen-project-owner.2026-08-13.private-key.pem" &> owen.log
+    private_key: ~/keys/owen-project-owner.2026-08-13.private-key.pem" &> "$log_dir/owen.log"
 
 
-envsubst < spectacle.prompt.tmpl > spectacle.prompt
-aarmy talk spectacle --team "$team" -b claude -m opus -e high -v --prompt-file spectacle.prompt &> spectacle.log
+# Same relative-path trap as the logs, but this one breaks the run rather
+# than littering: launched from anywhere but this directory, envsubst reads
+# no template and spectacle starts with an empty prompt file. Resolve the
+# template next to the script, and render it next to the team.
+envsubst < "$(dirname "$(readlink -f "$0")")/spectacle.prompt.tmpl" \
+    > "$AGENTS_ARMY_TEAMS_DIR/$team/spectacle.prompt"
+aarmy talk spectacle --team "$team" -b claude -m opus -e low -v \
+    --prompt-file "$AGENTS_ARMY_TEAMS_DIR/$team/spectacle.prompt" &> "$log_dir/spectacle.log"
 
 
 # Both agents stop by labelling the issue. Wake whoever has not labelled yet,
@@ -57,8 +71,8 @@ for i in {1..10}; do
 
     [ $owen_done = 0 ] && [ $spectacle_done = 0 ] && break
 
-    [ $owen_done = 0 ] || aarmy talk owen --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> owen.log
-    [ $spectacle_done = 0 ] || aarmy talk spectacle --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> spectacle.log
+    [ $owen_done = 0 ] || aarmy talk owen --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> "$log_dir/owen.log"
+    [ $spectacle_done = 0 ] || aarmy talk spectacle --team "$team" -v -p 'There are new comments. Read the issue and continue. Label the issue when you have nothing to add.' &>> "$log_dir/spectacle.log"
 done
 
 # Only two happy labels mean the issue converged. A blocked label, or a missing
@@ -91,7 +105,7 @@ aarmy talk spectacle --team "$team" -v -p "\
     Assume a mid-level developer: no context on this discussion, capable of the work once the target is unmistakable. \
     Post as the github app: \
     app_id: 4287312 \
-    private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &>> spectacle.log
+    private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &>> "$log_dir/spectacle.log"
 
 
 
@@ -124,7 +138,7 @@ aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
     it it take a few iterations. \
     Post as the github app: \
     app_id: 4579193 \
-    private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &> devin.log
+    private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &> "$log_dir/devin.log"
 
 # Leaving draft is how devin says he stands behind the code, so it is the finish
 # line. talk blocks on his lock, so a nudge sent mid-turn just waits its turn.
@@ -139,22 +153,32 @@ aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
 # Three in a row is a devin that is stuck and a fourth copy of the same prompt
 # will not move him - the same bound the review loop's nudge below uses.
 #
-# Check isDraft before comparing heads: marking the PR ready needs no commit,
-# so devin's success outcome leaves the head unmoved and must not read as a stall.
+# No -s on the nudges below: this is devin's own resumed session and the
+# skills were attached on his first talk above. Re-attaching them makes the
+# skill prompt tell him to read the same files again - code-review-and-quality
+# alone is 21KB - for a session that already has them.
+#
+# Check isDraft at the top, before talking: devin often marks the PR ready
+# during the implement turn above, and then this loop's first turn is a whole
+# talk that only reports back "already ready".
+#
+# The check also has to come before the head comparison below: marking the PR
+# ready needs no commit, so devin's success outcome leaves the head unmoved and
+# must not read as a stall.
 head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
 rounds=0
 stalls=0
 while [ $rounds -lt 5 ] && [ $stalls -lt 3 ]; do
 
-    aarmy talk devin --team "$team" -v --timeout 10800 -s code-review-and-quality \
+    [ "$(gh pr view $pr_url --json isDraft --jq '.isDraft')" = false ] && break
+
+    aarmy talk devin --team "$team" -v --timeout 10800 \
     -p "Review your own diff across the five axes first. \
     Then: is the code something you are proud of, a solution you stand behind? \
     Judge that against your own standard, not the skill's 'improves code health' bar. \
     If so, mark the PR ready for review - \
     that is how you say you are done. If it is not there yet, \
-    leave it as draft, fix, commit and push." &>> devin.log
-
-    [ "$(gh pr view $pr_url --json isDraft --jq '.isDraft')" = false ] && break
+    leave it as draft, fix, commit and push." &>> "$log_dir/devin.log"
 
     new_head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
     if [ "$new_head" = "$head" ]; then
@@ -175,9 +199,13 @@ done
 # it did, and the default hour cuts the turn off mid-gate.
 head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
 
+# Same reason as devin's nudges: attach the skill on the reviewer's first turn
+# only, then empty it - every later turn is the same resumed session.
+reviewer_skills=(-s code-review-and-quality)
+
 for i in {1..10}; do
 
-    aarmy talk code-reviewer --team "$team" -v --timeout 10800 -b claude -m opus -e high -s code-review-and-quality \
+    aarmy talk code-reviewer --team "$team" -v --timeout 10800 -b claude -m opus -e high "${reviewer_skills[@]}" \
     -p "You are the code reviewer for the PR '$pr_url'. \
     Its description is the spec - review the diff against it, and against the five axes. \
     Every finding cites something re-checkable: a path and line, a command and its output, an API response. \
@@ -191,7 +219,9 @@ for i in {1..10}; do
     creating the label first if the repo does not have it. \
     Post as the github app: \
     app_id: 4287312 \
-    private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &>> code-reviewer.log
+    private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &>> "$log_dir/code-reviewer.log"
+
+    reviewer_skills=()
 
     gh pr view $pr_url --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' && break
 
@@ -201,14 +231,14 @@ for i in {1..10}; do
     # the #77 run - and the reviewer would then spend a full opus turn
     # re-reading a commit it has already reviewed.
     for j in {1..3}; do
-        aarmy talk devin --team "$team" -v --timeout 10800 -s implement,tdd \
+        aarmy talk devin --team "$team" -v --timeout 10800 \
         -p "There is new review feedback on '$pr_url'. \
         Read the review comment and answer it: fix it, or push back with code facts. \
         Reply saying which you did and why. \
         Commit and push your fixes to the PR branch. \
         Post as the github app: \
         app_id: 4579193 \
-        private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &>> devin.log
+        private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem" &>> "$log_dir/devin.log"
 
         new_head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
         [ "$new_head" != "$head" ] && head=$new_head && break
@@ -221,7 +251,7 @@ gh pr view $pr_url --json labels --jq '.labels[].name' | grep -qx 'reviewer-appr
 
 # Doku writes for whoever will use this, not for whoever reviewed it: what the
 # new version does for them, how to run it, and what will bite them.
-aarmy talk doku --team "$team" -v -b claude -m opus -e high \
+aarmy talk doku --team "$team" -v -b claude -m opus -e low \
     -p "You are the documentation writer for the PR '$pr_url'. \
     Read its description and its diff, and read README.md and docs/ to see how the project describes itself today. \
     Post one comment on the PR telling a user of this project what this version changes for them. \
@@ -234,7 +264,7 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e high \
     Change no files, review nothing, approve nothing - the comment is the whole deliverable. \
     Post as the github app: \
     app_id: 4577311 \
-    private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> doku.log
+    private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
 
 
 # clean up
