@@ -170,8 +170,8 @@ Deleting an agent drops it from the registry; it does not touch the
 underlying CLI's own session storage.
 
 `NAME` is optional only so `--team NAME` alone can mean **teardown**: it
-removes that team's `agents/` directory (the state file, its lock, and every
-leaked per-agent turn lock) and nothing else — `worktree/` and its git
+removes that team's `agents/` directory (the state file, its lock, and the
+directory of per-agent turn locks) and nothing else — `worktree/` and its git
 metadata are left for the caller to remove with `git worktree remove`.
 Neither `--team` alone nor a bare `NAME` is an error; `delete` with
 **neither** is (exit 2). Teardown takes an exclusive, non-blocking lock on
@@ -179,6 +179,14 @@ the team and refuses (exit 1) if another command is using it; it also exits
 1 if the named team doesn't exist. It never reads the registry it removes,
 so it still works on a team whose state file has gone bad. See
 [Teams](#teams) below.
+
+Deleting a single agent never fails on account of its lock file: if a turn
+for that agent is in flight, the file is left for that turn to clean up as
+it ends instead. Builds before this change left per-agent lock files as
+`orchestrator_state.json.<digest>.lock`, siblings of the state file rather
+than inside `orchestrator_state.json.locks/`; those are unreachable by any
+current code path and can be removed with `rm -f
+orchestrator_state.json.*.lock` when no orchestrator command is running.
 
 ## Teams
 

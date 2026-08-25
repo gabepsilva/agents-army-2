@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -55,6 +59,7 @@ from backends.registry import (
     register_backend,
 )
 from orchestrator import (
+    Agent,
     Orchestrator,
     main,
 )
@@ -199,6 +204,108 @@ def register_echo_backend() -> None:
     is free to change.
     """
     register_backend("echo", EchoBackend)
+
+
+def _gate_backend(
+    name: str, entered: threading.Event, release: threading.Event
+) -> type[AgentBackend]:
+    """A backend class whose turn signals `entered`, then blocks on `release`.
+
+    A factory rather than one shared class: each caller closes over its own
+    pair of events, and `.name` must equal the string it gets registered
+    under — `_persist`/`_reload` round-trip a spawned agent's backend through
+    `agent.backend.name`, not through the registry key `spawn` was called
+    with, so the two have to match.
+    """
+
+    class Gate(AgentBackend):
+        @property
+        def name(self) -> str:
+            return name
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = DEFAULT_TURN_TIMEOUT,
+            schema: OutputSchema | None = None,
+        ) -> TurnResult:
+            entered.set()
+            release.wait(timeout=5)
+            return TurnResult(session_id="s1", reply="ok", raw="")
+
+    return Gate
+
+
+def _pause_first_flock(
+    monkeypatch: pytest.MonkeyPatch, thread_name: str
+) -> tuple[threading.Event, threading.Event]:
+    """Pause `thread_name`'s first `fcntl.flock()` call just before it runs.
+
+    Drives a real `open()`-then-`flock()` TOCTOU window on demand: the
+    caller can act between a thread's `_flock` opening a path and that same
+    call's `flock()` actually being granted. Returns `(opened, proceed)` —
+    `opened` fires once the call is paused there, and the caller sets
+    `proceed` to let it continue. Only the first call is paused, so the
+    same thread's later `flock()` calls (e.g. the matching unlock) run
+    unpatched.
+    """
+    opened = threading.Event()
+    proceed = threading.Event()
+    real_flock = fcntl.flock
+    paused = False
+
+    def patched(fd: int, op: int) -> None:
+        nonlocal paused
+        if threading.current_thread().name == thread_name and not paused:
+            paused = True
+            opened.set()
+            proceed.wait(timeout=5)
+        real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", patched)
+    return opened, proceed
+
+
+class _OverlapState:
+    """Results from `_overlap_recorder`, read after every thread joins."""
+
+    def __init__(self) -> None:
+        self.overlapped = False
+        self.inodes: dict[str, int] = {}
+
+
+def _overlap_recorder(
+    lock_path: Path,
+) -> tuple[Callable[..., None], _OverlapState]:
+    """Build a `record(who, entered=None)` that marks `who` active for a
+    beat, capturing which inode `lock_path` currently names.
+
+    Shared by the two concurrency tests below, each of which calls `record`
+    from more than one thread contending for the same agent lock:
+    `state.overlapped` is true if two callers were ever active at once, and
+    `state.inodes[who]` is what each one saw. A closure rather than a class
+    with one method, so each test gets its own `active`/guard/`inodes`
+    without instantiating anything.
+    """
+    active: list[str] = []
+    active_guard = threading.Lock()
+    state = _OverlapState()
+
+    def record(who: str, entered: threading.Event | None = None) -> None:
+        with active_guard:
+            active.append(who)
+            if len(active) > 1:
+                state.overlapped = True
+        if entered is not None:
+            entered.set()
+        state.inodes[who] = os.stat(lock_path).st_ino
+        time.sleep(0.05)
+        with active_guard:
+            active.remove(who)
+
+    return record, state
 
 
 def _assert_subprocess_kwargs(
@@ -2614,12 +2721,11 @@ class TestOrchestrator:
         assert held == [(True, False)]
         assert _flock_is_held(orch._agent_lock_path("a")) is False
 
-    def test_agent_lock_paths_sit_beside_the_state_file(self, tmp_path: Path) -> None:
+    def test_agent_lock_paths_sit_in_the_locks_dir(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "state.json")
         first = orch._agent_lock_path("a")
-        assert first.parent == tmp_path
-        assert first.name.startswith("state.json.")
-        assert first.name.endswith(".lock")
+        assert first.parent == tmp_path / "state.json.locks"
+        assert first.name == hashlib.sha256(b"a").hexdigest()
         assert first != orch._agent_lock_path("b")
         assert first != orch._lock_path()
 
@@ -2700,6 +2806,314 @@ class TestOrchestrator:
         with pytest.raises(KeyError, match="no agent named 'a'"):
             orch.talk("a", "hi")
         assert Orchestrator(state_file=state_file).list_agents() == []
+
+    def test_delete_on_an_idle_agent_unlinks_its_lock_file(
+        self, tmp_path: Path
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "echo")
+        orch.talk("a", "hi")
+        lock_path = orch._agent_lock_path("a")
+        assert lock_path.is_file()
+
+        orch.delete("a")
+        assert not lock_path.exists()
+
+    def test_delete_during_its_own_turn_keeps_the_lock_file(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        entered = threading.Event()
+        release = threading.Event()
+
+        register_backend("gate-self", _gate_backend("gate-self", entered, release))
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "gate-self")
+
+        def run_turn() -> None:
+            # Deleting the agent mid-turn (below) makes the registry entry
+            # this turn resumes into vanish before it persists, which is the
+            # pre-existing AgentNotFoundError path this test isn't about —
+            # the reclaim-on-that-path is covered separately, below.
+            with pytest.raises(orchestrator.AgentNotFoundError):
+                orch.talk("a", "hi")
+
+        # daemon=True on both threads below: several asserts run before
+        # their matching join(), and one firing must not leave a thread
+        # running past this test.
+        turn_thread = threading.Thread(target=run_turn, daemon=True)
+        turn_thread.start()
+        assert entered.wait(timeout=5)
+        lock_path = orch._agent_lock_path("a")
+        assert lock_path.is_file()
+
+        # The probe loses to the in-flight turn and backs off rather than
+        # refusing: `delete` never fails and never changes its exit code.
+        # Run on its own thread and asserted to complete quickly, not
+        # called synchronously here: a probe that regressed into blocking
+        # (dropping delete's LOCK_NB) would deadlock this test against
+        # `release` below instead of failing it — the whole point of a
+        # non-blocking probe is that `delete` never waits for someone
+        # else's turn, so that has to be checked, not assumed.
+        results: list[Agent] = []
+        delete_thread = threading.Thread(
+            target=lambda: results.append(orch.delete("a")), daemon=True
+        )
+        with caplog.at_level("DEBUG", logger="orchestrator"):
+            delete_thread.start()
+            delete_thread.join(timeout=5)
+        assert not delete_thread.is_alive(), "delete blocked instead of backing off"
+        agent = results[0]
+        assert agent.name == "a"
+        assert lock_path.is_file()
+        assert "agent 'a': lock file in use, not reclaiming" in [
+            r.getMessage() for r in caplog.records
+        ]
+
+        release.set()
+        turn_thread.join(timeout=5)
+        # Once the turn ends, its own AgentNotFoundError handler reclaims
+        # what delete's probe could not — see the next test.
+        assert not lock_path.exists()
+
+    def test_a_turn_reclaims_its_lock_when_deleted_mid_turn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        state_file = tmp_path / "state.json"
+
+        class DeleteDuring(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "delduring-reclaim"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                # Runs with the outer talk() holding the agent lock, so this
+                # delete's own reclaim probe backs off (BlockingIOError,
+                # caught inside _reclaim_agent_lock) rather than blocking on
+                # a lock this very thread already holds through a different
+                # fd — flock() isn't reentrant, so a probe that regressed
+                # into blocking would deadlock this thread against itself,
+                # not just wait. Run on its own thread and joined with a
+                # timeout so that shows up as a clean failure instead; the
+                # file is left for talk()'s AgentNotFoundError handler to
+                # clean up.
+                delete_thread = threading.Thread(
+                    target=lambda: Orchestrator(state_file=state_file).delete("a"),
+                    daemon=True,
+                )
+                delete_thread.start()
+                delete_thread.join(timeout=5)
+                assert not delete_thread.is_alive(), (
+                    "delete blocked instead of backing off"
+                )
+                return TurnResult(session_id="s1", reply="ok", raw="")
+
+        register_backend("delduring-reclaim", DeleteDuring)
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "delduring-reclaim")
+        with (
+            caplog.at_level("DEBUG", logger="orchestrator"),
+            pytest.raises(orchestrator.AgentNotFoundError),
+        ):
+            orch.talk("a", "hi")
+        assert list(orch._locks_dir().iterdir()) == []
+        # Asserted through the log line, not just the empty directory: an
+        # agent that was simply never talked to also leaves it empty.
+        assert "agent 'a': reclaimed lock file, no such agent" in [
+            r.getMessage() for r in caplog.records
+        ]
+
+    def test_delete_during_a_sibling_agents_turn_still_reclaims(
+        self, tmp_path: Path
+    ) -> None:
+        """Rules out a home-wide lock: only the deleted agent's own turn
+        should block a reclaim, not an unrelated agent's."""
+        state_file = tmp_path / "state.json"
+        entered = threading.Event()
+        release = threading.Event()
+
+        register_backend(
+            "gate-sibling", _gate_backend("gate-sibling", entered, release)
+        )
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("bob", "gate-sibling")
+        orch.spawn("alice", "echo")
+        orch.talk("alice", "warm up")
+
+        # daemon=True: the asserts below run before this thread's own
+        # join(), and one firing must not leave it running past this test.
+        turn_thread = threading.Thread(
+            target=lambda: orch.talk("bob", "hi"), daemon=True
+        )
+        turn_thread.start()
+        assert entered.wait(timeout=5)
+
+        alice_lock = orch._agent_lock_path("alice")
+        assert alice_lock.is_file()
+        orch.delete("alice")
+        assert not alice_lock.exists()
+
+        release.set()
+        turn_thread.join(timeout=5)
+
+    def test_a_reclaim_racing_its_own_toctou_does_not_evict_a_fresh_acquirer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for a TOCTOU in `_reclaim_agent_lock`.
+
+        `_flock`'s open() and its flock() are two syscalls, not one: a probe
+        can end up holding a lock on an inode a *different*, legitimate
+        reclaim already orphaned in between, while a live acquirer has since
+        put a fresh file at the same path. Unlinking blindly at that point
+        destroys the live acquirer's file instead of the dead one the probe
+        actually holds.
+
+        Exercises the real `_reclaim_agent_lock`, not a hand-rolled stand-in:
+        driving `_flock` directly instead misses this entirely, since
+        nothing about a bare `_flock` call reproduces the probe's own
+        open()-then-flock() window.
+        """
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        lock_path = orch._agent_lock_path("bob")
+        record, state = _overlap_recorder(lock_path)
+
+        # Pauses the reclaimer thread's first flock() call, after its
+        # `_flock` has already open()ed the path — the window the bug lives
+        # in — so a second, unpaused reclaim can legitimately acquire,
+        # unlink, and release that same inode before this one's flock()
+        # finally runs and is granted on the now-dead inode.
+        reclaimer_opened, let_reclaimer_flock = _pause_first_flock(
+            monkeypatch, "reclaimer"
+        )
+        waiter_entered = threading.Event()
+
+        def reclaimer() -> None:
+            orch._reclaim_agent_lock("bob")
+
+        def waiter() -> None:
+            with orch._agent_lock("bob"):
+                record("waiter", entered=waiter_entered)
+
+        def late_arrival() -> None:
+            with orch._agent_lock("bob"):
+                record("late")
+
+        # daemon=True: several asserts below run before their matching
+        # join(); one firing must not leave a thread running past this test
+        # (a paused one, via _pause_first_flock, would otherwise survive it
+        # by however long its own wait(timeout=...) takes to give up).
+        t_reclaim = threading.Thread(target=reclaimer, name="reclaimer", daemon=True)
+        t_reclaim.start()
+        assert reclaimer_opened.wait(timeout=5)
+
+        # A second, unpaused reclaim on the same (still-existing) inode the
+        # paused thread already opened: it acquires, finds it live, unlinks,
+        # and releases — a plain `delete` on an idle agent.
+        orch._reclaim_agent_lock("bob")
+
+        t_wait = threading.Thread(target=waiter, daemon=True)
+        t_wait.start()
+        assert waiter_entered.wait(timeout=5)
+
+        let_reclaimer_flock.set()
+        t_reclaim.join(timeout=5)
+
+        t_late = threading.Thread(target=late_arrival, daemon=True)
+        t_late.start()
+        t_wait.join(timeout=5)
+        t_late.join(timeout=5)
+
+        assert not state.overlapped
+        assert state.inodes["waiter"] == state.inodes["late"]
+
+    def test_a_waiter_blocked_on_a_reclaimed_inode_reacquires_without_overlap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for the original race in the PR description: a
+        distinct mechanism from the TOCTOU above, and from a genuinely
+        distinct bug. Replacing this test with the TOCTOU one above,
+        instead of adding it alongside, would leave `_agent_lock`'s
+        `revalidate=True` completely untested.
+
+        `_agent_lock`'s `flock()` can be granted on an inode a reclaimer has
+        already unlinked and released out from under it — `flock` binds to
+        the inode, not the path. `_flock`'s `revalidate=True` loop is what
+        notices via `_is_live` and re-acquires instead of proceeding on a
+        dead lock; disabling `revalidate`, or making `_is_live` treat a
+        vanished path as still live, both make this test fail.
+        """
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        lock_path = orch._agent_lock_path("bob")
+        record, state = _overlap_recorder(lock_path)
+
+        # Pauses the waiter's first flock() call, after its `_agent_lock`
+        # has already open()ed the still-existing path — so it shares
+        # whatever inode the reclaim below is about to unlink and release.
+        waiter_opened, let_waiter_flock = _pause_first_flock(monkeypatch, "waiter")
+        waiter_entered = threading.Event()
+
+        def waiter() -> None:
+            with orch._agent_lock("bob"):
+                record("waiter", entered=waiter_entered)
+
+        def late_arrival() -> None:
+            with orch._agent_lock("bob"):
+                record("late")
+
+        # daemon=True: see the same note in the TOCTOU test above.
+        t_wait = threading.Thread(target=waiter, name="waiter", daemon=True)
+        t_wait.start()
+        assert waiter_opened.wait(timeout=5)
+
+        # A plain reclaim on the same (still-existing) inode the paused
+        # waiter already opened: it acquires, finds it live, unlinks, and
+        # releases — the file the waiter is about to be granted a lock on.
+        orch._reclaim_agent_lock("bob")
+        let_waiter_flock.set()
+        assert waiter_entered.wait(timeout=5)
+
+        t_late = threading.Thread(target=late_arrival, daemon=True)
+        t_late.start()
+        t_wait.join(timeout=5)
+        t_late.join(timeout=5)
+
+        assert not state.overlapped
+        assert state.inodes["waiter"] == state.inodes["late"]
+
+    def test_talk_on_an_unknown_agent_leaves_no_lock_file(self, tmp_path: Path) -> None:
+        """Written against `Orchestrator.talk` directly: `cmd_talk` creates
+        the agent first, so `main(["talk", ...])` would assert something
+        false here."""
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        with pytest.raises(orchestrator.AgentNotFoundError):
+            orch.talk("ghost", "hi")
+        assert list(orch._locks_dir().iterdir()) == []
+
+    def test_locks_dir_holds_one_file_per_live_agent(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("a", "echo")
+        orch.spawn("b", "echo")
+        orch.talk("a", "hi")
+        orch.talk("b", "hi")
+
+        locks_dir = orch._locks_dir()
+        assert sorted(p.name for p in locks_dir.iterdir()) == sorted(
+            path.name
+            for path in (orch._agent_lock_path("a"), orch._agent_lock_path("b"))
+        )
+
+        orch.delete("a")
+        orch.delete("b")
+        assert list(locks_dir.iterdir()) == []
 
 
 class TestCLI:
