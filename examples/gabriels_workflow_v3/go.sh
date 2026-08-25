@@ -158,10 +158,8 @@ for i in {1..10}; do
     Every finding cites something re-checkable: a path and line, a command and its output, an API response. \
     Say which findings block merging and which are optional. \
     Do not change any code yourself - the developer fixes, you review. \
-    The eleven gates already ran on this commit in CI, in parallel and for free: read their result with \
-    'gh pr checks $pr_url' and 'gh run view <run-id> --log-failed' rather than re-running 'make ci' here. \
-    Run locally only the experiment a finding needs - revert one token and run that test, reproduce the race - \
-    never the whole sweep to confirm what CI has already confirmed. \
+    Verify with 'make ci' here - the local run is far quicker than the same gates on GitHub, \
+    so check the code yourself rather than waiting on the remote checks. \
     Where the developer pushed back, weigh the argument on its code facts and concede plainly when it is right. \
     otherwise push back with code facts and continue the review. \
     When nothing left blocks merging, and nite are solved, add the label 'reviewer-approves' to the PR, \
