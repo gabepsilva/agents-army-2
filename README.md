@@ -261,8 +261,11 @@ It persists every agent's name, backend, and session id, so any process can
 `talk` to an agent created earlier and resume its CLI session. No per-agent
 folders or session files are written.
 
-The file lives next to where you run the CLI (the working directory), so the
-state never leaks into the venv. To relocate it, set `AGENTS_ARMY_HOME`:
+By default the file lives under `$AGENTS_ARMY_ROOT` (`~/.agents-army` unless
+overridden), the one folder agents-army owns in `$HOME` — so a plain
+`orchestrator create` run from any checkout writes to the same registry
+instead of scattering one per repo. Set `AGENTS_ARMY_HOME` to relocate the
+registry, the backend working directory, and the skill catalog together:
 
 ```sh
 AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
@@ -270,6 +273,12 @@ AGENTS_ARMY_HOME=~/.agents-army uv run orchestrator create dev -b claude
 
 To relocate only the registry file while leaving the backend working directory
 and skill catalog unchanged, set `AGENTS_ARMY_STATE_FILE` to an explicit path.
+The registry file's path is resolved in this order: an explicit
+`AGENTS_ARMY_STATE_FILE` wins outright; otherwise an explicitly-set
+`AGENTS_ARMY_HOME` places it at `$AGENTS_ARMY_HOME/orchestrator_state.json`;
+otherwise it defaults to `$AGENTS_ARMY_ROOT/orchestrator_state.json`. The
+working directory always defaults to the current directory regardless — only
+the registry's *default* location moved to `$AGENTS_ARMY_ROOT`.
 
 `orchestrator list teams` walks `$AGENTS_ARMY_ROOT` (and, if it points
 somewhere else, `$AGENTS_ARMY_TEAMS_DIR`) to show every team on the machine

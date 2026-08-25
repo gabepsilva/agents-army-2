@@ -52,12 +52,22 @@ from orchestrator.skills import (
 # registry (see STATE_FILE below) and the root `list teams` walks to find
 # every team. Unlike AGENTS_ARMY_HOME, this never becomes an agent's cwd.
 ROOT = Path(os.environ.get("AGENTS_ARMY_ROOT", Path.home() / ".agents-army"))
-# State lives in the caller's working directory (override with AGENTS_ARMY_HOME)
-# rather than next to the installed package, so it doesn't leak into the venv.
+# The backend working directory and skills root default to the caller's cwd
+# (override with AGENTS_ARMY_HOME) rather than next to the installed package,
+# so they don't leak into the venv. STATE_FILE's own default no longer
+# follows HOME — see the ladder below.
 HOME = Path(os.environ.get("AGENTS_ARMY_HOME", Path.cwd()))
-STATE_FILE = Path(
-    os.environ.get("AGENTS_ARMY_STATE_FILE", HOME / "orchestrator_state.json")
-)
+# STATE_FILE's default ladder: an explicit path wins outright; failing that,
+# an explicitly-set AGENTS_ARMY_HOME (not "HOME happens to equal cwd", which
+# is the unset case) relocates it alongside WORKDIR/SKILLS_DIR; otherwise it
+# defaults under ROOT rather than cwd, so a plain `orchestrator create` run
+# from any checkout writes one registry instead of scattering one per repo.
+if "AGENTS_ARMY_STATE_FILE" in os.environ:
+    STATE_FILE = Path(os.environ["AGENTS_ARMY_STATE_FILE"])
+elif "AGENTS_ARMY_HOME" in os.environ:
+    STATE_FILE = HOME / "orchestrator_state.json"
+else:
+    STATE_FILE = ROOT / "orchestrator_state.json"
 # Agents run their CLI sessions from a single shared working directory.
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.

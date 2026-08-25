@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,18 @@ def _init_repo(root: Path) -> None:
         ],
         cwd=root,
     )
+
+
+def _env_without(*unset: str, **overrides: str) -> dict[str, str]:
+    """A subprocess env: the real environment, minus `unset`, plus `overrides`.
+
+    Not `os.environ.copy()` + `.pop(name, None)`: mixing a `str` value type
+    with a `None` default makes `dict.pop` return `str | None`, which the
+    type checker then attributes back to the dict itself.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in unset}
+    env.update(overrides)
+    return env
 
 
 def _read_state(path: Path) -> dict:
@@ -972,3 +985,139 @@ def test_list_teams_with_team_option_exits_2(
         "orchestrator list: error: list teams cannot be combined with --team\n"
         in capsys.readouterr().err
     )
+
+
+# ---------------------------------------------------------------------------
+# Teamless registry: the AGENTS_ARMY_ROOT default ladder
+# ---------------------------------------------------------------------------
+
+
+def test_state_file_ladder_prefers_explicit_state_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = tmp_path / "explicit" / "state.json"
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(explicit))
+    monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import orchestrator; print(orchestrator.STATE_FILE)"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).parent.parent,
+    )
+
+    assert result.stdout.strip() == str(explicit)
+
+
+def test_state_file_ladder_prefers_explicit_home_over_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    root = tmp_path / "root"
+    env = _env_without(
+        "AGENTS_ARMY_STATE_FILE",
+        AGENTS_ARMY_HOME=str(home),
+        AGENTS_ARMY_ROOT=str(root),
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import orchestrator; print(orchestrator.STATE_FILE)"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).parent.parent,
+        env=env,
+    )
+
+    assert result.stdout.strip() == str(home / "orchestrator_state.json")
+
+
+def test_state_file_ladder_defaults_under_root_when_nothing_else_is_set(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    env = _env_without(
+        "AGENTS_ARMY_HOME", "AGENTS_ARMY_STATE_FILE", AGENTS_ARMY_ROOT=str(root)
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import orchestrator; print(orchestrator.STATE_FILE)"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).parent.parent,
+        env=env,
+    )
+
+    assert result.stdout.strip() == str(root / "orchestrator_state.json")
+
+
+def test_root_default_state_file_does_not_consult_cwd(tmp_path: Path) -> None:
+    """With AGENTS_ARMY_HOME unset, cwd must never be read for STATE_FILE —
+    only AGENTS_ARMY_ROOT (or its default) may supply it."""
+    root = tmp_path / "root"
+    cwd = tmp_path / "somewhere-else"
+    cwd.mkdir()
+    env = _env_without(
+        "AGENTS_ARMY_HOME", "AGENTS_ARMY_STATE_FILE", AGENTS_ARMY_ROOT=str(root)
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import orchestrator; orchestrator.main(['create', 'dev', '-b', 'claude'])",
+        ],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert not (cwd / "orchestrator_state.json").exists()
+    assert (root / "orchestrator_state.json").exists()
+
+
+def test_workdir_and_skills_dir_still_follow_cwd_under_root_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AGENTS_ARMY_HOME", raising=False)
+    monkeypatch.delenv("AGENTS_ARMY_STATE_FILE", raising=False)
+    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+    monkeypatch.chdir(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import orchestrator; print(orchestrator.WORKDIR); "
+            "print(orchestrator.SKILLS_DIR)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+    )
+
+    workdir, skills_dir = result.stdout.splitlines()
+    assert workdir == str(tmp_path)
+    assert skills_dir == str(tmp_path / "SKILLS")
+
+
+def test_agents_army_root_does_not_conflict_with_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike AGENTS_ARMY_HOME/AGENTS_ARMY_STATE_FILE, AGENTS_ARMY_ROOT is the
+    teamless fallback and must stay compatible with --team."""
+    register_backend("recording", _make_recording_backend([]))
+    teams_dir = tmp_path / "teams"
+    (teams_dir / "t1" / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+
+    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
+
+    assert (teams_dir / "t1" / "agents" / "orchestrator_state.json").exists()
