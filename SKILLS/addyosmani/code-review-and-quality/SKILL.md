@@ -5,9 +5,8 @@ description: Conducts multi-axis code review. Use before merging any change. Use
 
 <!--
 Vendored from https://github.com/addyosmani/agent-skills/blob/main/skills/code-review-and-quality/SKILL.md
-(MIT License, Copyright (c) 2025 Addy Osmani). Adapted for this repo: the
-five axes and severity vocabulary below are adapted for this repo's own
-review pipeline.
+(MIT License, Copyright (c) 2025 Addy Osmani). The five axes and severity
+vocabulary below are used as-is by this repo's own review pipeline.
 -->
 
 # Code Review and Quality
