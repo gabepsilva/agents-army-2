@@ -114,6 +114,10 @@ aarmy talk spectacle --team "$team" -v -p "\
 # --search hits GitHub's *indexed* search, which lags PR creation by up to
 # minutes and would report no PR for one spectacle just opened. The list API
 # is read-your-writes, so filter its bodies here instead.
+
+# Sleep 30 seconds to let the PR be indexed by GitHub.
+sleep 30
+
 export pr_url=$(gh pr list --draft --limit 50 --json url,body \
     --jq "[.[] | select(.body | test(\"(#|issues/)${issue_number}\\\\b\"))] | .[0].url // empty")
 [ -z "$pr_url" ] && exit 2
