@@ -4,9 +4,8 @@
 Coverage is evidence that code ran, not that a useful behavior was asserted.
 The floors therefore leave deliberate headroom instead of rewarding tests
 written only to exercise every defensive branch. Core orchestration and
-backend adapters carry the highest floor; workflow examples carry a moderate
-floor; quality-gate plumbing carries a lower one. Changed lines independently
-need 90% coverage in pull requests.
+backend adapters carry the highest floor; quality-gate plumbing carries a
+lower one. Changed lines independently need 90% coverage in pull requests.
 """
 
 from __future__ import annotations

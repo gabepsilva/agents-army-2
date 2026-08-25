@@ -6,10 +6,11 @@ description: Simplifies code for clarity. Use when refactoring code for clarity 
 <!--
 Vendored from https://github.com/addyosmani/agent-skills/blob/main/skills/code-simplification/SKILL.md
 (MIT License, Copyright (c) 2025 Addy Osmani). Adapted for this repo: Step 3's
-commit instruction is rewritten below to match how this skill is applied here
-— an implementer applies the full process directly, while a reviewer that
-must not modify files draws only on Step 1 (Chesterton's Fence) and Step 2
-(the pattern tables) to decide what to flag as a finding instead.
+driver-owns-commits instruction is dropped below, and a note is added on how
+a reviewer, which must not modify files at all, should draw on this skill
+differently than an implementer that applies it directly — the reviewer
+draws only on Step 1 (Chesterton's Fence) and Step 2 (the pattern tables) to
+decide what to flag as a finding.
 -->
 
 # Code Simplification

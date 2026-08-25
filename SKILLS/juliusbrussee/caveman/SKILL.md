@@ -14,9 +14,9 @@ Adapted for this repo, in four ways:
 1. **Scope clamped to the reply.** Upstream governs everything the agent
    emits. Here it governs the reply text and nothing else. Files the agent
    authors — source, code comments, documentation, commit messages — are
-   explicitly out of scope, because the `documenter` and `implementer` roles
-   that carry this skill produce those files as their actual deliverable.
-   Compressing them would damage the work rather than save tokens.
+   explicitly out of scope: a reply that reports on authored files is not
+   the file itself, and compressing the deliverable would damage the work
+   rather than save tokens.
 
 2. **Structured-reply aware.** The rules below name which reply fields may
    be compressed and which are exempt; upstream has no notion of a

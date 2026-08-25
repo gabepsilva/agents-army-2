@@ -189,7 +189,7 @@ verify: verify-quick verify-coverage verify-mutation
 
 ci: verify security
 
-# The gates `make ci` will attempt, one per line, for a driver that reports a
+# The gates `make ci` will attempt, one per line, for a reader who wants a
 # check per gate rather than a wall of CI output.
 ci-gates:
 	@printf '%s\n' $(CI_GATES)
