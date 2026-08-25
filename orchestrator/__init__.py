@@ -442,8 +442,8 @@ class Orchestrator:
 
         A `BlockingIOError` means a turn on *this* agent is in flight; that is
         not a failure of `delete`, which never refuses and never changes its
-        exit code — the file is left for that turn (2.4) or a later `delete`
-        to reclaim.
+        exit code — the file is left for that turn's own `AgentNotFoundError`
+        handler in `talk`, or a later `delete`, to reclaim.
         """
         path = self._agent_lock_path(name)
         try:

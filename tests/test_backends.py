@@ -205,6 +205,38 @@ def register_echo_backend() -> None:
     register_backend("echo", EchoBackend)
 
 
+def _gate_backend(
+    name: str, entered: threading.Event, release: threading.Event
+) -> type[AgentBackend]:
+    """A backend class whose turn signals `entered`, then blocks on `release`.
+
+    A factory rather than one shared class: each caller closes over its own
+    pair of events, and `.name` must equal the string it gets registered
+    under — `_persist`/`_reload` round-trip a spawned agent's backend through
+    `agent.backend.name`, not through the registry key `spawn` was called
+    with, so the two have to match.
+    """
+
+    class Gate(AgentBackend):
+        @property
+        def name(self) -> str:
+            return name
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = DEFAULT_TURN_TIMEOUT,
+            schema: OutputSchema | None = None,
+        ) -> TurnResult:
+            entered.set()
+            release.wait(timeout=5)
+            return TurnResult(session_id="s1", reply="ok", raw="")
+
+    return Gate
+
+
 def _assert_subprocess_kwargs(
     kwargs: dict,
     cwd: Path,
@@ -2724,24 +2756,7 @@ class TestOrchestrator:
         entered = threading.Event()
         release = threading.Event()
 
-        class Gate(AgentBackend):
-            @property
-            def name(self) -> str:
-                return "gate-self"
-
-            def run_turn(
-                self,
-                prompt: str,
-                session_id: str | None,
-                cwd: Path,
-                timeout: int = DEFAULT_TURN_TIMEOUT,
-                schema: OutputSchema | None = None,
-            ) -> TurnResult:
-                entered.set()
-                release.wait(timeout=5)
-                return TurnResult(session_id="s1", reply="ok", raw="")
-
-        register_backend("gate-self", Gate)
+        register_backend("gate-self", _gate_backend("gate-self", entered, release))
         orch = Orchestrator(state_file=state_file)
         orch.spawn("a", "gate-self")
 
@@ -2790,8 +2805,9 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
             ) -> TurnResult:
                 # Runs with the outer talk() holding the agent lock, so this
-                # delete's own reclaim probe backs off (previous test); the
-                # file is left for talk()'s AgentNotFoundError handler.
+                # delete's own reclaim probe backs off (BlockingIOError,
+                # caught inside _reclaim_agent_lock); the file is left for
+                # talk()'s AgentNotFoundError handler to clean up instead.
                 Orchestrator(state_file=state_file).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
@@ -2811,24 +2827,9 @@ class TestOrchestrator:
         entered = threading.Event()
         release = threading.Event()
 
-        class Gate(AgentBackend):
-            @property
-            def name(self) -> str:
-                return "gate-sibling"
-
-            def run_turn(
-                self,
-                prompt: str,
-                session_id: str | None,
-                cwd: Path,
-                timeout: int = DEFAULT_TURN_TIMEOUT,
-                schema: OutputSchema | None = None,
-            ) -> TurnResult:
-                entered.set()
-                release.wait(timeout=5)
-                return TurnResult(session_id="s1", reply="ok", raw="")
-
-        register_backend("gate-sibling", Gate)
+        register_backend(
+            "gate-sibling", _gate_backend("gate-sibling", entered, release)
+        )
         orch = Orchestrator(state_file=state_file)
         orch.spawn("bob", "gate-sibling")
         orch.spawn("alice", "echo")
