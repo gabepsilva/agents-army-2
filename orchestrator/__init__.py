@@ -176,10 +176,18 @@ def _is_live(path: Path, lock: TextIO) -> bool:
         return False
 
 
+# A revalidation loop only spins when something else is unlinking this exact
+# path faster than this call can observe it as live — real contention settles
+# in one or two iterations. A bound turns a bug that breaks that (a corrupted
+# _is_live, an unlink with no matching hold) into a clear error instead of a
+# silent, unkillable hot loop inside a lock acquisition.
+_MAX_REVALIDATE_ATTEMPTS = 100
+
+
 @contextmanager
 def _flock(
     path: Path, mode: int = fcntl.LOCK_EX, *, revalidate: bool = False
-) -> Iterator[None]:
+) -> Iterator[TextIO]:
     """Hold an flock on `path`, creating its parent directory first.
 
     Module-level rather than a method on `Orchestrator` so `main()` can take
@@ -192,29 +200,33 @@ def _flock(
     holding a lock that guards nothing. When set, every acquisition checks
     that the inode it just locked is still the one `path` names, and loops —
     unlocking, closing, and reopening the path — until that holds.
+
+    Yields the open lock file so a caller that wants to unlink `path` while
+    holding this flock can check `_is_live` first, itself: opening and then
+    flocking are two syscalls, not one, so a caller that unlinks blindly
+    after `_flock` merely returns can still be acting on an inode a
+    different, legitimate reclaimer already orphaned in between. See
+    `Orchestrator._reclaim_agent_lock`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    attempts = 0
     while True:
-        lock = path.open("a+", encoding="utf-8")
-        try:
+        with path.open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), mode)
-        except BaseException:
-            # LOCK_NB raises BlockingIOError on a lock already held; closing
-            # here (rather than only in the loop's steady-state paths) is
-            # what keeps a failed non-blocking probe from leaking the fd.
-            lock.close()
-            raise
-        if revalidate and not _is_live(path, lock):
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            lock.close()
-            log.debug("lock %s: reclaimed underneath us, re-acquiring", path)
-            continue
-        break
-    try:
-        yield
-    finally:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        lock.close()
+            try:
+                if revalidate and not _is_live(path, lock):
+                    attempts += 1
+                    if attempts >= _MAX_REVALIDATE_ATTEMPTS:
+                        raise RuntimeError(
+                            f"lock {path}: still not live after "
+                            f"{_MAX_REVALIDATE_ATTEMPTS} reacquire attempts"
+                        )
+                    log.debug("lock %s: reclaimed underneath us, re-acquiring", path)
+                    continue
+                yield lock
+                return
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class Orchestrator:
@@ -306,7 +318,8 @@ class Orchestrator:
         the same session as the attempt it is correcting, and another process
         talking to this agent in between would fork the conversation.
         """
-        with self._agent_lock(name):
+        path = self._agent_lock_path(name)
+        with self._agent_lock(name) as lock:
             try:
                 with self._exclusive():
                     self._reload()
@@ -318,11 +331,15 @@ class Orchestrator:
                 return self._validated_turn(agent, prompt, schema, retries, timeout)
             except AgentNotFoundError:
                 # We hold this lock and the agent provably does not exist, so
-                # no turn can be running behind it. A waiter queued on this
-                # inode revalidates and re-acquires — see _flock's
-                # revalidate loop.
-                self._agent_lock_path(name).unlink(missing_ok=True)
-                log.debug("agent '%s': reclaimed lock file, no such agent", name)
+                # no turn can be running behind it — `_is_live` is always
+                # true here (this lock has been held continuously since a
+                # validated acquire, so nothing could have replaced the
+                # path), but checking keeps that a local fact instead of one
+                # a reader has to reconstruct. A waiter queued on this inode
+                # revalidates and re-acquires — see _flock's revalidate loop.
+                if _is_live(path, lock):
+                    path.unlink(missing_ok=True)
+                    log.debug("agent '%s': reclaimed lock file, no such agent", name)
                 raise
 
     def _turn(
@@ -440,6 +457,14 @@ class Orchestrator:
         talked to creates the lock file and immediately removes it again —
         net zero on disk.
 
+        Guarded by `_is_live`: `_flock`'s own open-then-flock is two
+        syscalls, not one, so the inode this probe locks can already be
+        orphaned by the time the lock is granted — a different, legitimate
+        reclaim unlinked and released it in between. Unlinking the *path*
+        unconditionally at that point would remove whatever a live acquirer
+        has since put there, not the dead inode this probe actually holds;
+        `_is_live` is exactly the check that tells the two apart.
+
         A `BlockingIOError` means a turn on *this* agent is in flight; that is
         not a failure of `delete`, which never refuses and never changes its
         exit code — the file is left for that turn's own `AgentNotFoundError`
@@ -447,8 +472,9 @@ class Orchestrator:
         """
         path = self._agent_lock_path(name)
         try:
-            with _flock(path, fcntl.LOCK_EX | fcntl.LOCK_NB):
-                path.unlink(missing_ok=True)
+            with _flock(path, fcntl.LOCK_EX | fcntl.LOCK_NB) as lock:
+                if _is_live(path, lock):
+                    path.unlink(missing_ok=True)
         except BlockingIOError:
             log.debug("agent '%s': lock file in use, not reclaiming", name)
 
@@ -465,15 +491,15 @@ class Orchestrator:
         return self._locks_dir() / digest
 
     @contextmanager
-    def _locked(self, path: Path, *, revalidate: bool = False) -> Iterator[None]:
-        with _flock(path, revalidate=revalidate):
-            yield
+    def _locked(self, path: Path, *, revalidate: bool = False) -> Iterator[TextIO]:
+        with _flock(path, revalidate=revalidate) as lock:
+            yield lock
 
-    def _exclusive(self) -> AbstractContextManager[None]:
+    def _exclusive(self) -> AbstractContextManager[TextIO]:
         """Serialize reads and writes of the state file."""
         return self._locked(self._lock_path())
 
-    def _agent_lock(self, name: str) -> AbstractContextManager[None]:
+    def _agent_lock(self, name: str) -> AbstractContextManager[TextIO]:
         """Serialize whole turns for one agent, leaving other agents free.
 
         The state lock cannot do this: it covers a file write measured in
