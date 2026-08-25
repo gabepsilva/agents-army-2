@@ -10,6 +10,16 @@ mutmut 3.7.0, installed via `uv sync --locked`; reproduce any line a comment
 here points at with
 `sed -n '<range>p' .venv/lib/python*/site-packages/mutmut/__main__.py`.
 
+Known gap, accepted rather than closed (agents-army-2#86): mutmut's
+per-function hash covers only `cst.FunctionDef` bodies
+(mutmut/mutation/file_mutation.py's `_compute_mutated_function_hashes`), so a
+module-level change in a `source_paths` file — a top-level constant, an
+import, a class attribute set outside a method — is invisible to both
+mutmut's own hash and this digest, which deliberately excludes
+`source_paths` (see digest_inputs below). Widening either would re-hash a
+mutated file wholesale on any edit and delete the per-commit reuse this
+cache exists for.
+
 The digest is recorded only by `--record`, which the Makefile runs after
 mutmut has measured *and* mutation_gate.py has cleared the floor. Writing it
 up front, or after a failing gate, would mark a suite as measured before
@@ -98,9 +108,8 @@ def _as_root_prefix(entry: str) -> str:
 
 
 def _watched_roots(pyproject: Path) -> tuple[str, ...]:
-    return tuple(_as_root_prefix(entry) for entry in _also_copy(pyproject)) + (
-        IMPLICIT_WATCHED_ROOTS
-    )
+    also_copy_roots = tuple(_as_root_prefix(entry) for entry in _also_copy(pyproject))
+    return also_copy_roots + IMPLICIT_WATCHED_ROOTS
 
 
 def _pytest_ini_options(pyproject: Path) -> dict:
@@ -303,7 +312,10 @@ def main(argv: list[str] | None = None) -> int:
     (MUTANTS_DIR / "mutmut-cicd-stats.json").unlink(missing_ok=True)
 
     if previous == current:
-        print("mutation cache: tests unchanged; reusing cached mutant results.")
+        if MUTANTS_DIR.exists():
+            print("mutation cache: tests unchanged; reusing cached mutant results.")
+        else:
+            print("mutation cache: tests unchanged, but no mutants/ to reuse yet.")
         return 0
 
     # The digest is not rewritten here: only a completed run may claim these

@@ -1645,6 +1645,25 @@ class TestMutationCache:
         assert cache.exists()
         assert "reusing cached mutant results" in capsys.readouterr().out
 
+    def test_matching_digest_with_no_mutants_dir_does_not_claim_a_reuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A recorded digest can outlive its mutants/ (a fresh checkout that
+        restored the digest file but not the cache, say); "reusing cached
+        mutant results" would be false when there is nothing to reuse."""
+        test_file = tmp_path / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main(["--record"]) == 0
+        capsys.readouterr()
+
+        assert mutation_cache.main([]) == 0
+        out = capsys.readouterr().out
+        assert "reusing cached mutant results" not in out
+        assert "no mutants/ to reuse" in out
+
     def test_the_makefile_records_only_after_mutmut_has_measured(self) -> None:
         recipe = (REPO / "Makefile").read_text(encoding="utf-8")
         mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
@@ -1703,6 +1722,18 @@ class TestMutationCache:
 
         assert "tools/mutation_cache.py" in mutation
         assert mutation.index("tools/mutation_cache.py") < mutation.index("mutmut run")
+
+    def test_the_real_makefile_puts_nodump_on_the_mutation_recipes_pythonpath(
+        self,
+    ) -> None:
+        """IMPLICIT_WATCHED_ROOTS watches tools/nodump/ because sitecustomize.py
+        there runs inside every step of this recipe via PYTHONPATH -- bind that
+        claim to the actual Makefile line, so repointing PYTHONPATH away from
+        tools/nodump fails here instead of silently going stale."""
+        recipe = (REPO / "Makefile").read_text(encoding="utf-8")
+        mutation = recipe.partition("\nmutation:\n")[2].partition("\n\n")[0]
+
+        assert "mutation: export PYTHONPATH := tools/nodump" in mutation
 
     # -- Digest widening (§4.1): everything besides source_paths that can
     # decide a mutant's verdict must move the digest. ------------------------
@@ -1842,13 +1873,15 @@ class TestMutationCache:
         assert "tests/fixture.json" in out
         assert "not covered" in out
 
-    def test_check_a_ignores_a_host_global_excludes_file(
+    def test_check_a_overrides_core_excludes_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
         """`--exclude-standard` also honors core.excludesFile, which is
-        host/user config, not this repository's own .gitignore. Unoverridden,
-        a personal excludes file could hide an untracked file from Check A on
-        one machine but not on a hosted runner without one."""
+        user/host config, not this repository's own .gitignore -- so
+        `repo_files` overrides it with `-c core.excludesFile=/dev/null`.
+        Set here as a repo-local config value (the override applies to any
+        scope git would read it from -- global, system, or, as planted
+        here, local) so the test needs no state outside its own tmp_path."""
         test_file = tmp_path / "tests" / "test_a.py"
         _write(test_file, "assert True\n")
         _write(tmp_path / "tests" / "fixture.json", "{}\n")
@@ -1860,6 +1893,46 @@ class TestMutationCache:
 
         assert mutation_cache.main([]) == 1
         assert "tests/fixture.json" in capsys.readouterr().out
+
+    @staticmethod
+    def _unavailable_git(_cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args, returncode=128, stdout="", stderr="fatal: not a git repository"
+        )
+
+    def test_check_a_fails_loudly_when_git_is_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """§4.1: 'If git cannot answer, fail -- do not skip.' A no-op here
+        would let the closure guarantee stop applying, silently, on any
+        checkout git can't answer for, rather than failing the gate."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(mutation_cache, "_git", self._unavailable_git)
+
+        assert mutation_cache.main([]) == 1
+        assert (
+            "cannot list repository files: git is unavailable"
+            in capsys.readouterr().out
+        )
+
+    def test_digest_inputs_fails_loudly_when_git_is_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A defensive guard for a direct caller of digest_inputs/
+        compute_digest that skips Check A -- unreachable through main()
+        today, since Check A always runs first there, but not through
+        digest_inputs's own contract."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(mutation_cache, "_git", self._unavailable_git)
+
+        with pytest.raises(RuntimeError, match="cannot list repository files"):
+            mutation_cache.digest_inputs(pyproject)
 
     def test_check_a_new_py_file_under_watched_root_is_auto_covered(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2066,26 +2139,38 @@ class TestMutationCache:
 
         # 4. the key names its format version, the OS, the interpreter, and
         #    the lockfile/config that decide what mutmut measured against.
-        for component in (
+        required_components = (
             "mutation-v1",
             "runner.os",
             "steps.setup-python.outputs.python-version",
             "hashFiles('uv.lock', 'pyproject.toml')",
-        ):
+        )
+        for component in required_components:
             assert component in restore_key
 
-        # 5. restore-keys is a strict prefix of key, not merely related to
-        #    it -- a prefix that only "contains" the right components could
-        #    be widened until it matches every cache in scope.
+        # 5. every restore-keys line is a strict prefix of key AND still
+        #    carries every required component. Prefix alone is not enough:
+        #    "mutation-" textually satisfies str.startswith against any key
+        #    that begins with it, so a line widened down to the bare format
+        #    version would pass a prefix-only check while matching every
+        #    cache in scope, including one measured under a different
+        #    lockfile -- exactly what this assertion exists to catch. All
+        #    lines are checked, not just the first: a second, broader
+        #    fallback line must not slip past unnoticed.
         restore_keys = restore.group(2)
-        prefix_match = re.search(r"\s{12}(.+)\n", restore_keys)
-        assert prefix_match is not None
-        prefix = prefix_match.group(1)
-        assert restore_key.startswith(prefix)
-        assert restore_key != prefix
+        prefixes = re.findall(r"\s{12}(.+)\n", restore_keys)
+        assert prefixes
+        for prefix in prefixes:
+            assert restore_key.startswith(prefix)
+            assert restore_key != prefix
+            for component in required_components:
+                assert component in prefix
 
-        # 6. exactly the two paths this gate reads and writes are cached.
+        # 6. exactly the two paths this gate reads and writes are cached, on
+        #    both steps -- a regex matching neither would pass this loop
+        #    vacuously, so the count is checked too.
         paths = re.findall(r"path: \|\n((?:\s{12}.+\n)+)", block)
+        assert len(paths) == 2
         for path_block in paths:
             entries = {line.strip() for line in path_block.splitlines()}
             assert entries == {"mutants", "reports/mutation-test-inputs.sha256"}
