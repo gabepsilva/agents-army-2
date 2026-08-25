@@ -37,9 +37,10 @@ VERIFY_MUTATION := mutation
 VERIFY_SECURITY := security-static
 
 # Every gate `make ci` runs, in the order a reader wants them reported.
-# `make ci-gates` publishes this list so a driver can tell a gate that passed
-# from one that never started, and tests/test_quality_gates.py fails if it
-# drifts from what `make ci` actually builds.
+# `make ci-gates` publishes this list so a reader of an interleaved parallel
+# log can tell a gate that passed from one that never started, and
+# tests/test_quality_gates.py fails if it drifts from what `make ci` actually
+# builds.
 CI_GATES := $(VERIFY_QUICK) workflows $(VERIFY_COVERAGE) $(VERIFY_MUTATION) \
 	semgrep $(VERIFY_SECURITY) secrets
 

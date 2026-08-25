@@ -18,10 +18,9 @@ Adapted for this repo, in four ways:
    that carry this skill produce those files as their actual deliverable.
    Compressing them would damage the work rather than save tokens.
 
-2. **Schema-aware.** Every stage that carries this skill is `--schema`
-   validated (`examples/gabriels_workflow_v2/validations/`). The rules below name
-   which fields may be compressed and which are exempt; upstream has no
-   notion of a structured reply.
+2. **Structured-reply aware.** The rules below name which reply fields may
+   be compressed and which are exempt; upstream has no notion of a
+   structured reply.
 
 3. **Fixed at the `full` level.** The `/caveman lite|full|ultra|off` switching
    and the three `wenyan-*` classical-Chinese levels are dropped. There is no
@@ -31,13 +30,9 @@ Adapted for this repo, in four ways:
 4. **Auto-Clarity extended** to cover `blockers`, which halt the workflow and
    are read by a human.
 
-Attached via `--skill` to four stages in
-`examples/gabriels_workflow_v2/workflow.py`: `implementation`,
-`documentation`, `repair-*`, and `review-repair-*`. Those are the stages whose
-reply is a report on work already done. It is deliberately NOT attached to
-`expansion`, `grill`, `specification`, or either review — those replies are
-instructions for work not yet done, and they feed the unbounded
-`needs_another_round` loops, where one misread costs a whole extra round.
+Attach this to a reply that reports on work already done, not to a reply
+that instructs work not yet done — the latter feeds a review or planning
+loop downstream, where one misread costs a whole extra round.
 -->
 
 # Caveman

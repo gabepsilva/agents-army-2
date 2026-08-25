@@ -15,10 +15,6 @@ session every time.
   - Codex: `codex`
   - Grok: `grok`
   - OpenCode 1.18.21+: `opencode`
-- For the Gabriel's Development Workflow example: Linux and
-  [`bubblewrap`](https://github.com/containers/bubblewrap) (`bwrap`) on `PATH`
-  with unprivileged user namespaces enabled (see
-  `examples/gabriels_workflow_v2/README.md` Sandboxing and `docs/security.md`)
 
 ## Setup
 
@@ -81,16 +77,6 @@ uv run orchestrator --help
 # Show the project or installed package version
 uv run orchestrator --version
 ```
-
-Stage comments include an attribution footer with six fields: `backend`,
-`model`, `reasoning_effort`, `task_duration`, `skills`, and `worktree`.
-`task_duration` is the elapsed `self.agents.ask()` turn, formatted as seconds
-with one decimal place (`X.Ys`). `worktree` reports the resolved worktree
-basename plus its resolved path, shortening the user's home directory to `~`
-(for example, `` `worktree` - `~/.git/gdw/issue-44/worktree` ``). `_unset_`
-means the backend CLI chose its default; `_none_` means the stage explicitly
-requested no skills. Cached stages post no new comment or attribution metadata.
-Driver-authored CI checklist comments carry no attribution footer.
 
 ### Structured replies: `--schema`
 
@@ -376,22 +362,13 @@ tools/             # gate scripts run by `make` (coverage/mutation/ratchet/test-
 
 ## End-to-end workflow example
 
-[`examples/gabriels_workflow_v2/`](examples/gabriels_workflow_v2/README.md)
-shows how to compose persistent agents, prompts, and strict structured replies
-into a resumable raw-issue-to-PR workflow. The Python driver owns `gh`, full CI,
-git publication, and control flow; agents focus on repository reasoning and
-code. Eight roles run as a driver-mediated relay: execution state lives in a
-local, hash-checked checkpoint store; each agent receives a compact handoff from
-the stage before it alongside the canonical artifact it depends on; every loop
-is bounded by an explicit budget; and GitHub receives two milestone comments
-rather than a comment per stage. Its prompts, response schemas, security
-boundary, and invocation are documented in that README.
-
-> **Sandboxing:** the workflow's `AgentGateway` wraps every `orchestrator talk`
-> turn in a `bwrap` sandbox (Linux + `bubblewrap` required, fail-closed if
-> missing). See that README's Sandboxing section and [`docs/security.md`](docs/security.md)
-> for what is isolated, what stays visible read-only, and the current network
-> posture (credential/socket/path descope only).
+[`examples/gabriels_workflow_v3/go.sh`](examples/gabriels_workflow_v3/go.sh)
+is a shell script, not a Python package. It drives five agents — owen,
+spectacle, devin, code-reviewer, and doku — from an issue URL to a reviewed PR
+using `uv run orchestrator talk --team`. It creates a per-issue git worktree
+and tears it down at the end, and the agents converge by adding labels to the
+issue and the PR. See [`docs/security.md`](docs/security.md) for the security
+posture of a run.
 
 ## Quality gates
 
@@ -404,15 +381,16 @@ commit and `make ci` runs on every push. See [AGENTS.md](AGENTS.md) for the
 rules behind the gates.
 
 Coverage is deliberately not a 100% quota: core orchestration and backend
-adapters require 95%, the example workflow requires 90%, supporting gate
-utilities require 80%, and changed lines require 90%. The mutation gate stays
-at a fixed 98% floor so assertions must detect corrupted core behavior without
-rewarding tests coupled only to implementation details.
+adapters require 95%, supporting gate utilities require 80%, and changed
+lines require 90%. The mutation gate stays at a fixed 98% floor so
+assertions must detect corrupted core behavior without rewarding tests
+coupled only to implementation details.
 
 Semgrep rules include `no-shell-true-subprocess`, `no-bare-except`, and
-`no-inherited-env-agent-subprocess` (every `subprocess.run`/`Popen` launching
-`orchestrator` or `bwrap` must pass explicit `env=` so agent turns never inherit
-the host environment).
+`no-inherited-env-agent-subprocess` — currently dormant, held for a future
+Python driver that spawns the agent CLI on the project's behalf; today's
+agent turns inherit the host environment by design, since each backend CLI
+needs its login under the real `$HOME`.
 
 ```sh
 make hooks   # install the pre-commit/pre-push gate (run once per clone)

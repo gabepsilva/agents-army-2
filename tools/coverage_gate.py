@@ -34,21 +34,6 @@ FLOORS: dict[str, float] = {
     "backends/grok.py": 95.0,
     "backends/opencode.py": 95.0,
     "backends/registry.py": 95.0,
-    # The example workflow is substantial user-facing software, but its CLI
-    # glue and reporting branches do not warrant tests solely for 100%. Its
-    # checkpoint, budget, and stop paths are what keep a run from spending
-    # more than it was allowed, so they are held to the same floor.
-    "examples/gabriels_workflow_v2/cli.py": 90.0,
-    "examples/gabriels_workflow_v2/config.py": 90.0,
-    "examples/gabriels_workflow_v2/contracts.py": 90.0,
-    "examples/gabriels_workflow_v2/errors.py": 90.0,
-    "examples/gabriels_workflow_v2/gates.py": 90.0,
-    "examples/gabriels_workflow_v2/gateway.py": 90.0,
-    "examples/gabriels_workflow_v2/git.py": 90.0,
-    "examples/gabriels_workflow_v2/github_app.py": 90.0,
-    "examples/gabriels_workflow_v2/publisher.py": 90.0,
-    "examples/gabriels_workflow_v2/setup.py": 90.0,
-    "examples/gabriels_workflow_v2/workflow.py": 90.0,
     # Gate utilities are themselves protected by planted violations. Requiring
     # every plumbing branch to run would add ceremony without more confidence.
     "tools/coverage_gate.py": 80.0,

@@ -6,22 +6,10 @@ description: Simplifies code for clarity. Use when refactoring code for clarity 
 <!--
 Vendored from https://github.com/addyosmani/agent-skills/blob/main/skills/code-simplification/SKILL.md
 (MIT License, Copyright (c) 2025 Addy Osmani). Adapted for this repo: Step 3's
-commit instruction is rewritten below to match this repo's convention that the
-driver, not the agent, owns commits (see
-`examples/gabriels_workflow_v2/prompts/implement.md` and `repair.md`) — and a note is added on how the quality reviewer, which must
-not modify files at all, should draw on this skill differently than the
-implementer/repair roles that apply it directly.
-
-This skill is attached via `--skill` to three roles in
-`examples/gabriels_workflow_v2/workflow.py`: `implementer` (the
-`implement` and `repair` stages) and `reviewer-quality`. The implementer/repair
-roles apply the full process below as they write and fix code. The quality
-reviewer only draws on Step 1 (Chesterton's Fence) and Step 2 (the pattern
-tables) to decide what to flag — Step 3's edit loop and the Verification
-checklist don't apply to a role that reports findings instead of changing
-files; a flagged simplification becomes a `finding` (axis `readability` or
-`architecture`) in `examples/gabriels_workflow_v2/validations/review.json`,
-not a direct edit.
+commit instruction is rewritten below to match how this skill is applied here
+— an implementer applies the full process directly, while a reviewer that
+must not modify files draws only on Step 1 (Chesterton's Fence) and Step 2
+(the pattern tables) to decide what to flag as a finding instead.
 -->
 
 # Code Simplification
@@ -187,7 +175,7 @@ FOR EACH SIMPLIFICATION:
 4. If tests fail → revert and reconsider
 ```
 
-Don't commit or push — the driver owns those operations and re-runs full CI itself. Avoid batching multiple simplifications into a single untested change: if something breaks, you need to know which simplification caused it.
+Avoid batching multiple simplifications into a single untested change: if something breaks, you need to know which simplification caused it.
 
 **The Rule of 500:** If a refactoring would touch more than 500 lines, invest in automation (codemods, sed scripts, AST transforms) rather than making the changes by hand. Manual edits at that scale are error-prone and exhausting to review.
 

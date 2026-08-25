@@ -21,7 +21,6 @@ import tools.mutation_cache as mutation_cache
 import tools.mutation_gate as mutation_gate
 import tools.ratchet_gate as ratchet_gate
 import tools.test_integrity as test_integrity
-from examples.gabriels_workflow_v2 import gates
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -1661,11 +1660,11 @@ class TestMutationCache:
 
 
 class TestCiGateAnnouncements:
-    """The driver reports one check per gate by reading a single interleaved
-    `make ci` log back apart. That only works while every gate announces
-    itself, in the form the driver parses, and while the list `make ci-gates`
-    publishes is the list `make ci` actually builds — a gate missing from it
-    would be reported as never started on every run.
+    """A human reads one check per gate out of a single interleaved
+    `make -j$(JOBS) ci` log. That only works while every gate announces
+    itself, in the form the reader can pick out, and while the list
+    `make ci-gates` publishes is the list `make ci` actually builds — a gate
+    missing from it would be reported as never started on every run.
     """
 
     def _make(self, *args: str) -> str:
@@ -1719,4 +1718,6 @@ class TestCiGateAnnouncements:
             timeout=30,
         ).stdout
 
-        assert gates.GATE_ANNOUNCE.findall(printed) == ["lint"]
+        assert re.findall(r"^=== gate: (\S+) ===$", printed, flags=re.MULTILINE) == [
+            "lint"
+        ]

@@ -6,11 +6,8 @@ description: Conducts multi-axis code review. Use before merging any change. Use
 <!--
 Vendored from https://github.com/addyosmani/agent-skills/blob/main/skills/code-review-and-quality/SKILL.md
 (MIT License, Copyright (c) 2025 Addy Osmani). Adapted for this repo: the
-"See Also" section below points at our own pipeline instead of sibling skills
-that don't exist here, and a mapping note ties the five axes and severity
-vocabulary below to the `axis` / `severity` fields the automated review agent
-emits under examples/gabriels_workflow_v2/prompts/review-quality.md
-and examples/gabriels_workflow_v2/validations/review.json.
+five axes and severity vocabulary below are adapted for this repo's own
+review pipeline.
 -->
 
 # Code Review and Quality
@@ -198,7 +195,7 @@ Label every comment with its severity so the author knows what's required vs opt
 
 This prevents authors from treating all feedback as mandatory and wasting time on optional suggestions.
 
-> **Automated pipeline note:** `examples/gabriels_workflow_v2/validations/review.json` requires every finding to carry a non-empty `required_change`, so purely informational **FYI** notes have no home there — fold anything worth keeping into the review's free-text `summary` instead of inventing a finding with no action.
+> **Automated pipeline note:** don't emit a purely informational **FYI** as a finding — fold anything worth keeping into the review's free-text `summary` instead of inventing a finding with no action.
 
 **Lead with what matters.** Order findings by leverage: correctness and security first, then structural regressions and missed simplifications, then everything else. Don't bury a real issue under cosmetic nits — a few high-conviction comments beat a long list. If you have one structural problem and ten nits, the structural problem *is* the review.
 
@@ -360,11 +357,6 @@ Part of code review is dependency review:
 ## See Also
 
 This repo doesn't vendor Addy Osmani's sibling `security-and-hardening` / `performance-optimization` skills or their reference checklists, so treat the Security and Performance axes above as self-contained here.
-
-For how this skill's axes and severities feed the automated review loop, see:
-
-- `examples/gabriels_workflow_v2/prompts/review-quality.md` — the prompt that instructs the `quality` review agent to apply this checklist
-- `examples/gabriels_workflow_v2/validations/review.json` — the JSON schema each finding (`axis`, `severity`, `title`, `evidence`, `required_change`) must satisfy, which is what lets a finding be rendered straight into a GitHub PR comment
 
 ## Common Rationalizations
 
