@@ -114,6 +114,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
+        id: setup-python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.11.11
@@ -127,8 +128,36 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --all-groups
 
+      # mutation-v1 is the format version for this cache's own digest scheme
+      # (tools/mutation_cache.py); bump it to flush every cache in scope on a
+      # deliberate change to what that digest covers.
+      - name: Restore mutation cache
+        id: mutation-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            mutants
+            reports/mutation-test-inputs.sha256
+          key: mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          restore-keys: |
+            mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
+
       - name: Run mutation gate
         run: make verify-mutation
+
+      # Restore/save are split around the gate so a saved cache always
+      # carries a digest written by a run that measured and cleared the
+      # floor: `make verify-mutation` only records after mutmut has measured
+      # and mutation_gate.py has passed, and `if: success()` means a failed
+      # or cancelled run publishes nothing.
+      - name: Save mutation cache
+        if: success() && steps.mutation-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            mutants
+            reports/mutation-test-inputs.sha256
+          key: mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
 
   security-static:
     name: Static security
