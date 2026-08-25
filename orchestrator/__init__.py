@@ -23,7 +23,7 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -105,6 +105,10 @@ class AgentExistsError(OrchestratorError, ValueError):
 
 class StateError(OrchestratorError):
     """The state file exists but does not hold the structure this code needs."""
+
+
+class TeamBusyError(OrchestratorError):
+    """Teardown asked for a team another command is still holding."""
 
 
 # User-facing failures that must print one line and exit 1, never a traceback.
@@ -627,9 +631,8 @@ def _teardown_team(team: str) -> None:
 
 
 def cmd_delete(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
-    if opts.team is not None and opts.name is None:
-        _teardown_team(opts.team)
-        return
+    # Always a named agent: `delete --team T` with no name is teardown, and
+    # main() runs that itself, before an Orchestrator exists.
     agent = orchestrator.delete(opts.name)
     print(f"deleted agent '{agent.name}' backend={agent.backend.name}")
 
@@ -1024,6 +1027,34 @@ def _team_lock_path(team_root: Path) -> Path:
     return team_root / ".lock"
 
 
+@contextmanager
+def _team_locked(path: Path, team: str, mode: int) -> Iterator[None]:
+    """Hold the team lock, reporting a lost race as `TeamBusyError`.
+
+    The conversion happens around the acquisition and nothing else. Catching
+    `BlockingIOError` around the whole dispatch instead would claim it for any
+    incidental one raised behind it — a backend's pipe, a write to a
+    non-blocking stdout — and answer "the team is in use" to a caller that
+    never asked for a team at all. That is the mystery `OrchestratorError`'s
+    docstring describes.
+
+    Teardown asks with `LOCK_NB` rather than a blocking `LOCK_EX` because
+    Linux flock has no writer fairness: a queued exclusive waiter is
+    overtaken by every later shared request, so a blocking teardown on a busy
+    team would wait indefinitely. `TeamBusyError` exits 1, not argparse's 2 —
+    a busy resource is not a usage mistake.
+    """
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(_flock(path, mode))
+        except BlockingIOError:
+            raise TeamBusyError(
+                f"team '{team}' is in use by another command; try again "
+                "once it finishes"
+            ) from None
+        yield
+
+
 def _resolve_team(
     opts: argparse.Namespace, teardown: bool
 ) -> AbstractContextManager[None]:
@@ -1089,9 +1120,9 @@ def _resolve_team(
     # LOCK_SH for every team verb but teardown, so concurrent turns in one
     # team don't serialize on each other; LOCK_EX|LOCK_NB for teardown, so a
     # team must not be torn down while a command in it is running, and a
-    # busy team fails fast (flock has no writer fairness — see main()).
+    # busy team fails fast (flock has no writer fairness — see _team_locked).
     mode = fcntl.LOCK_EX | fcntl.LOCK_NB if teardown else fcntl.LOCK_SH
-    return _flock(_team_lock_path(team_root), mode)
+    return _team_locked(_team_lock_path(team_root), team, mode)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1128,20 +1159,17 @@ def main(argv: list[str] | None = None) -> None:
     try:
         team_lock = _resolve_team(opts, teardown)
         with team_lock:
-            orch = Orchestrator()
             log.debug("cli: dispatching '%s'", opts.verb)
-            VERBS[opts.verb](orch, opts)
-    except BlockingIOError:
-        # Linux flock has no writer fairness — a blocking LOCK_EX here could
-        # wait indefinitely behind a stream of shared locks. Failing fast and
-        # naming the team is the right behavior for a teardown that lost the
-        # race, not exit 2: this is a busy resource, not a usage mistake.
-        print(
-            f"team '{opts.team}' is in use by another command; try again "
-            "once it finishes",
-            file=sys.stderr,
-        )
-        raise SystemExit(1) from None
+            if teardown:
+                # Ahead of Orchestrator(), and not through VERBS: the
+                # constructor parses the registry, and a registry that will
+                # not parse — invalid JSON, a backend this build no longer
+                # has — is exactly what teardown exists to remove. Building
+                # one first left `rm -rf` as the only way to retire a team
+                # whose state file had gone bad.
+                _teardown_team(opts.team)
+            else:
+                VERBS[opts.verb](Orchestrator(), opts)
     except _CLI_ERRORS as exc:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)

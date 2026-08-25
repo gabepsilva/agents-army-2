@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -395,6 +396,98 @@ def test_teardown_of_a_team_with_no_agents_ever_created_succeeds(
 
     assert capsys.readouterr().out == "deleted team 't1'\n"
     assert not (teams_dir / "t1" / "agents").exists()
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("invalid json", "not json"),
+        (
+            "unknown backend",
+            '{"owen": {"backend": "retired-backend", "session_id": null}}',
+        ),
+    ],
+)
+def test_teardown_removes_a_registry_it_cannot_parse(
+    label: str,
+    payload: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Teardown must not need the registry it deletes to be readable.
+
+    Constructing an `Orchestrator` first made both of these unrecoverable:
+    the constructor parses the state file, so the one command whose job is
+    to remove a broken registry was the one the broken registry stopped,
+    leaving `rm -rf` as the only way out.
+    """
+    teams_dir = tmp_path / "teams"
+    agents_dir = teams_dir / "t1" / "agents"
+    agents_dir.mkdir(parents=True)
+    (teams_dir / "t1" / "worktree").mkdir()
+    (agents_dir / "orchestrator_state.json").write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["delete", "--team", "t1"])
+
+    captured = capsys.readouterr()
+    assert captured.out == "deleted team 't1'\n"
+    assert captured.err == ""
+    assert not agents_dir.exists()
+
+
+def _make_blocking_backend() -> type[AgentBackend]:
+    """A backend whose turn fails the way a non-blocking pipe does.
+
+    Not hypothetical: `print`ing a large reply to a stdout someone left
+    O_NONBLOCK raises exactly this, and so can a backend's own pipe.
+    """
+
+    class BlockingBackend(AgentBackend):
+        @property
+        def name(self) -> str:
+            return "blocking"
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
+            schema=None,
+        ) -> TurnResult:
+            raise BlockingIOError(
+                errno.EAGAIN, "write could not complete without blocking"
+            )
+
+    return BlockingBackend
+
+
+@pytest.mark.parametrize("team_argv", [[], ["--team", "t1"]])
+def test_an_incidental_blocking_io_error_is_not_a_busy_team(
+    team_argv: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the team lock may report that a team is in use.
+
+    Catching `BlockingIOError` around the whole dispatch claimed every other
+    one for the lock — a teamless `talk` died with "team 'None' is in use by
+    another command", exit 1, and the real error was gone.
+    """
+    register_backend("blocking", _make_blocking_backend())
+    teams_dir = tmp_path / "teams"
+    (teams_dir / "t1" / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path)
+
+    with pytest.raises(BlockingIOError):
+        orchestrator.main(["talk", "a", *team_argv, "-b", "blocking", "-p", "hi"])
+
+    assert "in use by another command" not in capsys.readouterr().err
 
 
 def test_teardown_of_an_unknown_team_exits_1(
