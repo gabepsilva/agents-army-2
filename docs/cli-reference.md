@@ -132,21 +132,53 @@ one turn's `--timeout`.
 | `1` | the agent ran but never produced a conforming reply, or the turn otherwise failed |
 | `2` | the schema file is missing, malformed, or not strict — nothing ran, no agent was created |
 
-## `list` — show agents or the skill catalog
+## `list` — show agents, the skill catalog, or every team
 
 ```
-orchestrator list [agents|skills] [--team NAME]
+orchestrator list [agents|skills|teams] [--team NAME]
 ```
 
 Defaults to `agents` when no target is given. `--team NAME` reads that
 team's registry (`list agents`) or indexes its worktree's `SKILLS/`
-(`list skills`) instead of the teamless layout.
+(`list skills`) instead of the teamless layout; it is rejected (exit 2) on
+`list teams`, which reads every team's registry, not one.
 
 ```sh
 uv run orchestrator list           # same as: list agents
 uv run orchestrator list agents    # name, backend, session id for every agent
 uv run orchestrator list skills    # the SKILLS/ catalog
 uv run orchestrator list agents --team issue-73   # only that team's agents
+uv run orchestrator list teams     # every team under AGENTS_ARMY_ROOT
+```
+
+`list teams` walks `$AGENTS_ARMY_ROOT` (up to 4 levels deep — enough for
+`$AGENTS_ARMY_ROOT/<repo>/<workflow>/<team>/`) for every directory containing
+`agents/orchestrator_state.json`, and never looks inside a team it has
+already found — so a team's own `worktree/` is never mistaken for a second
+team. If `$AGENTS_ARMY_TEAMS_DIR` is set, it is walked too and any team not
+already found under `$AGENTS_ARMY_ROOT` is printed as its own group — this
+covers a `AGENTS_ARMY_TEAMS_DIR` that sits outside `$AGENTS_ARMY_ROOT`
+*and* one that is an ancestor of it, so a team reachable only through the
+wider `$AGENTS_ARMY_TEAMS_DIR` is never dropped just because the two roots
+overlap. Whatever registry `list agents`/`talk` currently resolve to
+(`STATE_FILE` — see [Configuration](configuration.md#environment-variables)
+for its default ladder) is printed as a `(teamless)` group, headed by its
+own path. Each team is printed with its agent count, its agents' names and
+backends, and a flag when `worktree/` is missing (the state `delete --team
+NAME` leaves behind — see [Teams](#teams) below). An empty walk prints
+`no teams` and still exits `0`.
+
+```sh
+uv run orchestrator list teams
+# /home/user/.agents-army
+#   my-repo/gdw-v3/issue-73  (2 agents: owen/claude, spectacle/claude)
+#   my-repo/gdw-v3/issue-80  (1 agent: devin/claude)  [worktree missing]
+#
+# (teamless) /home/user/.agents-army/orchestrator_state.json
+#   dev backend=claude
+
+uv run orchestrator list teams --team issue-73
+# orchestrator list: error: list teams cannot be combined with --team
 ```
 
 ## `delete` — remove an agent, or tear a team down
@@ -198,7 +230,8 @@ teamless layout — a named group of agents gets its own registry and its own
 working directory, isolated from every other team.
 
 ```sh
-export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/gdw-v3"
+repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")
+export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/$repo/gdw-v3"
 git worktree add -B issue-73 "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree" origin/master
 
 uv run orchestrator create owen --team issue-73 -b claude

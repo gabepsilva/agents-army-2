@@ -30,6 +30,7 @@ from typing import Any, NoReturn, TextIO, cast
 from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
 from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
 from backends.registry import UnknownBackendError
+from orchestrator import teams
 from orchestrator.schema import (
     ReplyValidationError,
     SchemaLoadError,
@@ -47,12 +48,26 @@ from orchestrator.skills import (
     resolve_skills,
 )
 
-# State lives in the caller's working directory (override with AGENTS_ARMY_HOME)
-# rather than next to the installed package, so it doesn't leak into the venv.
+# The one folder agents-army owns in $HOME: default home of the teamless
+# registry (see STATE_FILE below) and the root `list teams` walks to find
+# every team. Unlike AGENTS_ARMY_HOME, this never becomes an agent's cwd.
+ROOT = Path(os.environ.get("AGENTS_ARMY_ROOT", Path.home() / ".agents-army"))
+# The backend working directory and skills root default to the caller's cwd
+# (override with AGENTS_ARMY_HOME) rather than next to the installed package,
+# so they don't leak into the venv. STATE_FILE's own default no longer
+# follows HOME — see the ladder below.
 HOME = Path(os.environ.get("AGENTS_ARMY_HOME", Path.cwd()))
-STATE_FILE = Path(
-    os.environ.get("AGENTS_ARMY_STATE_FILE", HOME / "orchestrator_state.json")
-)
+# STATE_FILE's default ladder: an explicit path wins outright; failing that,
+# an explicitly-set AGENTS_ARMY_HOME (not "HOME happens to equal cwd", which
+# is the unset case) relocates it alongside WORKDIR/SKILLS_DIR; otherwise it
+# defaults under ROOT rather than cwd, so a plain `orchestrator create` run
+# from any checkout writes one registry instead of scattering one per repo.
+if "AGENTS_ARMY_STATE_FILE" in os.environ:
+    STATE_FILE = Path(os.environ["AGENTS_ARMY_STATE_FILE"])
+elif "AGENTS_ARMY_HOME" in os.environ:
+    STATE_FILE = HOME / "orchestrator_state.json"
+else:
+    STATE_FILE = ROOT / "orchestrator_state.json"
 # Agents run their CLI sessions from a single shared working directory.
 WORKDIR = HOME
 # Skill markdown catalog. Override with AGENTS_ARMY_SKILLS; default is $HOME/SKILLS.
@@ -227,6 +242,23 @@ def _flock(
                 return
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _load_state_file(state_file: Path) -> dict[str, dict]:
+    """Raw agent entries from a registry file, `{}` if it doesn't exist.
+
+    Module-level, not just `Orchestrator._load_state`, so `list teams` can
+    read a discovered team's registry the same way without going through
+    `get_backend`: enumeration only needs the backend *name* already stored
+    in each entry, and a renamed or removed backend plugin in one team's
+    registry must not stop every other team from listing.
+    """
+    if not state_file.exists():
+        return {}
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise StateError(f"{state_file} is not valid JSON: {exc}") from exc
 
 
 class Orchestrator:
@@ -534,12 +566,7 @@ class Orchestrator:
             self.agents[name] = agent
 
     def _load_state(self) -> dict[str, dict]:
-        if not self.state_file.exists():
-            return {}
-        try:
-            return json.loads(self.state_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise StateError(f"{self.state_file} is not valid JSON: {exc}") from exc
+        return _load_state_file(self.state_file)
 
     def _persist(self) -> None:
         state = {
@@ -725,6 +752,110 @@ def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(format_skill_listing(catalog))
 
 
+def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
+    """Agent name -> backend, read from `state_file`.
+
+    `None` means the registry couldn't be turned into that mapping: bad
+    JSON, removed by a concurrent `delete`/teardown between discovery and
+    this read, or valid JSON that isn't the `{name: {"backend": ...}}` shape
+    a registry is supposed to have (e.g. a top-level list, or an entry that
+    isn't itself an object). `list teams` enumerates every team's registry
+    in one pass, so one team's bad file must show up as a flag on that team,
+    not abort the report for every other one. Distinct from `{}`, a
+    registry that read fine and is simply empty.
+    """
+    try:
+        raw = _load_state_file(state_file)
+    except (StateError, OSError):
+        return None
+    # The shape a registry is supposed to have, checked explicitly rather
+    # than caught as an AttributeError off `raw.items()`/`entry.get(...)`:
+    # a blanket except there would just as happily swallow a genuine future
+    # bug in this function as the JSON's actual shape.
+    if not isinstance(raw, dict) or not all(
+        isinstance(entry, dict) for entry in raw.values()
+    ):
+        return None
+    return {name: entry.get("backend", "?") for name, entry in raw.items()}
+
+
+def _team_agents(team: teams.Team) -> dict[str, str] | None:
+    return _agents_from_registry(teams.marker_path(team.path))
+
+
+def _format_agents(agents: dict[str, str] | None) -> str:
+    """`(N agents: name/backend, ...)` for a read registry, `(registry
+    unreadable)` for one that exists but couldn't be read (see
+    `_agents_from_registry`) — the caller decides whether `agents=None`
+    means unreadable or "there is nothing here to print" (a registry that
+    doesn't exist at all is never formatted, only read ones are)."""
+    if agents is None:
+        return "registry unreadable"
+    count = len(agents)
+    plural = "agent" if count == 1 else "agents"
+    members = ", ".join(f"{n}/{b}" for n, b in sorted(agents.items()))
+    return f"{count} {plural}" + (f": {members}" if members else "")
+
+
+def _format_team_line(team: teams.Team, agents: dict[str, str] | None) -> str:
+    line = f"  {team.name}  ({_format_agents(agents)})"
+    if not team.has_worktree:
+        line += "  [worktree missing]"
+    return line
+
+
+def _print_teams() -> None:
+    root_teams = teams.discover(ROOT)
+    groups = [(ROOT, root_teams)]
+    if TEAMS_DIR is not None:
+        # Walked unconditionally, then deduped by path — not skipped
+        # whenever TEAMS_DIR overlaps ROOT. Dropping the whole group
+        # whenever TEAMS_DIR is an *ancestor* of ROOT hid every team outside
+        # ROOT, exactly what this command exists to show. Deduping instead
+        # handles same-dir, descendant, and ancestor with one rule: a team
+        # already shown under ROOT is simply never repeated under TEAMS_DIR.
+        seen = {team.path for team in root_teams}
+        extra_teams = [
+            team for team in teams.discover(TEAMS_DIR) if team.path not in seen
+        ]
+        if extra_teams:
+            groups.append((TEAMS_DIR, extra_teams))
+    # STATE_FILE, not "$ROOT/orchestrator_state.json": the registry `list
+    # teams` reports as (teamless) must be the one `list agents`/`talk`
+    # actually use, which an explicit AGENTS_ARMY_STATE_FILE or
+    # AGENTS_ARMY_HOME relocates away from ROOT (see the STATE_FILE ladder
+    # above) — main() never lets --team reach this function, so STATE_FILE
+    # here is always the teamless resolution, never a team's. Not
+    # `agents/orchestrator_state.json` inside a directory, so `teams.discover`
+    # never finds this bare file on its own — checked explicitly. Its
+    # existence and its readability are tracked separately: a corrupt
+    # registry here must still show up as a flagged line, the same as a
+    # corrupt team registry does, rather than being indistinguishable from
+    # "there was never a teamless registry at all".
+    has_teamless = STATE_FILE.is_file()
+
+    if not any(group_teams for _, group_teams in groups) and not has_teamless:
+        print("no teams")
+        return
+
+    for group_root, group_teams in groups:
+        print(f"{group_root}")
+        if not group_teams:
+            print("  no teams")
+        for team in group_teams:
+            print(_format_team_line(team, _team_agents(team)))
+        print()
+
+    if has_teamless:
+        print(f"(teamless) {STATE_FILE}")
+        teamless = _agents_from_registry(STATE_FILE)
+        if not teamless:
+            print(f"  {_format_agents(teamless)}")
+        else:
+            for name, backend in sorted(teamless.items()):
+                print(f"  {name} backend={backend}")
+
+
 def _teardown_team(team: str) -> None:
     """Remove a team's registry, leaving its worktree and git metadata alone.
 
@@ -890,7 +1021,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_version_argument(list_parser)
     _add_verbosity_argument(list_parser, "verbosity_after")
     list_parser.add_argument(
-        "target", nargs="?", choices=("agents", "skills"), default="agents"
+        "target", nargs="?", choices=("agents", "skills", "teams"), default="agents"
     )
     _add_team_option(list_parser)
     list_parser.set_defaults(_parser=list_parser)
@@ -1192,8 +1323,7 @@ def _resolve_team(
         opts._parser.error(
             "--team requires AGENTS_ARMY_TEAMS_DIR to be set; export it "
             "first, e.g.:\n"
-            '  export AGENTS_ARMY_TEAMS_DIR="$(git rev-parse '
-            '--path-format=absolute --git-common-dir)/gdw-v3"'
+            '  export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/<repo>/<workflow>"'
         )
     if not _TEAM_NAME_RE.fullmatch(team) or team in (".", ".."):
         opts._parser.error(
@@ -1261,6 +1391,11 @@ def main(argv: list[str] | None = None) -> None:
         _resolve_talk_prompt(opts, tail, separator_present)
     if opts.verb == "delete" and opts.team is None and opts.name is None:
         opts._parser.error("delete requires NAME or --team")
+    # `list teams` reads every team's registry, not one; --team names a
+    # single team to resolve, which is a contradiction with "list them all".
+    list_teams = opts.verb == "list" and opts.target == "teams"
+    if list_teams and opts.team is not None:
+        opts._parser.error("list teams cannot be combined with --team")
 
     # Only `delete` with no NAME tears a team down; create/talk always
     # require NAME, so this is False for them without inspecting opts.team.
@@ -1277,6 +1412,10 @@ def main(argv: list[str] | None = None) -> None:
                 # one first left `rm -rf` as the only way to retire a team
                 # whose state file had gone bad.
                 _teardown_team(opts.team)
+            elif list_teams:
+                # Also ahead of Orchestrator(): that constructor binds one
+                # STATE_FILE, and this reads N of them.
+                _print_teams()
             else:
                 VERBS[opts.verb](Orchestrator(), opts)
     except _CLI_ERRORS as exc:

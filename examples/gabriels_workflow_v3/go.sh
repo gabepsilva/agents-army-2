@@ -15,7 +15,8 @@ team="issue-$issue_number"
 # a parent directory of the agents' cwd, and an agent that wanders up into it
 # is editing the code this script is running from, mid-run: the #80 run had
 # devin editing seven files there and finding the live run's logs and state.
-export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/gdw-v3"
+repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")
+export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/$repo/gdw-v3"
 
 # The logs go next to the team, not into the repo. Redirects are relative to
 # whatever directory the run was launched from, so a run started at the
