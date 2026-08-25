@@ -128,7 +128,23 @@ aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
 
 # Leaving draft is how devin says he stands behind the code, so it is the finish
 # line. talk blocks on his lock, so a nudge sent mid-turn just waits its turn.
-for i in {1..5}; do
+#
+# The prompt below admits two outcomes and each has an observable: "I stand
+# behind it" flips isDraft, "not there yet" moves headRefOid. A turn with
+# neither answered nothing - devin starts `make ci` in the background and
+# returns "Still running - I'll wait for completion", but a `claude --print`
+# turn ends there and the notification he waits for can never arrive. That
+# happened in the #55 run: 16:54:19Z to 16:55:20Z, 61.7s, head unchanged. Such
+# a turn is not a round, so re-nudge instead of spending one of the five.
+# Three in a row is a devin that is stuck and a fourth copy of the same prompt
+# will not move him - the same bound the review loop's nudge below uses.
+#
+# Check isDraft before comparing heads: marking the PR ready needs no commit,
+# so devin's success outcome leaves the head unmoved and must not read as a stall.
+head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
+rounds=0
+stalls=0
+while [ $rounds -lt 5 ] && [ $stalls -lt 3 ]; do
 
     aarmy talk devin --team "$team" -v --timeout 10800 -s code-review-and-quality \
     -p "Review your own diff across the five axes first. \
@@ -139,6 +155,15 @@ for i in {1..5}; do
     leave it as draft, fix, commit and push." &>> devin.log
 
     [ "$(gh pr view $pr_url --json isDraft --jq '.isDraft')" = false ] && break
+
+    new_head=$(gh pr view $pr_url --json headRefOid --jq .headRefOid)
+    if [ "$new_head" = "$head" ]; then
+        stalls=$((stalls + 1))
+    else
+        head=$new_head
+        rounds=$((rounds + 1))
+        stalls=0
+    fi
 done
 
 # A fresh reviewer session - it never saw the issue debate, so the PR
