@@ -27,7 +27,7 @@ mkdir -p "$log_dir"
 
 git fetch origin --quiet
 git worktree prune
-git worktree add -B "gdwv3/$team" "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
+git worktree add --detach "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
 
 aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     -p "Look issue '$issue_url' \
@@ -117,9 +117,19 @@ export pr_url=$(gh pr list --draft --limit 50 --json url,body \
     --jq "[.[] | select(.body | test(\"(#|issues/)${issue_number}\\\\b\"))] | .[0].url // empty")
 [ -z "$pr_url" ] && exit 2
 
+# Spectacle's branch name is not deterministic - resolve it from the PR devin
+# is about to be handed, rather than trusting a prepared name nothing enforces.
+pr_branch=$(gh pr view "$pr_url" --json headRefName --jq .headRefName)
+[ -z "$pr_branch" ] && exit 4
+
 # Same again: devin implements from the PR description, on a clean tree.
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" reset -q --hard
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
+
+# origin/$pr_branch was pushed after the fetch at the top of this script, so a
+# fresh fetch is what makes it resolvable here.
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" fetch origin --quiet
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" checkout -q -B "$pr_branch" "origin/$pr_branch" || exit 4
 
 aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
     -s implement,tdd,code-review-and-quality \
@@ -271,4 +281,5 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e low \
 
 aarmy delete --team "$team"
 git worktree remove --force "$AGENTS_ARMY_TEAMS_DIR/$team/worktree"
+git branch -q -D "$pr_branch"
 rm -rf "$AGENTS_ARMY_TEAMS_DIR/$team"
