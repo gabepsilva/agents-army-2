@@ -28,7 +28,7 @@ def register_backend(name: str, backend_cls: type[AgentBackend]) -> None:
 
 def list_backends() -> list[str]:
     """List all registered backend names."""
-    return sorted(_BACKENDS)
+    return sorted(_BACKENDS.keys())
 
 
 def get_backend(
