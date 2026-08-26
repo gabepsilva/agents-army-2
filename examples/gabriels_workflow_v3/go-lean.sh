@@ -108,24 +108,14 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e medium \
     -p "Read the issue '$issue_url' and every comment on it, in order. That thread is the decision \
     record: the opening request, what the author proposed, what the reviewer challenged, and what was \
     settled. Read the current code only to ground your numbers. No implementation exists yet. \
-    Post one comment on the issue explaining, to a lead developer who does not know this codebase, \
+    Post one concise comment on the issue explaining, to a lead developer who does not know this codebase, \
     what is about to be built and why. \
-    Write about decisions, not code. No file paths, no function or class names, no snippets, no diffs. \
-    If you cannot make a point without naming a symbol, describe the behaviour instead. \
-    Cover: the problem in business terms and who feels it; what was decided; where the decision \
+    Write about decisions, describe the behaviour, not code. No file paths, no function or class names, no snippets, no diffs. \
+    Cover: the problem, the solution, terms and who is impacted; what was decided; where the decision \
     departs from the original request and why, since the discussion is allowed to change the ask; \
     the alternatives that were rejected and the reason each lost; the compromises accepted and what \
     they cost; the risk this carries and what would catch it; and what a reader gains when it ships. \
-    Give numbers wherever you can compute them from the code as it stands today - duplicated blocks, \
-    lines this removes or adds, call sites touched, tests affected, branches or moving parts removed. \
-    Compute them, do not estimate silently: state the number and how you counted it, and say \
-    'not computable yet' rather than guess. Do not claim a performance gain unless the change \
-    actually removes work; say plainly when the benefit is maintainability rather than speed. \
-    Be honest about weak justification. If a decision rests on judgement rather than evidence, or \
-    if the change is small relative to its cost, say so - a reader deciding whether to approve this \
-    is better served by a real reservation than by a clean summary. \
-    Change no files, write no code, review nothing, add no labels. The comment is the whole deliverable; \
-    return only a short status here. \
+    Return nothing here, just the consice comment in shor paragraphs or bullet points. \
     Post as the github app: \
     app_id: 4577311 \
     private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
