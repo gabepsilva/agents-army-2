@@ -100,6 +100,10 @@ class TestFromEnv:
     def test_fields_cannot_be_rebound(self) -> None:
         paths = resolve()
         with pytest.raises(AttributeError):
+            # The suppression below is the point of the test: ty rejects
+            # this assignment statically, and the assertion is that the
+            # frozen dataclass rejects it at runtime too. Narrowed to this
+            # one line, in a test; no production code path involved.
             paths.state_file = Path("/elsewhere")  # ty: ignore[invalid-assignment]
 
 
@@ -132,7 +136,10 @@ class TestForTeam:
         assert base.workdir == CWD
 
 
-AMBIENT = ("os.environ", "Path.cwd", "Path.home", "os.getenv")
+# Dotted forms the module uses today, plus the bare names a
+# `from os import environ` would leave behind — a rule that only knew
+# `os.environ` would wave that rewrite straight through.
+AMBIENT = ("os.environ", "os.getenv", "Path.cwd", "Path.home", "environ", "getenv")
 
 
 def _dotted(node: ast.AST) -> str:
@@ -157,20 +164,21 @@ def _same_scope(node: ast.AST) -> Iterator[ast.AST]:
     """
     yield node
     children = (
-        [child for field, child in _header_fields(node)]
+        _header_nodes(node)
         if isinstance(node, NESTED_SCOPES)
-        else list(ast.iter_child_nodes(node))
+        else ast.iter_child_nodes(node)
     )
     for child in children:
         yield from _same_scope(child)
 
 
-def _header_fields(node: ast.AST) -> Iterator[tuple[str, ast.AST]]:
+def _header_nodes(node: ast.AST) -> Iterator[ast.AST]:
+    """The parts of a def/class/lambda that run where it is written."""
     for field in ("decorator_list", "bases", "keywords", "args", "returns"):
         value = getattr(node, field, None)
         for child in value if isinstance(value, list) else [value]:
             if isinstance(child, ast.AST):
-                yield field, child
+                yield child
 
 
 def _reads_ambient_state(node: ast.AST) -> bool:
@@ -195,6 +203,6 @@ class TestModuleScopeIsAmbientFree:
         offenders = [
             ast.unparse(node)
             for node in ast.walk(module)
-            if isinstance(node, ast.Attribute) and _dotted(node) in AMBIENT
+            if isinstance(node, ast.Attribute | ast.Name) and _dotted(node) in AMBIENT
         ]
         assert offenders == []
