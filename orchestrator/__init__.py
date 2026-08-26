@@ -24,10 +24,9 @@ import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NoReturn, TextIO, cast
+from typing import Any, NamedTuple, NoReturn, TextIO, cast
 
 from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
 from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
@@ -291,8 +290,7 @@ def _flock(
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-@dataclass(frozen=True)
-class _AgentRecord:
+class _AgentRecord(NamedTuple):
     """One agent as `orchestrator_state.json` stores it.
 
     The persisted shape lives here and nowhere else: `_reload` and `_persist`
@@ -301,8 +299,13 @@ class _AgentRecord:
     spreads them across itself and its `AgentBackend`, which is why this is a
     projection over both rather than a mirror of `Agent.__init__`.
 
-    Frozen because a record is what a file said (or is about to say), never
-    the object a turn mutates — that stays `Agent`.
+    Immutable because a record is what a file said (or is about to say),
+    never the object a turn mutates — that stays `Agent`. A `NamedTuple`
+    rather than a frozen dataclass for that immutability: mutmut skips a
+    decorated class body wholesale (`mutation/file_mutation.py:292`), so
+    `@dataclass` would take all four methods below — the omission branches
+    and the backend guard among them — out of the mutation gate's reach
+    without anything reporting that it had.
     """
 
     backend: str
