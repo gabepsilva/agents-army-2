@@ -65,24 +65,26 @@ def is_team(path: Path) -> bool:
 def _walk(
     directory: Path,
     child_depth: int,
-    is_hit: Callable[[Path], bool],
-    stop_descending: Callable[[Path], bool],
+    classify: Callable[[Path], tuple[bool, bool]],
 ) -> Iterator[Path]:
     """Shared depth-first walk behind both `discover` and `resolve`.
 
-    Two predicates, passed in separately rather than folded into one: what
-    to *yield* (`is_hit`) and what counts as proof you are standing *inside*
-    a real team root, so its children are that team's own worktree contents
-    rather than further teams (`stop_descending`). `discover` uses the same
-    predicate for both — `is_team`, the marker — since it only ever names a
-    directory once its registry exists. `resolve` uses two different
-    predicates; see its own docstring for why unifying them would be wrong.
+    `classify(candidate)` returns `(is_hit, stop_descending)` together, from
+    one call, rather than two separate predicates: what to *yield*
+    (`is_hit`) and what counts as proof you are standing *inside* a real
+    team root, so its children are that team's own worktree contents rather
+    than further teams (`stop_descending`). One call matters because
+    `discover`'s `classify` answers both from the same underlying check
+    (`is_team`, the marker) — two separate predicate callables would `stat`
+    the marker file twice per candidate for no reason. `resolve`'s
+    `classify` answers them from two genuinely different checks; see its own
+    docstring for why unifying *those* would be wrong.
 
     `directory`'s children are checked at `child_depth`, each with a `stat`
-    (`is_hit`/`stop_descending`) never a `scandir`. Candidates below
-    `SEARCH_DEPTH` are `stat`ed but never `scandir`ed, so nothing past that
-    depth is touched. `follow_symlinks=False`: a symlink is never treated as
-    a directory to scan, so a symlinked `worktree/` pointing back at an
+    (inside `classify`), never a `scandir`. Candidates below `SEARCH_DEPTH`
+    are `stat`ed but never `scandir`ed, so nothing past that depth is
+    touched. `follow_symlinks=False`: a symlink is never treated as a
+    directory to scan, so a symlinked `worktree/` pointing back at an
     ancestor can't turn into a loop — it is simply never entered.
     """
     try:
@@ -94,10 +96,16 @@ def _walk(
         if not entry.is_dir(follow_symlinks=False):
             continue
         candidate = Path(entry.path)
-        if is_hit(candidate):
+        is_hit, stop_descending = classify(candidate)
+        if is_hit:
             yield candidate
-        if not stop_descending(candidate) and child_depth < SEARCH_DEPTH:
-            yield from _walk(candidate, child_depth + 1, is_hit, stop_descending)
+        if not stop_descending and child_depth < SEARCH_DEPTH:
+            yield from _walk(candidate, child_depth + 1, classify)
+
+
+def _classify_team(path: Path) -> tuple[bool, bool]:
+    hit = is_team(path)
+    return hit, hit
 
 
 def discover(group_root: Path) -> list[Team]:
@@ -108,7 +116,7 @@ def discover(group_root: Path) -> list[Team]:
             name=team_dir.relative_to(group_root).as_posix(),
             has_worktree=(team_dir / "worktree").is_dir(),
         )
-        for team_dir in _walk(group_root, 1, is_team, is_team)
+        for team_dir in _walk(group_root, 1, _classify_team)
     ]
     return sorted(teams, key=lambda team: team.name)
 
@@ -125,6 +133,10 @@ def is_candidate(path: Path) -> bool:
     file inside it.
     """
     return (path / "agents").is_dir() or (path / "worktree").is_dir()
+
+
+def _classify_candidate(path: Path) -> tuple[bool, bool]:
+    return is_candidate(path), is_team(path)
 
 
 def resolve(root: Path, name: str) -> list[Path]:
@@ -150,7 +162,7 @@ def resolve(root: Path, name: str) -> list[Path]:
     name_parts = tuple(name.split("/"))
     matches = [
         candidate
-        for candidate in _walk(root, 1, is_candidate, is_team)
+        for candidate in _walk(root, 1, _classify_candidate)
         if candidate.relative_to(root).parts[-len(name_parts) :] == name_parts
     ]
     return sorted(matches, key=lambda path: path.relative_to(root).as_posix())
