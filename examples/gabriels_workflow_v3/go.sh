@@ -143,7 +143,7 @@ git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" fetch origin --quiet
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" checkout -q -B "$pr_branch" "origin/$pr_branch" || exit 5
 
-aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
+aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m opus -e low \
     -s implement,tdd,code-review-and-quality \
     -p "\
     You are a lead software engineer. \
