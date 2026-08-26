@@ -178,9 +178,10 @@ class Agent:
     ) -> None:
         self.name = name
         self.backend = backend
-        # The directory this agent's turns run in; see the `workdir` property
-        # for what `None` means.
-        self._workdir = workdir
+        # Where this agent's turns run. Unset means "wherever the module
+        # global points now", which is what a bare `Agent(name, backend)`
+        # gets; the orchestrator that builds an agent passes its own.
+        self.workdir = WORKDIR if workdir is None else workdir
         self.session_id: str | None = None
         self.created_at: str | None = None
         self.last_turn_at: str | None = None
@@ -188,17 +189,6 @@ class Agent:
         # per attempt by design (see its own docstring), so a schema-repair
         # retry inside `_validated_turn` increments this once per attempt.
         self.turns: int | None = None
-
-    @property
-    def workdir(self) -> Path:
-        """Where this agent's turns run.
-
-        Unset means "wherever the module global points when the turn starts",
-        which is what a bare `Agent(name, backend)` gets: resolving lazily
-        keeps the `orchestrator.WORKDIR` seam working for a caller that
-        rebinds it after building the agent.
-        """
-        return WORKDIR if self._workdir is None else self._workdir
 
     def talk(
         self,
@@ -450,6 +440,9 @@ class Orchestrator:
         state_file: Path | None = None,
     ) -> None:
         self._runtime_paths = runtime_paths
+        # Resolved once here, and the authority from now on: an explicit
+        # `state_file` deliberately points somewhere `runtime_paths` does
+        # not, so nothing downstream reads `runtime_paths.state_file`.
         self.state_file = (
             self.runtime_paths.state_file if state_file is None else state_file
         )
@@ -782,9 +775,10 @@ class Orchestrator:
             return True
 
     def _reload(self) -> None:
+        workdir = self.runtime_paths.workdir
         self.agents = {
             name: _AgentRecord.from_entry(name, entry, self.state_file).into_agent(
-                name, self.runtime_paths.workdir
+                name, workdir
             )
             for name, entry in self._load_state().items()
         }

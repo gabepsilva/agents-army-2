@@ -19,23 +19,6 @@ from backends.registry import register_backend
 from orchestrator import paths, teams
 
 
-@pytest.fixture(autouse=True)
-def _protect_module_globals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore `ROOT`/`TEAMS_DIR` after every test.
-
-    Nothing rebinds them any more — `--team` resolves its paths into a
-    returned `RuntimePaths` instead. These two are here because most tests
-    in this file point them at a `tmp_path` with a bare
-    `monkeypatch.setattr` of their own and the machine's real
-    `$AGENTS_ARMY_ROOT` must not be what a test that forgets one walks;
-    registering the current values makes that restoration unconditional.
-    `STATE_FILE`/`WORKDIR`/`SKILLS_DIR` no longer need it: a team run leaves
-    them alone (see `test_a_team_run_leaves_the_module_path_globals_alone`).
-    """
-    monkeypatch.setattr(orchestrator, "TEAMS_DIR", orchestrator.TEAMS_DIR)
-    monkeypatch.setattr(orchestrator, "ROOT", orchestrator.ROOT)
-
-
 def _make_recording_backend(sink: list[Path]) -> type[AgentBackend]:
     """A backend whose turns record the cwd they ran in and echo the prompt.
 
@@ -298,6 +281,7 @@ def test_state_file_and_skills_dir_resolve_under_the_team_root(
     assert resolved.workdir == worktree
     assert resolved.skills_dir == worktree / "SKILLS"
 
+    # And the resolved registry is the one a real run actually writes.
     orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
 
     assert resolved.state_file.exists()
