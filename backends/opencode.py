@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
-import time
 from pathlib import Path
 
 from backends.base import (
@@ -14,8 +12,8 @@ from backends.base import (
     OutputSchema,
     TurnError,
     TurnResult,
-    describe_command,
     json_objects,
+    run_cli_turn,
     structured_reply,
 )
 
@@ -133,32 +131,8 @@ class OpenCodeBackend(AgentBackend):
         if session_id:
             args += ["--session", session_id]
 
-        log.debug(
-            "opencode turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
-            cwd,
-            bool(session_id),
-            len(prompt),
-            timeout,
-        )
-        log.debug("opencode turn: invoking %s", describe_command(args, prompt))
-        started = time.monotonic()
-        proc = subprocess.run(
-            args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            # OpenCode joins positional arguments before sending them to the
-            # model. Omitting that argument makes its no-value fallback read
-            # stdin verbatim, preserving spaces, quotes, and newlines.
-            input=prompt,
-        )
-        log.debug(
-            "opencode turn: exited %d after %.1fs with %d chars of stdout",
-            proc.returncode,
-            time.monotonic() - started,
-            len(proc.stdout),
+        proc = run_cli_turn(
+            self.name, args, prompt, session_id, cwd, timeout, prompt_on_stdin=True
         )
         events = _events(proc.stdout)
         if proc.returncode != 0:

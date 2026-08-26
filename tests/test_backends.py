@@ -30,6 +30,7 @@ from backends.base import (
     describe_command,
     json_objects,
     reply_text,
+    run_cli_turn,
     stdout_for_error,
     structured_reply,
 )
@@ -360,6 +361,103 @@ DIALECT_SCHEMA = OutputSchema(
     ),
     path=Path("/schemas/reply.json"),
 )
+
+
+class TestRunCliTurn:
+    """The one place every backend hands its argv to the operating system."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout="out", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        return calls
+
+    def test_default_arm_closes_stdin_and_returns_the_completed_process(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._record(monkeypatch)
+
+        proc = run_cli_turn(
+            "demo",
+            ["demo", "-p", "hello"],
+            "hello",
+            None,
+            tmp_path,
+            DEFAULT_TURN_TIMEOUT,
+        )
+
+        assert calls[0][0] == ["demo", "-p", "hello"]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
+        assert "input" not in calls[0][1]
+        assert proc.returncode == 0
+        assert proc.stdout == "out"
+
+    def test_stdin_prompt_arm_sends_the_prompt_and_leaves_stdin_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._record(monkeypatch)
+
+        run_cli_turn(
+            "demo",
+            ["demo"],
+            "hello",
+            None,
+            tmp_path,
+            DEFAULT_TURN_TIMEOUT,
+            prompt_on_stdin=True,
+        )
+
+        _assert_subprocess_kwargs(
+            calls[0][1], tmp_path, expected_stdin=None, expected_input="hello"
+        )
+        assert "stdin" not in calls[0][1]
+
+    def test_logs_name_cwd_resume_and_the_redacted_command(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        self._record(monkeypatch)
+
+        with caplog.at_level("DEBUG"):
+            run_cli_turn("demo", ["demo", "-p", "hello"], "hello", "s1", tmp_path, 42)
+
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"demo turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=42s"
+        )
+        assert messages[1] == "demo turn: invoking demo -p <prompt:5chars>"
+        assert (
+            _reported_seconds(
+                messages[2],
+                r"demo turn: exited 0 after (\d+\.\d)s with 3 chars of stdout",
+            )
+            < 60
+        )
+
+    def test_a_fresh_session_reports_resume_false_and_the_real_exit_code(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setattr(subprocess, "run", _completed(3, "abcd"))
+
+        with caplog.at_level("DEBUG"):
+            proc = run_cli_turn("demo", ["demo"], "", None, tmp_path, 7)
+
+        assert proc.returncode == 3
+        messages = _messages(caplog)
+        assert messages[0] == (
+            f"demo turn: cwd={tmp_path} resume=False prompt_chars=0 timeout=7s"
+        )
+        assert messages[2].startswith("demo turn: exited 3 after ")
+        assert messages[2].endswith("s with 4 chars of stdout")
 
 
 class TestAgentBackendInterface:
@@ -1762,7 +1860,7 @@ class TestOpenCodeRunTurn:
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with caplog.at_level("DEBUG", logger="backends.opencode"):
+        with caplog.at_level("DEBUG"):
             result = backend.run_turn(prompt, None, tmp_path)
 
         assert calls[0][0] == [
@@ -1829,7 +1927,7 @@ class TestOpenCodeRunTurn:
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with caplog.at_level("DEBUG", logger="backends.opencode"):
+        with caplog.at_level("DEBUG"):
             assert backend.run_turn("again", "s1", tmp_path).session_id == "s1"
         assert _messages(caplog)[0] == (
             f"opencode turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"

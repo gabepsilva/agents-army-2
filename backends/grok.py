@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
-import time
 from pathlib import Path
 
 from backends.base import (
@@ -13,9 +11,9 @@ from backends.base import (
     OutputSchema,
     TurnError,
     TurnResult,
-    describe_command,
     json_objects,
     reply_text,
+    run_cli_turn,
     stdout_for_error,
     structured_reply,
 )
@@ -128,33 +126,7 @@ class GrokBackend(AgentBackend):
             args += ["--resume", session_id]
         args.append(f"{PROMPT_FLAG}={prompt}")
 
-        log.debug(
-            "grok turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
-            cwd,
-            bool(session_id),
-            len(prompt),
-            timeout,
-        )
-        log.debug("grok turn: invoking %s", describe_command(args, prompt))
-        started = time.monotonic()
-        proc = subprocess.run(
-            args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            # A CLI reading a non-tty stdin blocks until it is killed, so a run
-            # from cron, CI or any host script that is not a terminal would
-            # spend the whole timeout and return nothing.
-            stdin=subprocess.DEVNULL,
-        )
-        log.debug(
-            "grok turn: exited %d after %.1fs with %d chars of stdout",
-            proc.returncode,
-            time.monotonic() - started,
-            len(proc.stdout),
-        )
+        proc = run_cli_turn(self.name, args, prompt, session_id, cwd, timeout)
         if proc.returncode != 0:
             raise GrokTurnError(
                 _failed_turn_message(proc.returncode, proc.stdout, proc.stderr)
