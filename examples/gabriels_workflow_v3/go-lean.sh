@@ -99,7 +99,38 @@ fi
 issue_is_blocked && exit 1
 issue_is_converged || exit 1
 
-echo "Issue converged. Opening draft PR."
+echo "Issue converged. Writing the decision brief."
+
+# The decision record, in the language of a lead developer, before any code
+# exists. The agents decide; this is where a human can read what they decided
+# and disagree while disagreeing is still cheap.
+aarmy talk doku --team "$team" -v -b claude -m opus -e medium \
+    -p "Read the issue '$issue_url' and every comment on it, in order. That thread is the decision \
+    record: the opening request, what the author proposed, what the reviewer challenged, and what was \
+    settled. Read the current code only to ground your numbers. No implementation exists yet. \
+    Post one comment on the issue explaining, to a lead developer who does not know this codebase, \
+    what is about to be built and why. \
+    Write about decisions, not code. No file paths, no function or class names, no snippets, no diffs. \
+    If you cannot make a point without naming a symbol, describe the behaviour instead. \
+    Cover: the problem in business terms and who feels it; what was decided; where the decision \
+    departs from the original request and why, since the discussion is allowed to change the ask; \
+    the alternatives that were rejected and the reason each lost; the compromises accepted and what \
+    they cost; the risk this carries and what would catch it; and what a reader gains when it ships. \
+    Give numbers wherever you can compute them from the code as it stands today - duplicated blocks, \
+    lines this removes or adds, call sites touched, tests affected, branches or moving parts removed. \
+    Compute them, do not estimate silently: state the number and how you counted it, and say \
+    'not computable yet' rather than guess. Do not claim a performance gain unless the change \
+    actually removes work; say plainly when the benefit is maintainability rather than speed. \
+    Be honest about weak justification. If a decision rests on judgement rather than evidence, or \
+    if the change is small relative to its cost, say so - a reader deciding whether to approve this \
+    is better served by a real reservation than by a clean summary. \
+    Change no files, write no code, review nothing, add no labels. The comment is the whole deliverable; \
+    return only a short status here. \
+    Post as the github app: \
+    app_id: 4577311 \
+    private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
+
+echo "Opening draft PR."
 
 git -C "$worktree" reset -q --hard
 git -C "$worktree" clean -qfd
@@ -243,12 +274,20 @@ done
 gh pr view "$pr_url" --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' || exit 3
 
 aarmy talk doku --team "$team" -v -b claude -m opus -e low \
-    -p "Write one concise user-facing comment for '$pr_url' from its description and diff. \
-    Explain what changes, how to use it with a real command when applicable, required migration, and \
-    surprises. If it is invisible to users, say so in one line. Every claim must come from the diff. \
-    Change no files and perform no review. Post as the github app: \
+    -p "You are the documentation writer for the PR '$pr_url'. \
+    Read its description and its diff, and read README.md and docs/ to see how the project describes itself today. \
+    Post one comment on the PR telling a user of this project what this version changes for them. \
+    Write plain, non-technical English: short sentences, no jargon, no file paths, no internal design talk. \
+    Cover what is new or different, how to use it with a copy-pasteable command and a real example, \
+    what they must change on their side to keep working - renamed flags, new defaults, removed behaviour - \
+    and anything else that would surprise them. \
+    Every claim comes from the diff. Do not describe behaviour you did not see in the code, \
+    and if the change is invisible to users say so in one line instead of inventing detail. \
+    Change no files, review nothing, approve nothing - the comment is the whole deliverable. \
+    Post as the github app: \
     app_id: 4577311 \
     private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
+
 
 aarmy delete --team "$team"
 git worktree remove --force "$worktree"
