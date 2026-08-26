@@ -3544,11 +3544,13 @@ class TestCLI:
         assert captured.out == ""
 
     @pytest.mark.parametrize(
-        "incidental", [RuntimeError("dict changed size"), ValueError("bad literal")]
+        ("incidental", "message"),
+        [(RuntimeError, "dict changed size"), (ValueError, "bad literal")],
     )
     def test_an_incidental_builtin_from_a_backend_still_gets_a_traceback(
         self,
-        incidental: Exception,
+        incidental: type[Exception],
+        message: str,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
@@ -3573,13 +3575,13 @@ class TestCLI:
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
             ) -> TurnResult:
-                raise incidental
+                raise incidental(message)
 
         register_backend("incidental", IncidentalBackend)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("i", "incidental")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
-        with pytest.raises(type(incidental), match=str(incidental)):
+        with pytest.raises(incidental, match=message):
             main(["talk", "i", "-p", "hi"])
         assert capsys.readouterr().err == ""
 

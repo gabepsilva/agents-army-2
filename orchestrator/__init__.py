@@ -1625,7 +1625,11 @@ def main(argv: list[str] | None = None) -> None:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)
         print(message, file=sys.stderr)
-        code = next(code for errors, code in _CLI_EXIT_CODES if isinstance(exc, errors))
+        code = next(
+            exit_code
+            for errors, exit_code in _CLI_EXIT_CODES
+            if isinstance(exc, errors)
+        )
         raise SystemExit(code) from None
 
 
