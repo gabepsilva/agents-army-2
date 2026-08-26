@@ -8,7 +8,7 @@
 | `AGENTS_ARMY_HOME` | current working directory | base folder for state (when explicitly set) and, unless overridden, skills |
 | `AGENTS_ARMY_STATE_FILE` | see the ladder below | the registry file's exact path |
 | `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS` | the skill catalog root that `--skill` and `list skills` search |
-| `AGENTS_ARMY_TEAMS_DIR` | **no default** | root under which `--team NAME` resolves `$AGENTS_ARMY_TEAMS_DIR/NAME/{agents,worktree}` — see [Teams](#teams) |
+| `AGENTS_ARMY_TEAMS_DIR` | **no default** | root under which `--team NAME` resolves `$AGENTS_ARMY_TEAMS_DIR/NAME/{agents,worktree}`; when unset, `--team NAME` instead resolves by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 `AGENTS_ARMY_STATE_FILE` resolves in this order: an explicit
 `AGENTS_ARMY_STATE_FILE` wins outright; otherwise an explicitly-set
@@ -45,17 +45,31 @@ repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-
 export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/$repo/gdw-v3"
 ```
 
+Exporting it is not required, though. When it is unset, `--team NAME`
+resolves by walking `$AGENTS_ARMY_ROOT` instead — the same walk `list teams`
+uses (see [`list teams`](#list-teams) below): a directory with an `agents/`
+or `worktree/` subdirectory is a candidate, `NAME` may be bare (`issue-97`)
+or a `/`-qualified tail of the path `list teams` prints
+(`agents-army-2/gdw-v3/issue-97`), one match resolves, zero matches is an
+error naming `$AGENTS_ARMY_ROOT`, and two or more is an error listing every
+candidate's full path rather than guessing. A `/`-qualified name is rejected
+outright while `AGENTS_ARMY_TEAMS_DIR` is set, since it is relative to
+`$AGENTS_ARMY_ROOT` and joining it under `AGENTS_ARMY_TEAMS_DIR` would double
+the path instead of resolving it.
+
 `--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
 `AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead) —
 `AGENTS_ARMY_ROOT` is not on that list, since it is the teamless registry's
-own fallback and stays compatible with `--team`. `create`/`talk`/`list`/
-`delete NAME --team` all require `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` to
-already exist — the orchestrator never runs `git` itself, so the caller
-creates it with `git worktree add`. `delete --team NAME` with no agent name
-tears the whole team down: it removes `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/`
-and nothing else, leaving `worktree/` (and its git metadata) untouched. See
-the [README's Teams section](../README.md#teams) for the full layout, the
-locking model, and worked examples.
+own fallback and stays compatible with `--team`. `create`/`talk --team`
+require the team's `worktree` to already exist, since they launch a backend
+into it — the orchestrator never runs `git` itself, so the caller creates it
+with `git worktree add`. `list agents`/`delete NAME --team` only read and
+edit the registry, so they work with `worktree` missing or not yet created.
+`delete --team NAME` with no agent name tears the whole team down: it
+removes the team's `agents/` directory and nothing else, leaving `worktree/`
+(and its git metadata) untouched. See the [README's Teams
+section](../README.md#teams) for the full layout, the locking model, and
+worked examples.
 
 ### `list teams`
 

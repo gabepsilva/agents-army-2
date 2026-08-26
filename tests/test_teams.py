@@ -16,6 +16,7 @@ import pytest
 import orchestrator
 from backends.base import AgentBackend, TurnResult
 from backends.registry import register_backend
+from orchestrator import teams
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +138,116 @@ def _make_team(
 
 
 # ---------------------------------------------------------------------------
+# teams.resolve — unit tests, no CLI coupling
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_single_hit_from_an_unrelated_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    team_dir = _make_team(root, "t1", agents={"dev": "claude"})
+
+    assert teams.resolve(root, "t1") == [team_dir]
+
+
+def test_resolve_finds_a_worktree_only_team_with_no_registry(tmp_path: Path) -> None:
+    """The `go.sh` first-command case: `git worktree add` has run but no
+    orchestrator command has created the registry yet, so `agents/` doesn't
+    exist at all."""
+    root = tmp_path / "root"
+    team_dir = root / "repo" / "wf" / "t1"
+    (team_dir / "worktree").mkdir(parents=True)
+
+    assert teams.resolve(root, "t1") == [team_dir]
+
+
+def test_resolve_finds_a_registry_only_orphan(tmp_path: Path) -> None:
+    """`delete --team`'s own teardown residue: `worktree/` removed,
+    `agents/` (with its marker) still there."""
+    root = tmp_path / "root"
+    team_dir = _make_team(root, "t1", agents={"dev": "claude"}, worktree=False)
+
+    assert teams.resolve(root, "t1") == [team_dir]
+
+
+def test_resolve_finds_an_agents_dir_without_the_marker_file(tmp_path: Path) -> None:
+    """The `_flock` residue: `path.parent.mkdir(...)` runs before the lock
+    file is opened, so a command that takes the registry lock and fails
+    before persisting leaves `agents/` behind with no
+    `orchestrator_state.json` inside it. `is_team` (the marker) would miss
+    this; the looser candidate rule (`agents/`-the-directory) must not."""
+    root = tmp_path / "root"
+    team_dir = root / "t1"
+    (team_dir / "agents").mkdir(parents=True)
+
+    assert teams.resolve(root, "t1") == [team_dir]
+    assert not teams.is_team(team_dir)
+
+
+def test_resolve_shadow_regression_stray_agents_dir_does_not_hide_a_marked_team(
+    tmp_path: Path,
+) -> None:
+    """The candidate predicate (what `resolve` may name) and the
+    never-descend predicate (proof you are standing inside a real team
+    root) are deliberately different predicates. A stray, unmarked
+    `agents/` above a real, marked team must not stop the walk from
+    reaching that team — only a directory that actually has
+    `agents/orchestrator_state.json` may swallow its own children.
+
+    This test fails if never-descend is keyed on the candidate predicate
+    instead of `is_team` — that is the point of writing it: widening
+    never-descend to match the looser candidate rule would make this one
+    stray directory hide every marked team beneath it, from every name,
+    reintroducing the exact defect (`list teams` sees a team, `--team`
+    can't reach it) that this PR exists to fix.
+    """
+    root = tmp_path / "root"
+    (root / "repoA" / "agents").mkdir(parents=True)  # stray, unmarked
+    team_dir = _make_team(root, "repoA", "wf", "issue-97", agents={"dev": "claude"})
+
+    assert teams.resolve(root, "issue-97") == [team_dir]
+
+
+def test_resolve_zero_hit_message_scenario_no_candidate_at_all(tmp_path: Path) -> None:
+    """A directory with neither `agents/` nor `worktree/` (just leftover
+    `logs/`, `.lock`, `spectacle.prompt`) is not a candidate."""
+    root = tmp_path / "root"
+    team_dir = root / "t1"
+    team_dir.mkdir(parents=True)
+    (team_dir / "logs").mkdir()
+    (team_dir / ".lock").touch()
+    (team_dir / "spectacle.prompt").touch()
+
+    assert teams.resolve(root, "t1") == []
+
+
+def test_resolve_ambiguity_across_two_repo_prefixes(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    team_a = _make_team(root, "repo-a", "wf", "issue-97", agents={"dev": "claude"})
+    team_b = _make_team(root, "repo-b", "wf", "issue-97", agents={"dev": "codex"})
+
+    assert teams.resolve(root, "issue-97") == [team_a, team_b]
+
+
+def test_resolve_qualified_name_selects_one_of_two_ambiguous_teams(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    team_a = _make_team(root, "repo-a", "wf", "issue-97", agents={"dev": "claude"})
+    _make_team(root, "repo-b", "wf", "issue-97", agents={"dev": "codex"})
+
+    assert teams.resolve(root, "repo-a/wf/issue-97") == [team_a]
+
+
+def test_resolve_matches_whole_segments_not_a_string_suffix(tmp_path: Path) -> None:
+    """'97' must not match 'issue-97' — segment-wise matching, not
+    `str.endswith()`."""
+    root = tmp_path / "root"
+    _make_team(root, "issue-97", agents={"dev": "claude"})
+
+    assert teams.resolve(root, "97") == []
+
+
+# ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
 
@@ -213,24 +324,27 @@ def test_teamless_behavior_is_unaffected_by_team_support(
 # ---------------------------------------------------------------------------
 
 
-def test_v1_missing_teams_dir_env_exits_2_and_names_the_variable(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_v1_teams_dir_unset_resolves_under_root_instead_of_erroring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The old hard failure is gone: with AGENTS_ARMY_TEAMS_DIR unset,
+    --team now resolves the team under AGENTS_ARMY_ROOT instead of refusing
+    to run at all."""
+    root = tmp_path / "root"
+    _make_team(root, "t1", agents={"dev": "claude"})
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
 
-    with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "t1"])
+    orchestrator.main(["list", "agents", "--team", "t1"])
 
-    assert excinfo.value.code == 2
-    err = capsys.readouterr().err
-    assert (
-        "orchestrator list: error: --team requires AGENTS_ARMY_TEAMS_DIR to "
-        "be set; export it first, e.g.:\n"
-        '  export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/<repo>/<workflow>"\n' in err
-    )
+    out = capsys.readouterr().out
+    assert "dev" in out
+    assert "backend=claude" in out
 
 
-@pytest.mark.parametrize("bad_name", ["a/b", "..", ".", "", "a b", "a$b"])
+@pytest.mark.parametrize(
+    "bad_name", ["..", ".", "", "a b", "a$b", "a/../b", "a/", "/a", "a//b"]
+)
 def test_v2_invalid_team_name_exits_2_and_creates_nothing(
     bad_name: str,
     tmp_path: Path,
@@ -247,7 +361,36 @@ def test_v2_invalid_team_name_exits_2_and_creates_nothing(
     assert not teams_dir.exists()
     assert (
         f"orchestrator list: error: invalid team name {bad_name!r}: must "
-        "match '[-_.A-Za-z0-9]+' and not be '.' or '..'\n" in capsys.readouterr().err
+        "match '[-_.A-Za-z0-9]+(?:/[-_.A-Za-z0-9]+)*' segment-by-segment, "
+        "and no segment may be '.' or '..'\n" in capsys.readouterr().err
+    )
+
+
+def test_v2_qualified_name_rejected_while_teams_dir_is_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A `/`-qualified name is root-relative by construction; TEAMS_DIR
+    supplies its own namespace, so joining one under it would double-join
+    instead of resolving — reject it with the recovery instruction rather
+    than letting it silently miss."""
+    teams_dir = tmp_path / "teams"
+    root = tmp_path / "root"
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["list", "agents", "--team", "agents-army-2/gdw-v3/issue-97"])
+
+    assert excinfo.value.code == 2
+    assert not teams_dir.exists()
+    assert (
+        "orchestrator list: error: invalid team name "
+        "'agents-army-2/gdw-v3/issue-97': a qualified name is relative to "
+        "$AGENTS_ARMY_ROOT and cannot be used while AGENTS_ARMY_TEAMS_DIR "
+        f"is set. Use the bare name 'issue-97', or unset AGENTS_ARMY_TEAMS_DIR "
+        f"to resolve under {root}.\n" in capsys.readouterr().err
     )
 
 
@@ -293,11 +436,13 @@ def test_v4_team_with_explicit_home_exits_2_and_creates_nothing(
     )
 
 
-def test_v5_missing_worktree_exits_2_for_create_talk_list_and_delete_by_name(
+def test_v5_missing_worktree_exits_2_for_create_and_talk_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Narrowed gate: only create/talk launch a backend and need WORKDIR to
+    exist. list agents/delete NAME just read and edit a JSON file."""
     teams_dir = tmp_path / "teams"
     worktree = teams_dir / "t1" / "worktree"
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
@@ -305,8 +450,6 @@ def test_v5_missing_worktree_exits_2_for_create_talk_list_and_delete_by_name(
     for argv, prog in (
         (["create", "a", "--team", "t1", "-b", "claude"], "create"),
         (["talk", "a", "--team", "t1", "-b", "claude", "-p", "hi"], "talk"),
-        (["list", "agents", "--team", "t1"], "list"),
-        (["delete", "a", "--team", "t1"], "delete"),
     ):
         with pytest.raises(SystemExit) as excinfo:
             orchestrator.main(argv)
@@ -320,14 +463,45 @@ def test_v5_missing_worktree_exits_2_for_create_talk_list_and_delete_by_name(
     assert not teams_dir.exists()
 
 
+def test_list_agents_team_succeeds_with_no_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The narrowed worktree gate (§4): list agents --team is read-only and
+    must work on the orphan state `delete --team` deliberately leaves
+    behind — registry present, worktree gone."""
+    teams_dir = tmp_path / "teams"
+    _make_team(teams_dir, "t1", agents={"dev": "claude"}, worktree=False)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["list", "agents", "--team", "t1"])
+
+    out = capsys.readouterr().out
+    assert "dev" in out
+    assert "backend=claude" in out
+
+
+def test_delete_by_name_team_succeeds_with_no_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    teams_dir = tmp_path / "teams"
+    _make_team(teams_dir, "t1", agents={"dev": "claude"}, worktree=False)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["delete", "dev", "--team", "t1"])
+
+    state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
+    assert "dev" not in state
+
+
 def test_team_help_text_names_the_layout(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         orchestrator.main(["talk", "--help"])
     assert (
-        "  --team TEAM           run against\n"
-        "                        $AGENTS_ARMY_TEAMS_DIR/<team>/{agents,worktree}\n"
-        "                        instead of the teamless layout\n"
-        in capsys.readouterr().out
+        "  --team TEAM           run against team <team>'s {agents,worktree} "
+        "instead of\n"
+        "                        the teamless layout; found under\n"
+        "                        $AGENTS_ARMY_TEAMS_DIR if set, otherwise resolved\n"
+        "                        under $AGENTS_ARMY_ROOT\n" in capsys.readouterr().out
     )
 
 
@@ -347,6 +521,131 @@ def test_v5_does_not_apply_to_teardown(
     orchestrator.main(["delete", "--team", "t1"])
 
     assert not (teams_dir / "t1" / "agents").exists()
+
+
+# ---------------------------------------------------------------------------
+# The --team resolution ladder (AGENTS_ARMY_TEAMS_DIR unset): CLI behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_zero_hits_under_root_exits_2_with_recovery_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["list", "agents", "--team", "nope"])
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert (
+        f"orchestrator list: error: no team named 'nope' under {root}; a "
+        "team is a directory with an agents/ or worktree/ subdirectory, "
+        "e.g.:\n"
+        f"  git worktree add -B nope {root}/<repo>/<workflow>/nope/worktree ...\n"
+        "if the team lives outside $AGENTS_ARMY_ROOT, export "
+        "AGENTS_ARMY_TEAMS_DIR to point at its parent\n" in err
+    )
+
+
+def test_zero_hits_exits_2_for_teardown_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unlike the TEAMS_DIR-set not-found case (exit 1, a missing
+    resource), zero hits under the AGENTS_ARMY_ROOT walk is a usage
+    problem — bad name, wrong environment, team lives elsewhere — and stays
+    exit 2 even for teardown."""
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["delete", "--team", "nope"])
+
+    assert excinfo.value.code == 2
+    assert f"no team named 'nope' under {root}" in capsys.readouterr().err
+
+
+def test_ambiguity_under_root_exits_2_and_lists_full_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    team_a = _make_team(root, "repo-a", "wf", "issue-97", agents={"dev": "claude"})
+    team_b = _make_team(root, "repo-b", "wf", "issue-97", agents={"dev": "codex"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["list", "agents", "--team", "issue-97"])
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert (
+        "orchestrator list: error: team name 'issue-97' is ambiguous under "
+        f"{root}:\n"
+        f"  {team_a}\n"
+        f"  {team_b}\n"
+        "re-run with a qualified name, e.g. --team repo-a/wf/issue-97\n" in err
+    )
+
+
+def test_qualified_name_resolves_one_of_two_ambiguous_teams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "root"
+    _make_team(root, "repo-a", "wf", "issue-97", agents={"dev": "claude"})
+    _make_team(root, "repo-b", "wf", "issue-97", agents={"dev": "codex"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "agents", "--team", "repo-a/wf/issue-97"])
+
+    out = capsys.readouterr().out
+    assert "dev" in out
+    assert "backend=claude" in out
+
+
+def test_teams_dir_set_short_circuits_the_root_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AGENTS_ARMY_TEAMS_DIR set must short-circuit straight to
+    TEAMS_DIR/NAME, with no walk and no fallback — even when a team of the
+    same name is perfectly resolvable under AGENTS_ARMY_ROOT."""
+    root = tmp_path / "root"
+    _make_team(root, "t1", agents={"dev": "claude"})
+    teams_dir = tmp_path / "teams"  # no t1 here
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["create", "a", "--team", "t1", "-b", "claude"])
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert str(teams_dir / "t1" / "worktree") in err
+    assert str(root) not in err
+
+
+def test_delete_team_tears_down_an_agents_dir_without_the_marker_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The `_flock` residue (an `agents/` directory with no
+    `orchestrator_state.json` inside it) must resolve under AGENTS_ARMY_ROOT
+    and be torn down, the same as a fully-formed team."""
+    root = tmp_path / "root"
+    agents_dir = root / "t1" / "agents"
+    agents_dir.mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["delete", "--team", "t1"])
+
+    assert capsys.readouterr().out == "deleted team 't1'\n"
+    assert not agents_dir.exists()
 
 
 # ---------------------------------------------------------------------------
