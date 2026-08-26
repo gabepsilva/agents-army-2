@@ -24,6 +24,8 @@ worktree="$AGENTS_ARMY_TEAMS_DIR/$team/worktree"
 log_dir="$AGENTS_ARMY_TEAMS_DIR/$team/logs"
 mkdir -p "$log_dir"
 
+echo "Issue $issue_number in $repo. Agent output goes to $log_dir"
+
 issue_labels() {
     gh issue view "$issue_url" --json labels --jq '.labels[].name'
 }
@@ -39,12 +41,14 @@ issue_is_converged() {
         grep -qx 'spectacle-is-happy' <<< "$labels"
 }
 
+echo "Setting up the worktree at $worktree"
 git fetch origin --quiet
 git worktree prune
 git worktree add --detach "$worktree" origin/master
 
 # Normal path: one compact proposal and one adversarial decision. The author
 # gets one rebuttal and the reviewer one final decision only if they disagree.
+echo "Owen: writing the proposal on the issue."
 aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     -p "Look at issue '$issue_url' as its Issue Author and inspect the relevant code. \
     Write one compact proposal in the GitHub issue: the behavior to change, affected areas, \
@@ -60,6 +64,7 @@ aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     app_id: 4578638 \
     private_key: ~/keys/owen-project-owner.2026-08-13.private-key.pem" &> "$log_dir/owen.log"
 
+echo "Spectacle: reviewing the proposal."
 aarmy talk spectacle --team "$team" -b claude -m opus -e low -v \
     -p "Review issue '$issue_url' as the final Issue Reviewer. Read the issue and relevant code. \
     Challenge only load-bearing claims that could change scope, safety, implementation, or verification. \
@@ -73,9 +78,10 @@ aarmy talk spectacle --team "$team" -b claude -m opus -e low -v \
     app_id: 4287312 \
     private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &> "$log_dir/spectacle.log"
 
-issue_is_blocked && exit 1
+issue_is_blocked && { echo "Blocked on the issue. Stopping." >&2; exit 1; }
 
 if ! issue_is_converged; then
+    echo "Not converged. Owen: one rebuttal."
     aarmy talk owen --team "$team" -v \
         -p "This is your only rebuttal. Read the reviewer's blocking disagreements on '$issue_url'. \
         Answer only those points with re-checkable evidence and state your final position. \
@@ -84,8 +90,9 @@ if ! issue_is_converged; then
         external evidence is genuinely missing. Set it with 'gh issue edit'; naming a label in a \
         comment does not set it. Post in the issue; return only a short status here." &>> "$log_dir/owen.log"
 
-    issue_is_blocked && exit 1
+    issue_is_blocked && { echo "Blocked on the issue. Stopping." >&2; exit 1; }
 
+    echo "Spectacle: final decision."
     aarmy talk spectacle --team "$team" -v \
         -p "Make the final decision on '$issue_url'. Read the author's rebuttal and resolve every \
         remaining point from the available evidence. Ask no further questions and offer no options. \
@@ -96,10 +103,10 @@ if ! issue_is_converged; then
         &>> "$log_dir/spectacle.log"
 fi
 
-issue_is_blocked && exit 1
-issue_is_converged || exit 1
+issue_is_blocked && { echo "Blocked on the issue. Stopping." >&2; exit 1; }
+issue_is_converged || { echo "Issue did not converge. Stopping." >&2; exit 1; }
 
-echo "Issue converged. Writing the decision brief."
+echo "Issue converged. Doku: writing the decision brief."
 
 # The decision record, in the language of a lead developer, before any code
 # exists. The agents decide; this is where a human can read what they decided
@@ -120,7 +127,7 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e medium \
     app_id: 4577311 \
     private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
 
-echo "Opening draft PR."
+echo "Spectacle: opening the draft PR."
 
 git -C "$worktree" reset -q --hard
 git -C "$worktree" clean -qfd
@@ -147,13 +154,16 @@ done
 
 read -r pr_url pr_branch <<< "$pr"
 export pr_url
-[ -z "$pr_url" ] && exit 2
+[ -z "$pr_url" ] && { echo "No draft PR found for issue $issue_number." >&2; exit 2; }
+
+echo "Draft PR $pr_url on branch $pr_branch"
 
 git -C "$worktree" reset -q --hard
 git -C "$worktree" clean -qfd
 git -C "$worktree" fetch origin --quiet
 git -C "$worktree" checkout -q -B "$pr_branch" "origin/$pr_branch" || exit 5
 
+echo "Devin: implementing the PR description."
 aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m opus -e low \
     -s implement,tdd,code-review-and-quality \
     -p "Implement the complete description of '$pr_url' as a lead software engineer. \
@@ -166,13 +176,14 @@ aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m opus -e low \
 
 # Exactly one fresh self-review pass. This preserves the useful independent
 # inspection seen in issue #96 without an open-ended generic loop.
+echo "Devin: one self-review pass."
 aarmy talk devin --team "$team" -v --timeout 10800 \
     -p "Perform your one final self-review of '$pr_url' across correctness, tests, maintainability, \
     security, and scope. Inspect the actual diff with fresh eyes. Fix, commit, and push anything you \
     find. Run required commands in the foreground. When the code is something you stand behind, mark \
     the PR ready for review. This is the only generic self-review turn." &>> "$log_dir/devin.log"
 
-[ "$(gh pr view "$pr_url" --json isDraft --jq '.isDraft')" = false ] || exit 6
+[ "$(gh pr view "$pr_url" --json isDraft --jq '.isDraft')" = false ] || { echo "PR is still a draft after the self-review." >&2; exit 6; }
 
 # CI is owned by the driver. Reviewers inspect the matching log instead of
 # spending an expensive model turn running the same deterministic gates again.
@@ -200,10 +211,12 @@ run_ci() {
     ci_run=$((ci_run + 1))
     ci_log="$log_dir/ci-$ci_run.log"
     ci_head=$(git -C "$worktree" rev-parse HEAD)
+    echo "Running 'make ci' (run $ci_run) on $ci_head - log: $ci_log"
     make -C "$worktree" ci &> "$ci_log"
 }
 
 repair_failed_ci_once() {
+    echo "CI failed. Devin: one repair pass."
     aarmy talk devin --team "$team" -v --timeout 10800 \
         -p "The driver ran 'make ci' on '$pr_url' and it failed. Read the complete log at '$ci_log'. \
         Fix the actual failure, run focused checks in the foreground, commit, and push. Do not broaden \
@@ -214,7 +227,7 @@ repair_failed_ci_once() {
 
 require_committed_and_pushed || exit 8
 if ! run_ci; then
-    repair_failed_ci_once || exit 7
+    repair_failed_ci_once || { echo "CI still failing after the repair pass." >&2; exit 7; }
 fi
 
 reviewer_skills=(-s code-review-and-quality)
@@ -222,6 +235,7 @@ reviewer_skills=(-s code-review-and-quality)
 # At most three concrete review rounds. A developer pushback is valid progress
 # even when the branch head does not move, so it is never re-nudged generically.
 for review_round in {1..3}; do
+    echo "Review round $review_round of 3. Code reviewer: reviewing the diff."
     aarmy talk code-reviewer --team "$team" -v --timeout 10800 -b claude -m opus -e high \
         "${reviewer_skills[@]}" \
         -p "Review PR '$pr_url'. Its description is the complete spec. Review the current diff against \
@@ -239,9 +253,11 @@ for review_round in {1..3}; do
 
     reviewer_skills=()
 
-    gh pr view "$pr_url" --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' && break
+    gh pr view "$pr_url" --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' &&
+        { echo "Reviewer approved."; break; }
     [ "$review_round" -eq 3 ] && break
 
+    echo "Devin: addressing the review feedback."
     old_head=$(git -C "$worktree" rev-parse HEAD)
     aarmy talk devin --team "$team" -v --timeout 10800 \
         -p "Read the latest review feedback on '$pr_url'. Address each blocking finding exactly once: \
@@ -256,13 +272,15 @@ for review_round in {1..3}; do
     new_head=$(git -C "$worktree" rev-parse HEAD)
     if [ "$new_head" != "$old_head" ]; then
         if ! run_ci; then
-            repair_failed_ci_once || exit 7
+            repair_failed_ci_once || { echo "CI still failing after the repair pass." >&2; exit 7; }
         fi
     fi
 done
 
-gh pr view "$pr_url" --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' || exit 3
+gh pr view "$pr_url" --json labels --jq '.labels[].name' | grep -qx 'reviewer-approves' ||
+    { echo "PR not approved after 3 review rounds. Stopping." >&2; exit 3; }
 
+echo "Doku: writing the user-facing note on the PR."
 aarmy talk doku --team "$team" -v -b claude -m opus -e low \
     -p "You are the documentation writer for the PR '$pr_url'. \
     Read its description and its diff, and read README.md and docs/ to see how the project describes itself today. \
@@ -279,7 +297,10 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e low \
     private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
 
 
+echo "Cleaning up the team, worktree, and local branch."
 aarmy delete --team "$team"
 git worktree remove --force "$worktree"
 git branch -q -D "$pr_branch"
 rm -rf "$AGENTS_ARMY_TEAMS_DIR/$team"
+
+echo "Done. $pr_url is approved and ready for merge."
