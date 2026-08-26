@@ -1091,7 +1091,6 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="verb", required=True, metavar="<verb>")
 
     create = _add_verb_parser(subparsers, "create")
-    _add_version_argument(create)
     _add_verbosity_argument(create, "verbosity_after")
     create.add_argument("name")
     _add_agent_config_options(create)
@@ -1106,7 +1105,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "[-p TEXT | --prompt-file PATH | -- PROMPT...]"
         ),
     )
-    _add_version_argument(talk)
     _add_verbosity_argument(talk, "verbosity_after")
     _add_agent_config_options(talk)
     talk.add_argument("name")
@@ -1122,7 +1120,6 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.set_defaults(_parser=talk)
 
     list_parser = _add_verb_parser(subparsers, "list")
-    _add_version_argument(list_parser)
     _add_verbosity_argument(list_parser, "verbosity_after")
     list_parser.add_argument(
         "target", nargs="?", choices=("agents", "skills", "teams"), default="agents"
@@ -1131,7 +1128,6 @@ def _build_parser() -> argparse.ArgumentParser:
     list_parser.set_defaults(_parser=list_parser)
 
     delete = _add_verb_parser(subparsers, "delete")
-    _add_version_argument(delete)
     _add_verbosity_argument(delete, "verbosity_after")
     # nargs="?": `--team T` alone tears the whole team down (see cmd_delete);
     # a name deletes one agent. Neither is an error — bare `delete` is.
@@ -1140,7 +1136,6 @@ def _build_parser() -> argparse.ArgumentParser:
     delete.set_defaults(_parser=delete)
 
     doctor = _add_verb_parser(subparsers, "doctor")
-    _add_version_argument(doctor)
     _add_verbosity_argument(doctor, "verbosity_after")
     doctor.set_defaults(_parser=doctor)
 

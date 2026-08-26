@@ -5,8 +5,9 @@ orchestrator [--version] [-v] <verb> ...
 ```
 
 Five verbs: `create`, `talk`, `list`, `delete`, `doctor`. Every verb also
-accepts `--version` and `-v`/`--verbose` after its own name, so
-`orchestrator -v talk ...` and `orchestrator talk -v ...` both work.
+accepts `-v`/`--verbose` after its own name, so `orchestrator -v talk ...` and
+`orchestrator talk -v ...` both work. `--version` is top-level only —
+`orchestrator talk --version` exits 2 with the `talk` usage line.
 
 ## Global options
 
