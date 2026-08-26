@@ -2,6 +2,16 @@
 
 aarmy() { uv run orchestrator "$@"; }
 
+# The worktree below is built from origin/master, so uncommitted work in this
+# checkout reaches no agent - the run would quietly produce a PR against code
+# the human has already changed. Fail before the human types the issue URL:
+# nothing prompted, no team, no worktree, nothing to clean up.
+dirty=$(git status --porcelain)
+if [ -n "$dirty" ]; then
+    echo "Uncommitted changes in $(pwd) - commit or stash them first:" >&2
+    echo "$dirty" >&2
+    exit 4
+fi
 
 # Input Issue URL, Github
 
@@ -28,7 +38,7 @@ mkdir -p "$log_dir"
 
 git fetch origin --quiet
 git worktree prune
-git worktree add -B "gdwv3/$team" "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
+git worktree add --detach "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" origin/master
 
 aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     -p "Look issue '$issue_url' \
@@ -118,13 +128,20 @@ aarmy talk spectacle --team "$team" -v -p "\
 # Sleep 30 seconds to let the PR be indexed by GitHub.
 sleep 30
 
-export pr_url=$(gh pr list --draft --limit 50 --json url,body \
-    --jq "[.[] | select(.body | test(\"(#|issues/)${issue_number}\\\\b\"))] | .[0].url // empty")
+pr=$(gh pr list --draft --limit 50 --json url,body,headRefName \
+    --jq "[.[] | select(.body | test(\"(#|issues/)${issue_number}\\\\b\"))] | .[0] | select(.) | \"\(.url) \(.headRefName)\"")
+read -r pr_url pr_branch <<< "$pr"
+export pr_url
 [ -z "$pr_url" ] && exit 2
 
 # Same again: devin implements from the PR description, on a clean tree.
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" reset -q --hard
 git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" clean -qfd
+
+# origin/$pr_branch was pushed long after the fetch at the top of this script,
+# so a fresh fetch is what makes it resolvable here.
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" fetch origin --quiet
+git -C "$AGENTS_ARMY_TEAMS_DIR/$team/worktree" checkout -q -B "$pr_branch" "origin/$pr_branch" || exit 5
 
 aarmy talk devin --team "$team" -v --timeout 10800 -b claude -m sonnet -e high \
     -s implement,tdd,code-review-and-quality \
@@ -276,4 +293,5 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e low \
 
 aarmy delete --team "$team"
 git worktree remove --force "$AGENTS_ARMY_TEAMS_DIR/$team/worktree"
+git branch -q -D "$pr_branch"
 rm -rf "$AGENTS_ARMY_TEAMS_DIR/$team"
