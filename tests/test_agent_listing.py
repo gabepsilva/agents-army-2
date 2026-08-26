@@ -285,3 +285,21 @@ class TestListingAlignment:
         # not merely contain it, and a wrong-width idle marker would have
         # already failed the offsets assertion above.
         assert sum(" busy  session=" in line for line in lines) == 1
+
+    def test_session_column_survives_a_model_name_wider_than_six_chars(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A hard-coded field width just moves the overflow cliff onto the
+        first value wider than it — `model=gpt-5-codex` is 11 characters,
+        `backend=opencode` is 8, both wider than the `:6` this regression
+        test would have caught fixed at."""
+        state_file = tmp_path / "state.json"
+        orch = Orchestrator(state_file=state_file)
+        orch.spawn("wide", "echo", model="gpt-5-codex", reasoning_effort="medium")
+        orch.spawn("narrow", "echo")
+
+        orchestrator._print_agents(orch)
+        _header, *lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 2
+        offsets = {line.index("session=") for line in lines}
+        assert len(offsets) == 1

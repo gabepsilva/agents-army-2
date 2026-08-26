@@ -378,8 +378,8 @@ class TestListCommand:
         assert via_flag == via_command
         assert via_flag == (
             f"registry: {orch.state_file}\n"
-            "a                     backend=echo    model=-       effort=-       "
-            "turns=0    created=2026-08-25T00:00:00Z  last=-                           "
+            "a                     backend=echo  model=-  effort=-  "
+            "turns=0  created=2026-08-25T00:00:00Z  last=-        "
             "session=-\n"
         )
 
@@ -785,8 +785,8 @@ class TestMainSkillInvocation:
         created = isolated.agents["a"].created_at
         assert capsys.readouterr().out == (
             f"registry: {isolated.state_file}\n"
-            "a                     backend=echo    model=-       effort=-       "
-            f"turns=0    created={created}  last=-                           "
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
             "session=-\n"
         )
 
@@ -816,8 +816,8 @@ class TestMainSkillInvocation:
         created = isolated.agents["a"].created_at
         assert capsys.readouterr().out == (
             f"registry: {isolated.state_file}\n"
-            "a                     backend=echo    model=-       effort=-       "
-            f"turns=0    created={created}  last=-                           "
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
             "session=-\n"
         )
 
@@ -832,8 +832,8 @@ class TestMainSkillInvocation:
         created = isolated.agents["a"].created_at
         assert capsys.readouterr().out == (
             f"registry: {isolated.state_file}\n"
-            "a                     backend=echo    model=-       effort=-       "
-            f"turns=0    created={created}  last=-                           "
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
             "session=-\n"
         )
         assert "cli: dispatching 'list'" in [r.getMessage() for r in caplog.records]

@@ -793,12 +793,6 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(json.dumps(result.structured, indent=2, sort_keys=True))
 
 
-# ISO-8601-UTC-seconds width, matching _utcnow()'s "2026-08-25T23:27:32Z":
-# padding a missing "-" out to this width keeps every field after it, up to
-# session=, aligned regardless of which agents have talked yet.
-_TIMESTAMP_WIDTH = len("2026-08-25T23:27:32Z")
-
-
 def _print_agents(orchestrator: Orchestrator) -> None:
     # Printed unconditionally, including the `no agents` case: which
     # registry a `--team`/AGENTS_ARMY_STATE_FILE/AGENTS_ARMY_HOME ladder
@@ -808,7 +802,8 @@ def _print_agents(orchestrator: Orchestrator) -> None:
     if not agents:
         print("no agents")
         return
-    width = max(20, max(len(n) for n in agents))
+    name_width = max(20, max(len(n) for n in agents))
+    rows = []
     for name in agents:
         agent = orchestrator.agents[name]
         model = agent.backend.model or "-"
@@ -821,11 +816,25 @@ def _print_agents(orchestrator: Orchestrator) -> None:
         # agent is mid-turn.
         busy = "busy" if orchestrator._agent_is_busy(name) else "    "
         sid = agent.session_id or "-"
+        rows.append(
+            (name, agent.backend.name, model, effort, turns, created, last, busy, sid)
+        )
+    # Every column but session= is measured from the data, the same way the
+    # name column already was: a fixed width (a hard-coded 6 for `model`, say)
+    # just moves the overflow cliff to the first value wider than the
+    # constant — a `gpt-5-codex` model name or an `opencode` backend both
+    # overflowed a `:6` field, dragging session= out of alignment with it.
+    # session= is left unpadded and last on purpose: it's a 36-character
+    # uuid, and padding it would only move the cliff onto the next listing.
+    backend_w, model_w, effort_w, turns_w, created_w, last_w = (
+        max(len(row[i]) for row in rows) for i in range(1, 7)
+    )
+    for name, backend, model, effort, turns, created, last, busy, sid in rows:
         print(
-            f"{name:{width}}  backend={agent.backend.name:6}  "
-            f"model={model:6}  effort={effort:6}  turns={turns:<3}  "
-            f"created={created:{_TIMESTAMP_WIDTH}}  last={last:{_TIMESTAMP_WIDTH}}  "
-            f"{busy}  session={sid}"
+            f"{name:{name_width}}  backend={backend:{backend_w}}  "
+            f"model={model:{model_w}}  effort={effort:{effort_w}}  "
+            f"turns={turns:>{turns_w}}  created={created:{created_w}}  "
+            f"last={last:{last_w}}  {busy}  session={sid}"
         )
 
 
