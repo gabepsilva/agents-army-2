@@ -141,9 +141,11 @@ Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.
 | `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
 | `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
-Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` — a CLI whose
-stdin is an inherited pipe rather than a terminal blocks until killed. OpenCode
-uses `input=prompt` instead so its prompt is read verbatim.
+Every backend runs its CLI through one shared boundary, `run_cli_turn` in
+`backends/base.py`. Claude, Codex, and Grok take its default `stdin=DEVNULL`
+— a CLI whose stdin is an inherited pipe rather than a terminal blocks until
+killed. OpenCode passes `prompt_on_stdin=True` and gets `input=prompt`
+instead, so its prompt is read verbatim.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and
 registering the class in the `_BACKENDS` table in `backends/registry.py`. A

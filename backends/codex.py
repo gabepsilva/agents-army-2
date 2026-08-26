@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
-import time
 from pathlib import Path
 
 from backends.base import (
@@ -14,8 +12,8 @@ from backends.base import (
     OutputSchema,
     TurnError,
     TurnResult,
-    describe_command,
     json_objects,
+    run_cli_turn,
     structured_reply,
 )
 
@@ -96,33 +94,13 @@ class CodexBackend(AgentBackend):
         if schema is not None:
             args += [SCHEMA_FLAG, str(schema.path)]
 
-        log.debug(
-            "codex turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
-            cwd,
-            bool(session_id),
-            len(prompt),
-            timeout,
-        )
-        log.debug("codex turn: invoking %s", describe_command(args, prompt))
-        started = time.monotonic()
-        proc = subprocess.run(
+        proc = run_cli_turn(
+            self.name,
             args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
+            prompt=prompt,
+            session_id=session_id,
+            cwd=cwd,
             timeout=timeout,
-            # `codex exec` with a prompt argument still reads stdin when it is
-            # not a tty and blocks until it is killed: from cron, CI or any
-            # host script, every turn would spend the whole timeout and return
-            # nothing. The other two backends get it for the same reason.
-            stdin=subprocess.DEVNULL,
-        )
-        log.debug(
-            "codex turn: exited %d after %.1fs with %d chars of stdout",
-            proc.returncode,
-            time.monotonic() - started,
-            len(proc.stdout),
         )
         if proc.returncode != 0:
             raise CodexTurnError(

@@ -1,10 +1,10 @@
 # Security
 
 Agent turns run unsandboxed, on the host, with the host environment
-inherited. `backends/claude.py`'s call to `subprocess.run` (and the matching
-calls in `backends/codex.py`, `backends/grok.py`, `backends/opencode.py`)
-passes `args`, `cwd`, `capture_output`, `text`, `check`, `timeout`, and
-`stdin` — no `env=`. This is deliberate: each backend CLI needs its login
+inherited. `run_cli_turn` in `backends/base.py`, the one call to
+`subprocess.run` every backend goes through, passes `args`, `cwd`,
+`capture_output`, `text`, `check`, `timeout`, and `stdin` (or `input`, for
+OpenCode) — no `env=`. This is deliberate: each backend CLI needs its login
 under the real `$HOME` (`~/.claude`, `~/.codex`, `~/.grok`,
 `~/.config/opencode`). A turn can read and write anything the invoking user
 can.

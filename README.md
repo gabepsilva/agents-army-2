@@ -165,9 +165,9 @@ uv run orchestrator -vv talk reviewer -p "summarise the auth module"
 ```
 DEBUG orchestrator:      cli: dispatching 'talk'
 INFO  orchestrator:      agent 'reviewer' (claude): starting turn, resume=True
-DEBUG backends.claude:   claude turn: cwd=/w resume=True prompt_chars=25 timeout=1800s
-DEBUG backends.claude:   claude turn: invoking claude --print --resume s1 -p <prompt:25chars>
-DEBUG backends.claude:   claude turn: exited 0 after 12.4s with 812 chars of stdout
+DEBUG backends.base:     claude turn: cwd=/w resume=True prompt_chars=25 timeout=1800s
+DEBUG backends.base:     claude turn: invoking claude --print --resume s1 -p <prompt:25chars>
+DEBUG backends.base:     claude turn: exited 0 after 12.4s with 812 chars of stdout
 INFO  orchestrator:      agent 'reviewer': turn finished in 12.4s
 ```
 
@@ -218,9 +218,12 @@ sent the document inline in the prompt, and has its reply enforced by
 orchestrator validation and repair instead. Failures raise a `TurnError` subclass so `talk` can print the
 message without knowing which CLI ran.
 
-Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` to avoid blocking
-on an inherited pipe. OpenCode receives the prompt through `input=` instead;
-its no-positional-message mode reads stdin verbatim.
+Every backend hands its finished argv to one shared boundary,
+`run_cli_turn` in `backends/base.py`, which runs the process and logs the
+turn around it. Claude, Codex, and Grok take its default `stdin=DEVNULL` to
+avoid blocking on an inherited pipe. OpenCode passes `prompt_on_stdin=True`
+and receives the prompt through `input=` instead; its no-positional-message
+mode reads stdin verbatim.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)

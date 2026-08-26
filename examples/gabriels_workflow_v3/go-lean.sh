@@ -52,8 +52,9 @@ aarmy talk owen --team "$team" -b claude -m opus -e medium -v \
     Check claims that could change scope, safety, implementation, or verification. \
     Do not investigate alternatives once they cannot change the decision. \
     Do not maintain a design tree and do not restate the issue. \
-    If the proposal is implementable as written, add 'owens-is-happy'. \
-    Add 'owens-is-blocked' only when missing external evidence prevents a decision. \
+    If the proposal is implementable as written, add the label 'owens-is-happy' to the issue. \
+    Add the label 'owens-is-blocked' to the issue only when missing external evidence \
+    prevents a decision. A label is set with 'gh issue edit', not by naming it in a comment. \
     All communication goes in the GitHub issue; return only a short status here. \
     Post as the github app: \
     app_id: 4578638 \
@@ -63,7 +64,8 @@ aarmy talk spectacle --team "$team" -b claude -m opus -e low -v \
     -p "Review issue '$issue_url' as the final Issue Reviewer. Read the issue and relevant code. \
     Challenge only load-bearing claims that could change scope, safety, implementation, or verification. \
     Do not restate the proposal or maintain a design tree. \
-    If it is implementable, add 'spectacle-is-happy'. \
+    If it is implementable, add the label 'spectacle-is-happy' to the issue with \
+    'gh issue edit'; naming it in a comment does not set it. \
     Otherwise post at most three blocking disagreements, each with re-checkable evidence. \
     Do not post optional questions. You get one final decision turn after the author's rebuttal. \
     All communication goes in the GitHub issue; return only a short status here. \
@@ -77,17 +79,20 @@ if ! issue_is_converged; then
     aarmy talk owen --team "$team" -v \
         -p "This is your only rebuttal. Read the reviewer's blocking disagreements on '$issue_url'. \
         Answer only those points with re-checkable evidence and state your final position. \
-        Add no optional scope or new alternatives. Add 'owens-is-happy' if the reviewer can now \
-        make the final implementation decision, or 'owens-is-blocked' only if external evidence \
-        is genuinely missing. Post in the issue; return only a short status here." &>> "$log_dir/owen.log"
+        Add no optional scope or new alternatives. Add the label 'owens-is-happy' to the issue if \
+        the reviewer can now make the final implementation decision, or 'owens-is-blocked' only if \
+        external evidence is genuinely missing. Set it with 'gh issue edit'; naming a label in a \
+        comment does not set it. Post in the issue; return only a short status here." &>> "$log_dir/owen.log"
 
     issue_is_blocked && exit 1
 
     aarmy talk spectacle --team "$team" -v \
         -p "Make the final decision on '$issue_url'. Read the author's rebuttal and resolve every \
         remaining point from the available evidence. Ask no further questions and offer no options. \
-        Add 'spectacle-is-happy' if there is now one implementable outcome; otherwise add \
-        'spectacle-is-blocked'. Post the concise decision in the issue and return only a short status here." \
+        Add the label 'spectacle-is-happy' to the issue if there is now one implementable outcome; \
+        otherwise add the label 'spectacle-is-blocked'. Set it with 'gh issue edit'; naming a label \
+        in a comment does not set it. Post the concise decision in the issue and return only a \
+        short status here." \
         &>> "$log_dir/spectacle.log"
 fi
 
@@ -203,7 +208,9 @@ for review_round in {1..3}; do
         '$ci_head'; the full log is '$ci_log'. Confirm HEAD matches before relying on it, and do not rerun \
         the full gate without concrete evidence that the logged result is insufficient. \
         Report only re-checkable findings, clearly separating blockers from optional observations. \
-        Do not change code. If nothing blocks merging, add 'reviewer-approves'. \
+        Do not change code. If nothing blocks merging, add the label 'reviewer-approves' to the PR \
+        with 'gh pr edit'. Writing the label name into your review comment does not set it, and \
+        the driver reads the label rather than your reply. \
         Post as the github app: \
         app_id: 4287312 \
         private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" \

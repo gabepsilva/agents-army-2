@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +23,8 @@ from pathlib import Path
 # and a per-stage value in the workflow driver -- rather than raising this
 # again.
 DEFAULT_TURN_TIMEOUT = 3600
+
+log = logging.getLogger(__name__)
 
 
 class TurnError(RuntimeError):
@@ -54,6 +59,82 @@ def describe_command(args: list[str], prompt: str) -> str:
             rendered[i] = f"{arg.removesuffix(prompt)}{placeholder}"
             break
     return " ".join(rendered)
+
+
+# The argument count is the boundary's own: every value below is something
+# subprocess.run or the log line needs, and bundling them into an options
+# object would add a type for four call sites to construct and nothing else.
+# Everything after the argv is keyword-only instead: `prompt` and
+# `session_id` are adjacent and `str` is assignable to `str | None`, so a
+# positional swap would type-check and surface only as a prompt sent as a
+# resume id.
+def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
+    name: str,
+    args: list[str],
+    *,
+    prompt: str,
+    session_id: str | None,
+    cwd: Path,
+    timeout: int,
+    prompt_on_stdin: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run one backend's already-built argv and log the turn around it.
+
+    Every adapter runs its CLI the same disciplined way, and the discipline is
+    what a fourth backend would silently drop: captured text output, no
+    `check`, the turn timeout, and a stdin that is never the inherited pipe.
+    `session_id` is here only so the log can say whether the turn resumed.
+
+    The two stdin arms are the only real difference. By default stdin is
+    closed: a CLI reading a non-tty stdin blocks until it is killed, so a run
+    from cron, CI or any host script that is not a terminal would spend the
+    whole timeout and return nothing. With `prompt_on_stdin` the prompt is
+    written there instead, for OpenCode, which joins positional arguments
+    before sending them to the model: omitting that argument makes its
+    no-value fallback read stdin verbatim, preserving spaces, quotes, and
+    newlines.
+    """
+    log.debug(
+        "%s turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
+        name,
+        cwd,
+        bool(session_id),
+        len(prompt),
+        timeout,
+    )
+    log.debug("%s turn: invoking %s", name, describe_command(args, prompt))
+    # The two arms differ only in the stdin kwarg, spelled out at each call
+    # because subprocess.run is overloaded on it and an unpacked mapping
+    # leaves the type checker no overload to pick.
+    started = time.monotonic()
+    if prompt_on_stdin:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            input=prompt,
+        )
+    else:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    log.debug(
+        "%s turn: exited %d after %.1fs with %d chars of stdout",
+        name,
+        proc.returncode,
+        time.monotonic() - started,
+        len(proc.stdout),
+    )
+    return proc
 
 
 def stdout_for_error(stdout: str) -> str:
