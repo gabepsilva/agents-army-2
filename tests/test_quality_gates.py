@@ -2058,10 +2058,114 @@ class TestMutationCache:
         assert mutation_cache.main([]) == 1
         assert "backends_extra/evil.py" in capsys.readouterr().out
 
-    # -- Check D: the gate's own input cannot survive a run that measured
+    # -- Check D: selection membership -- hashed is not run. ------------------
+
+    def test_check_d_unselected_test_file_fails_naming_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        unselected = tmp_path / "tests" / "test_b.py"
+        _write(unselected, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_b.py" in out
+        assert "pytest_add_cli_args_test_selection" in out
+
+    def test_check_d_a_selected_test_file_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_an_excused_unselected_test_file_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        excused = tmp_path / "tests" / "test_b.py"
+        _write(excused, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/test_b.py": "cannot run inside mutants/ at all"},
+        )
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_conftest_is_exempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        _write(tmp_path / "tests" / "conftest.py", "# fixtures\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_a_non_matching_helper_module_is_exempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        _write(tmp_path / "tests" / "_helpers.py", "def make_team(): ...\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_catches_the_other_default_pattern(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A check hardcoded to only `test_*.py` would miss this file under
+        pytest's own default `python_files`, reproducing the exact bug this
+        check exists to close, one filename convention away."""
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        unselected = tmp_path / "tests" / "scratch_gate_test.py"
+        _write(unselected, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        assert "tests/scratch_gate_test.py" in capsys.readouterr().out
+
+    def test_check_d_honours_a_python_files_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        selected = tmp_path / "tests" / "check_a.py"
+        _write(selected, "assert True\n")
+        # Matches the default python_files, but not the override below --
+        # under this project's config it must not need to be selected.
+        _write(tmp_path / "tests" / "test_untouched.py", "assert True\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(selected)],
+            ini_options={"python_files": ["check_*.py"]},
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+        unselected = tmp_path / "tests" / "check_b.py"
+        _write(unselected, "assert True\n")
+        assert mutation_cache.main([]) == 1
+        assert "tests/check_b.py" in capsys.readouterr().out
+
+    # -- Check E: the gate's own input cannot survive a run that measured
     # nothing. -----------------------------------------------------------------
 
-    def test_check_d_stale_cicd_stats_cannot_survive_into_the_gate(
+    def test_check_e_stale_cicd_stats_cannot_survive_into_the_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
         test_file = tmp_path / "tests" / "test_a.py"

@@ -25,7 +25,7 @@ mutmut has measured *and* mutation_gate.py has cleared the floor. Writing it
 up front, or after a failing gate, would mark a suite as measured before
 anything measured it.
 
-Checks A-C run on both invocations (bare and `--record`), before anything
+Checks A-D run on both invocations (bare and `--record`), before anything
 else, and block a result from being trusted or recorded:
   A. closure    every non-source .py file under a watched root must be in the
                 digest set or excused in DIGEST_EXCLUSIONS. mutmut's own git
@@ -39,13 +39,39 @@ else, and block a result from being trusted or recorded:
   C. copying    every source_paths entry must resolve under a declared
                 also_copy root, which is what keeps mutmut's mtime shortcut
                 (create_mutants_for_file) unreachable.
-Check D clears the gate's own stats file before measurement, on both the
+  D. selection  every tracked file under a watched root whose basename
+                matches pytest's python_files must be in
+                pytest_add_cli_args_test_selection or excused in
+                DIGEST_EXCLUSIONS with a reason. Closure (Check A) hashes a
+                test file the moment it exists, selection is a separate
+                fact mutmut decides on its own by filename, and the two can
+                disagree: a hashed-but-unselected file correctly moves the
+                digest, and mutmut still never collects it, so every mutant
+                it alone kills is reported survived. Hashed is not run.
+
+DIGEST_EXCLUSIONS is read by both Check A and Check D, and the two readings
+cannot diverge by construction, not by convention: an unselected file is
+never collected, so it cannot decide a verdict (Check A's question); a
+selected file is collected, so it can, and must therefore be hashed (Check
+D's question). "Cannot decide a verdict" and "is not run" are the same fact
+about the same file, so one dict names it once.
+
+tests/test_quality_gates.py is the repo's single exclusion because it
+shells out to `make` against a path derived from `__file__`
+(tests/test_quality_gates.py:25, :2187-2201). Inside a mutant run that path
+resolves to `mutants/`, which has no Makefile, so every one of its `make`
+assertions fails on the baseline collect. It tests the build, not the code
+under mutation: it cannot decide a mutant's verdict, and it cannot survive
+being collected inside one.
+
+Check E clears the gate's own stats file before measurement, on both the
 reuse path and the rmtree path, so a stale mutmut-cicd-stats.json inside a
 restored mutants/ can never be read by mutation_gate.py.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import shutil
@@ -78,6 +104,10 @@ DIGEST_EXCLUSIONS: dict[str, str] = {
 
 # Non-.py paths under a watched root that DO decide a verdict. Empty today.
 DIGEST_EXTRA: tuple[str, ...] = ()
+
+# pytest's own default python_files, applied when the repo's config is
+# silent on the key -- as this repo's is. See _python_files_patterns.
+DEFAULT_PYTHON_FILES = ("test_*.py", "*_test.py")
 
 
 def _mutmut_config(pyproject: Path) -> dict:
@@ -115,6 +145,18 @@ def _watched_roots(pyproject: Path) -> tuple[str, ...]:
 def _pytest_ini_options(pyproject: Path) -> dict:
     config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     return config.get("tool", {}).get("pytest", {}).get("ini_options", {})
+
+
+def _python_files_patterns(pyproject: Path) -> tuple[str, ...]:
+    """The filename patterns pytest collects as test files, read from the
+    repo's own config rather than assumed, so this check agrees with pytest
+    about what pytest collects instead of hardcoding one convention
+    (test_*.py) and missing every file written in the other
+    (*_test.py) -- pytest's own default accepts both."""
+    patterns = _pytest_ini_options(pyproject).get("python_files", DEFAULT_PYTHON_FILES)
+    if isinstance(patterns, str):
+        patterns = patterns.split()
+    return tuple(patterns)
 
 
 def digest(paths: list[Path]) -> str:
@@ -271,11 +313,54 @@ def _check_copy_invariant(pyproject: Path) -> list[str]:
     ]
 
 
+def _check_selection(pyproject: Path) -> list[str]:
+    files = repo_files(pyproject.parent)
+    if files is None:
+        return ["cannot list repository files: git is unavailable"]
+
+    root = pyproject.parent
+    roots = _watched_roots(pyproject)
+    patterns = _python_files_patterns(pyproject)
+    excused = set(DIGEST_EXCLUSIONS)
+
+    selected_files = set()
+    selected_dirs = []
+    for entry in selected_tests(pyproject):
+        resolved = (root / entry).resolve()
+        if resolved.is_dir():
+            selected_dirs.append(_as_root_prefix(resolved.as_posix()))
+        else:
+            selected_files.add(resolved)
+
+    failures = []
+    for path in files:
+        if not any(path.startswith(prefix) for prefix in roots):
+            continue
+        if not any(fnmatch.fnmatch(Path(path).name, pattern) for pattern in patterns):
+            continue
+        if path in excused:
+            continue
+        resolved = (root / path).resolve()
+        if resolved in selected_files:
+            continue
+        if any(resolved.as_posix().startswith(prefix) for prefix in selected_dirs):
+            continue
+        failures.append(
+            f"{path} matches pytest's python_files but is not in [tool.mutmut] "
+            "pytest_add_cli_args_test_selection, so mutmut never collects it "
+            "and every mutant it alone kills is reported survived. Add it to "
+            "the selection, or -- only if it cannot run inside mutants/ at "
+            "all -- to DIGEST_EXCLUSIONS with that reason."
+        )
+    return failures
+
+
 def _run_checks(pyproject: Path) -> list[str]:
     return [
         *_check_closure(pyproject),
         *_check_exclusions(pyproject.parent),
         *_check_copy_invariant(pyproject),
+        *_check_selection(pyproject),
     ]
 
 
