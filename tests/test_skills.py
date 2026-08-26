@@ -430,7 +430,7 @@ class TestListCommand:
         missing = tmp_path / "absent"
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         orch = Orchestrator(state_file=tmp_path / "s.json")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
         captured = capsys.readouterr()
@@ -503,7 +503,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "nope", "-p", "x"])
         captured = capsys.readouterr()
@@ -516,7 +516,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "missing", "--skill", "nope", "-p", "x"])
         assert orch.list_agents() == ["a"]
@@ -528,7 +528,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "clash", "-p", "x"])
         captured = capsys.readouterr()
@@ -681,7 +681,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo,foo", "-p", "x"])
         assert "duplicate skill name 'foo'" in capsys.readouterr().err
@@ -709,7 +709,7 @@ class TestTalkSkills:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "--skill", "foo", "-p", "x"])
         captured = capsys.readouterr()
@@ -736,7 +736,7 @@ class TestMainSkillInvocation:
     ) -> Orchestrator:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
         for name in ("orchestrator", "backends"):
             logging.getLogger(name).setLevel(logging.NOTSET)
@@ -860,7 +860,7 @@ class TestMainSkillInvocation:
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         missing = tmp_path / "absent"
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         with pytest.raises(SystemExit, match="1"):

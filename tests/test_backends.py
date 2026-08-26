@@ -3414,7 +3414,7 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+            lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
         )
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "a", "hi", "--timeout", "5"])
@@ -3474,7 +3474,7 @@ class TestCLI:
         register_backend("boom", BoomBackend)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "-p", "hi"])
         captured = capsys.readouterr()
@@ -3505,7 +3505,7 @@ class TestCLI:
         register_backend("boomcodex", BoomCodex)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("c", "boomcodex")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "c", "-p", "hi"])
         assert capsys.readouterr().err == "codex did not report a thread_id\n"
@@ -3536,7 +3536,7 @@ class TestCLI:
         register_backend("boomany", BoomAny)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("d", "boomany")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "d", "-p", "hi"])
         captured = capsys.readouterr()
@@ -3580,7 +3580,7 @@ class TestCLI:
         register_backend("incidental", IncidentalBackend)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("i", "incidental")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(incidental, match=message):
             main(["talk", "i", "-p", "hi"])
         assert capsys.readouterr().err == ""
@@ -3609,7 +3609,7 @@ class TestCLI:
         register_backend("boomgrok", BoomGrok)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("g", "boomgrok")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "g", "-p", "hi"])
         assert capsys.readouterr().err == "grok did not report a sessionId\n"
@@ -4065,7 +4065,7 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+            lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
         )
         with pytest.raises(SystemExit, match="2"):
             main(argv)
@@ -4091,7 +4091,7 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
         )
         main()
         assert "created agent 'a' backend=echo" in capsys.readouterr().out
@@ -4106,7 +4106,7 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
         )
         main(["create", "a", "-b", "echo"])
         assert "created agent 'a' backend=echo" in capsys.readouterr().out
@@ -4289,7 +4289,7 @@ class TestVerboseFlag:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
         )
         for name in ("orchestrator", "backends", "third_party"):
             logging.getLogger(name).setLevel(logging.NOTSET)
@@ -4353,7 +4353,7 @@ class TestVerboseFlag:
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         main(["talk", "a", "--", "add", "-v", "please"])
         assert "echo:add -v please" in capsys.readouterr().out
         assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
@@ -4366,7 +4366,7 @@ class TestVerboseFlag:
     ) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         main(["-v", "talk", "a", "--", "add", "-v", "please"])
         assert "echo:add -v please" in capsys.readouterr().out
         assert logging.getLogger("orchestrator").level == logging.DEBUG
@@ -4445,7 +4445,7 @@ class TestStepLogging:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
         )
         with caplog.at_level("DEBUG", logger="orchestrator"):
             main(["-v", "create", "a", "-b", "echo"])
@@ -4657,7 +4657,7 @@ def test_prompt_file_errors_are_exact_and_prevent_side_effects(
     monkeypatch.setattr(
         orchestrator,
         "Orchestrator",
-        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+        lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
     with pytest.raises(SystemExit) as excinfo:
         main(["talk", "a", "--prompt-file", str(prompt_file)])
@@ -4752,7 +4752,7 @@ def test_separator_error_and_cli_error_without_arguments_are_exact(
     monkeypatch.setattr(
         orchestrator,
         "Orchestrator",
-        lambda: (_ for _ in ()).throw(orchestrator.OrchestratorError()),
+        lambda *_: (_ for _ in ()).throw(orchestrator.OrchestratorError()),
     )
     with pytest.raises(SystemExit) as empty_error:
         main(["list"])
@@ -4764,7 +4764,7 @@ def test_cli_log_counts_head_and_tail_arguments(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setitem(orchestrator.VERBS, "talk", lambda _orch, _opts: None)
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda: object())
+    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: object())
     caplog.set_level(logging.DEBUG, logger="orchestrator")
     main(["-v", "talk", "a", "--", "one", "two"])
     assert "cli: 5 argument(s) after flag splitting" in caplog.text

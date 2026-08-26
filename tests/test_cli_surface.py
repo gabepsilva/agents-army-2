@@ -88,7 +88,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
         encoding="utf-8",
     )
     fake = FakeOrchestrator()
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda: fake)
+    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: fake)
     monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "skills")
 
     orchestrator.main(
@@ -146,7 +146,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
 def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
     argv: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fail() -> None:
+    def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
     monkeypatch.setattr(orchestrator, "Orchestrator", fail)
@@ -163,7 +163,7 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("prompt", encoding="utf-8")
 
-    def fail() -> None:
+    def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
     monkeypatch.setattr(orchestrator, "Orchestrator", fail)
@@ -217,7 +217,7 @@ def test_version_exits_before_constructing_orchestrator(
     monkeypatch.setattr(
         orchestrator,
         "Orchestrator",
-        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+        lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(argv)
@@ -282,7 +282,7 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
     monkeypatch.setattr(
         orchestrator,
         "Orchestrator",
-        lambda: (_ for _ in ()).throw(AssertionError("constructed")),
+        lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
 
     orchestrator.main(["-v", "doctor"])
@@ -318,6 +318,9 @@ def test_verbosity_counts_before_and_after_verb(
 ) -> None:
     class FakeOrchestrator:
         state_file = Path("/dev/null")
+
+        def __init__(self, runtime_paths=None) -> None:
+            self.runtime_paths = runtime_paths
 
         def list_agents(self) -> list[str]:
             return []

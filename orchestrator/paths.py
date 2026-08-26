@@ -9,10 +9,10 @@ ladders below testable rather than merely asserted.
 
 `orchestrator/__init__.py` performs the single import-time construction that
 supplies the ambient values, and keeps exposing the resolved values as
-module globals. `_resolve_team` still rebinds three of those globals through
-`global` for a `--team` run; that is unchanged and outside this module's
-promise. The immutability here is the `RuntimePaths` object's own: a
-resolved set of paths is never edited in place, only derived from.
+module globals. A `--team` run derives a second `RuntimePaths` from those
+and hands it down the call chain; nothing is rebound. The immutability here
+is the `RuntimePaths` object's own: a resolved set of paths is never edited
+in place, only derived from.
 """
 
 from __future__ import annotations
@@ -90,9 +90,6 @@ class RuntimePaths:
         `root`, `home` and `teams_dir` are carried through unchanged: they
         say where teams are found, which is what located `team_root` in the
         first place.
-
-        Not yet called by `_resolve_team`, which still derives these three
-        paths inline; switching it over is #121.
         """
         worktree = team_root / "worktree"
         return replace(
