@@ -430,8 +430,9 @@ class TestListCommand:
         missing = tmp_path / "absent"
         monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         orch = Orchestrator(state_file=tmp_path / "s.json")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_list(orch, _options(["list", "skills"]))
+            main(["list", "skills"])
         captured = capsys.readouterr()
         assert captured.err == f"skills directory not found: {missing}\n"
         assert captured.out == ""
@@ -497,31 +498,39 @@ class TestTalkSkills:
         )
 
     def test_unknown_skill_exits_without_talking(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "a", "--skill", "nope", "-p", "x"]))
+            main(["talk", "a", "--skill", "nope", "-p", "x"])
         captured = capsys.readouterr()
         assert "unknown skill 'nope'" in captured.err
         assert captured.out == ""
 
     def test_unknown_skill_creates_no_agent(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(
-                orch, _talk_options(["talk", "missing", "--skill", "nope", "-p", "x"])
-            )
+            main(["talk", "missing", "--skill", "nope", "-p", "x"])
         assert orch.list_agents() == ["a"]
 
     def test_conflict_exits_without_talking(
         self,
         orch: Orchestrator,
         skills_tree: Path,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "a", "--skill", "clash", "-p", "x"]))
+            main(["talk", "a", "--skill", "clash", "-p", "x"])
         captured = capsys.readouterr()
         assert "skill name 'clash' is not unique" in captured.err
         for path in _clash_paths(skills_tree):
@@ -667,17 +676,21 @@ class TestTalkSkills:
         assert "- foo:" not in out
 
     def test_duplicate_skill_flag_value_exits(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(
-                orch,
-                _talk_options(["talk", "a", "--skill", "foo,foo", "-p", "x"]),
-            )
+            main(["talk", "a", "--skill", "foo,foo", "-p", "x"])
         assert "duplicate skill name 'foo'" in capsys.readouterr().err
 
     def test_backend_error_is_printed_not_a_traceback(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BoomBackend(AgentBackend):
             @property
@@ -696,8 +709,9 @@ class TestTalkSkills:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "b", "--skill", "foo", "-p", "x"]))
+            main(["talk", "b", "--skill", "foo", "-p", "x"])
         captured = capsys.readouterr()
         assert captured.err == "claude output was not JSON\n"
         assert captured.out == ""
