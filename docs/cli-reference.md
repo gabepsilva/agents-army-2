@@ -264,7 +264,7 @@ and edit the registry, so they work whether or not `worktree` is there.
 | exit code | meaning |
 |---|---|
 | `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`) the team's `worktree/` doesn't exist yet |
-| `1` | teardown (`delete --team NAME` with no agent name) found no such team under `$AGENTS_ARMY_TEAMS_DIR`, or another command currently holds the team's lock |
+| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
 
 See the [README's Teams section](../README.md#teams) for the full
 `agents/`/`worktree/`/`.lock` layout and the locking model, and

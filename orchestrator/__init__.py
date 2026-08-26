@@ -1396,9 +1396,10 @@ def _resolve_team(
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
-    already does — except for teardown of a team that no longer exists, which
-    is not a usage error and is left to raise `OrchestratorError` (exit 1),
-    the same as any other `delete` of something that isn't there.
+    already does — except for every verb but `create`/`talk` (`list`,
+    `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
+    which is not a usage error and is left to raise `OrchestratorError`
+    (exit 1), the same as any other `delete` of something that isn't there.
 
     Reassigning the globals here, once, rather than threading a `Paths`
     object through `Orchestrator`/`Agent.talk`/every `cmd_*`, is deliberate:
