@@ -64,14 +64,18 @@ def describe_command(args: list[str], prompt: str) -> str:
 # The argument count is the boundary's own: every value below is something
 # subprocess.run or the log line needs, and bundling them into an options
 # object would add a type for four call sites to construct and nothing else.
+# Everything after the argv is keyword-only instead: `prompt` and
+# `session_id` are adjacent and `str` is assignable to `str | None`, so a
+# positional swap would type-check and surface only as a prompt sent as a
+# resume id.
 def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     name: str,
     args: list[str],
+    *,
     prompt: str,
     session_id: str | None,
     cwd: Path,
     timeout: int,
-    *,
     prompt_on_stdin: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one backend's already-built argv and log the turn around it.

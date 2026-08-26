@@ -94,7 +94,14 @@ class CodexBackend(AgentBackend):
         if schema is not None:
             args += [SCHEMA_FLAG, str(schema.path)]
 
-        proc = run_cli_turn(self.name, args, prompt, session_id, cwd, timeout)
+        proc = run_cli_turn(
+            self.name,
+            args,
+            prompt=prompt,
+            session_id=session_id,
+            cwd=cwd,
+            timeout=timeout,
+        )
         if proc.returncode != 0:
             raise CodexTurnError(
                 _failed_turn_message(proc.returncode, proc.stdout, proc.stderr)

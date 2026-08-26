@@ -132,7 +132,13 @@ class OpenCodeBackend(AgentBackend):
             args += ["--session", session_id]
 
         proc = run_cli_turn(
-            self.name, args, prompt, session_id, cwd, timeout, prompt_on_stdin=True
+            self.name,
+            args,
+            prompt=prompt,
+            session_id=session_id,
+            cwd=cwd,
+            timeout=timeout,
+            prompt_on_stdin=True,
         )
         events = _events(proc.stdout)
         if proc.returncode != 0:

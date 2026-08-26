@@ -152,7 +152,14 @@ class ClaudeBackend(AgentBackend):
             args += ["--resume", session_id]
         args += ["-p", prompt]
 
-        proc = run_cli_turn(self.name, args, prompt, session_id, cwd, timeout)
+        proc = run_cli_turn(
+            self.name,
+            args,
+            prompt=prompt,
+            session_id=session_id,
+            cwd=cwd,
+            timeout=timeout,
+        )
         if proc.returncode != 0:
             raise ClaudeTurnError(
                 _failed_turn_message(proc.returncode, proc.stdout, proc.stderr)

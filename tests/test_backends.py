@@ -384,10 +384,10 @@ class TestRunCliTurn:
         proc = run_cli_turn(
             "demo",
             ["demo", "-p", "hello"],
-            "hello",
-            None,
-            tmp_path,
-            DEFAULT_TURN_TIMEOUT,
+            prompt="hello",
+            session_id=None,
+            cwd=tmp_path,
+            timeout=DEFAULT_TURN_TIMEOUT,
         )
 
         assert calls[0][0] == ["demo", "-p", "hello"]
@@ -404,10 +404,10 @@ class TestRunCliTurn:
         run_cli_turn(
             "demo",
             ["demo"],
-            "hello",
-            None,
-            tmp_path,
-            DEFAULT_TURN_TIMEOUT,
+            prompt="hello",
+            session_id=None,
+            cwd=tmp_path,
+            timeout=DEFAULT_TURN_TIMEOUT,
             prompt_on_stdin=True,
         )
 
@@ -425,7 +425,14 @@ class TestRunCliTurn:
         self._record(monkeypatch)
 
         with caplog.at_level("DEBUG"):
-            run_cli_turn("demo", ["demo", "-p", "hello"], "hello", "s1", tmp_path, 42)
+            run_cli_turn(
+                "demo",
+                ["demo", "-p", "hello"],
+                prompt="hello",
+                session_id="s1",
+                cwd=tmp_path,
+                timeout=42,
+            )
 
         messages = _messages(caplog)
         assert messages[0] == (
@@ -449,7 +456,9 @@ class TestRunCliTurn:
         monkeypatch.setattr(subprocess, "run", _completed(3, "abcd"))
 
         with caplog.at_level("DEBUG"):
-            proc = run_cli_turn("demo", ["demo"], "", None, tmp_path, 7)
+            proc = run_cli_turn(
+                "demo", ["demo"], prompt="", session_id=None, cwd=tmp_path, timeout=7
+            )
 
         assert proc.returncode == 3
         messages = _messages(caplog)
@@ -1472,7 +1481,7 @@ class TestGrokRunTurn:
             return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with caplog.at_level("DEBUG"):
+        with caplog.at_level("DEBUG", logger="backends"):
             result = backend.run_turn(prompt, None, tmp_path)
         assert result.reply == "ok"
         # The flag stays readable; only the prompt is collapsed.
@@ -1927,7 +1936,7 @@ class TestOpenCodeRunTurn:
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with caplog.at_level("DEBUG"):
+        with caplog.at_level("DEBUG", logger="backends"):
             assert backend.run_turn("again", "s1", tmp_path).session_id == "s1"
         assert _messages(caplog)[0] == (
             f"opencode turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
