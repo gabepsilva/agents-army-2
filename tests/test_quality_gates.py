@@ -1706,7 +1706,7 @@ class TestMutationCache:
     def test_a_malformed_pyproject_fails_loudly_instead_of_crashing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """Checks A-C read pyproject.toml before compute_digest does, so they
+        """Checks A-D read pyproject.toml before compute_digest does, so they
         need their own guard against a missing or unparsable file rather than
         relying on the one around compute_digest."""
         pyproject = tmp_path / "pyproject.toml"
@@ -2058,10 +2058,194 @@ class TestMutationCache:
         assert mutation_cache.main([]) == 1
         assert "backends_extra/evil.py" in capsys.readouterr().out
 
-    # -- Check D: the gate's own input cannot survive a run that measured
+    # -- Check D: selection membership -- hashed is not run. ------------------
+
+    def test_check_d_unselected_test_file_fails_naming_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        unselected = tmp_path / "tests" / "test_b.py"
+        _write(unselected, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_b.py" in out
+        assert "pytest_add_cli_args_test_selection" in out
+
+    def test_check_d_a_selected_test_file_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_an_excused_unselected_test_file_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        excused = tmp_path / "tests" / "test_b.py"
+        _write(excused, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/test_b.py": "cannot run inside mutants/ at all"},
+        )
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_rejects_a_file_that_is_both_selected_and_excused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A selected file is collected, so it can decide a verdict --
+        DIGEST_EXCLUSIONS claiming the opposite about the same file is a
+        stale exclusion or a stale selection, not a state Check D can wave
+        through."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/test_a.py": "stale exclusion left behind by a rename"},
+        )
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_a.py" in out
+        assert "both selected and in DIGEST_EXCLUSIONS" in out
+
+    def test_check_d_conftest_is_exempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        _write(tmp_path / "tests" / "conftest.py", "# fixtures\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_a_non_matching_helper_module_is_exempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        _write(tmp_path / "tests" / "_helpers.py", "def make_team(): ...\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+    def test_check_d_catches_the_other_default_pattern(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A check hardcoded to only `test_*.py` would miss this file under
+        pytest's own default `python_files`, reproducing the exact bug this
+        check exists to close, one filename convention away."""
+        selected = tmp_path / "tests" / "test_a.py"
+        _write(selected, "assert True\n")
+        unselected = tmp_path / "tests" / "scratch_gate_test.py"
+        _write(unselected, "assert True\n")
+        pyproject = self._project(tmp_path, [str(selected)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        assert "tests/scratch_gate_test.py" in capsys.readouterr().out
+
+    def test_check_d_honours_a_python_files_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        selected = tmp_path / "tests" / "check_a.py"
+        _write(selected, "assert True\n")
+        # Matches the default python_files, but not the override below --
+        # under this project's config it must not need to be selected.
+        _write(tmp_path / "tests" / "test_untouched.py", "assert True\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(selected)],
+            ini_options={"python_files": ["check_*.py"]},
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+        unselected = tmp_path / "tests" / "check_b.py"
+        _write(unselected, "assert True\n")
+        assert mutation_cache.main([]) == 1
+        assert "tests/check_b.py" in capsys.readouterr().out
+
+    def test_check_d_accepts_python_files_as_a_space_separated_string(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """pytest's ini format allows python_files as a list or as a single
+        space-separated string; the check must parse both the way pytest
+        does, not just the list form."""
+        selected = tmp_path / "tests" / "check_a.py"
+        _write(selected, "assert True\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(selected)],
+            ini_options={"python_files": "check_*.py"},
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+        unselected = tmp_path / "tests" / "check_b.py"
+        _write(unselected, "assert True\n")
+        assert mutation_cache.main([]) == 1
+        assert "tests/check_b.py" in capsys.readouterr().out
+
+    def test_python_files_string_is_parsed_with_shlex_not_str_split(
+        self, tmp_path: Path
+    ) -> None:
+        """str.split() and shlex.split() only disagree on a quoted token,
+        which is exactly why this must be shlex.split(): it is what pytest's
+        own INI-mode parser (_pytest.config.Config._getini_ini) uses for a
+        string-valued "args" option, and str.split() would instead cut the
+        quoted pattern in half."""
+        pyproject = self._project(
+            tmp_path,
+            ["tests/test_a.py"],
+            ini_options={"python_files": "'weird pattern*.py' *_test.py"},
+        )
+
+        assert mutation_cache._python_files_patterns(pyproject) == (
+            "weird pattern*.py",
+            "*_test.py",
+        )
+
+    def test_check_d_a_directory_selection_entry_covers_only_what_is_beneath_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """mutmut passes a directory selection entry straight through as a
+        pytest CLI arg, so pytest collects everything beneath it -- but the
+        check must not treat the whole watched root as covered just because
+        one subdirectory of it is selected."""
+        _write(tmp_path / "tests" / "unit" / "test_a.py", "assert True\n")
+        _write(tmp_path / "tests" / "test_b.py", "assert True\n")
+        pyproject = self._project(tmp_path, ["tests/unit"])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_b.py" in out
+        assert "tests/unit/test_a.py" not in out
+
+    # -- Check E: the gate's own input cannot survive a run that measured
     # nothing. -----------------------------------------------------------------
 
-    def test_check_d_stale_cicd_stats_cannot_survive_into_the_gate(
+    def test_check_e_stale_cicd_stats_cannot_survive_into_the_gate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
         test_file = tmp_path / "tests" / "test_a.py"
