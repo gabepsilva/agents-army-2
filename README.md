@@ -218,9 +218,12 @@ sent the document inline in the prompt, and has its reply enforced by
 orchestrator validation and repair instead. Failures raise a `TurnError` subclass so `talk` can print the
 message without knowing which CLI ran.
 
-Claude, Codex, and Grok run their CLIs with `stdin=DEVNULL` to avoid blocking
-on an inherited pipe. OpenCode receives the prompt through `input=` instead;
-its no-positional-message mode reads stdin verbatim.
+Every backend hands its finished argv to one shared boundary,
+`run_cli_turn` in `backends/base.py`, which runs the process and logs the
+turn around it. Claude, Codex, and Grok take its default `stdin=DEVNULL` to
+avoid blocking on an inherited pipe. OpenCode passes `prompt_on_stdin=True`
+and receives the prompt through `input=` instead; its no-positional-message
+mode reads stdin verbatim.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
