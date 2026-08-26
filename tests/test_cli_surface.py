@@ -265,6 +265,8 @@ def test_verbosity_counts_before_and_after_verb(
     argv: list[str], level: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeOrchestrator:
+        state_file = Path("/dev/null")
+
         def list_agents(self) -> list[str]:
             return []
 

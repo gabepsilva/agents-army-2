@@ -145,10 +145,28 @@ team's registry (`list agents`) or indexes its worktree's `SKILLS/`
 
 ```sh
 uv run orchestrator list           # same as: list agents
-uv run orchestrator list agents    # name, backend, session id for every agent
+uv run orchestrator list agents    # registry path, then every agent's full state
 uv run orchestrator list skills    # the SKILLS/ catalog
 uv run orchestrator list agents --team issue-73   # only that team's agents
 uv run orchestrator list teams     # every team under AGENTS_ARMY_ROOT
+```
+
+`list agents` prints the registry path first — which file was read is not
+always obvious, since `--team` and the `AGENTS_ARMY_STATE_FILE`/
+`AGENTS_ARMY_HOME` ladder (see [Configuration](configuration.md#environment-variables))
+can each point it somewhere else. Each agent line then shows everything the
+registry knows about it: `model=-`/`effort=-` mean no `--model`/
+`--reasoning-effort` was ever passed, `turns=-`/`created=-`/`last=-` mean the
+agent predates this field and there is nothing truthful to show, and `busy`
+appears (in a fixed-width column, so `session=` still lines up) only while a
+turn is actually in flight.
+
+```sh
+uv run orchestrator list agents
+# registry: /home/user/.agents-army/orchestrator_state.json
+# devin                 backend=claude  model=sonnet  effort=high    turns=1    created=2026-08-25T23:27:32Z  last=2026-08-25T23:41:09Z  busy  session=8b3d8c7d-...
+# owen                  backend=codex   model=-       effort=low     turns=1    created=2026-08-25T23:27:32Z  last=2026-08-25T23:39:02Z        session=1f2e3d4c-...
+# scratch               backend=claude  model=-       effort=-       turns=0    created=2026-08-25T23:44:10Z  last=-                           session=-
 ```
 
 `list teams` walks `$AGENTS_ARMY_ROOT` (up to 4 levels deep — enough for

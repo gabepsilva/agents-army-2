@@ -24,6 +24,7 @@ import time
 import tomllib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn, TextIO, cast
 
@@ -131,6 +132,16 @@ class TeamBusyError(OrchestratorError):
 _CLI_ERRORS = (OrchestratorError, UnknownBackendError)
 
 
+def _utcnow() -> str:
+    """The current instant as ISO-8601 UTC, seconds precision, `Z` suffix.
+
+    A string, not an epoch float: `orchestrator_state.json` is a file
+    humans open with `cat`, and a string means the display path has no
+    formatting logic that can be wrong, and no locale/timezone question.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class Agent:
     """A single named agent backed by one persistent CLI session."""
 
@@ -138,6 +149,12 @@ class Agent:
         self.name = name
         self.backend = backend
         self.session_id: str | None = None
+        self.created_at: str | None = None
+        self.last_turn_at: str | None = None
+        # Counts CLI turns, not logical `talk()` calls: `_turn` persists once
+        # per attempt by design (see its own docstring), so a schema-repair
+        # retry inside `_validated_turn` increments this once per attempt.
+        self.turns: int | None = None
 
     def talk(
         self,
@@ -332,6 +349,8 @@ class Orchestrator:
                 reasoning_effort=reasoning_effort,
             ),
         )
+        agent.created_at = _utcnow()
+        agent.turns = 0
         self.agents[name] = agent
         self._persist()
         return agent
@@ -393,9 +412,16 @@ class Orchestrator:
             self._reload()
             if agent.name not in self.agents:
                 raise AgentNotFoundError(f"no agent named '{agent.name}'")
+            # self.agents[agent.name], not agent: _reload just replaced
+            # self.agents with brand-new Agent objects, so `agent` is now
+            # detached from it — mutating `agent` here would be silently
+            # dropped by the _persist() below, which serializes self.agents.
+            entry = self.agents[agent.name]
             # agent.session_id, not result.session_id: the agent keeps the
             # id it already had when a backend reports none.
-            self.agents[agent.name].session_id = agent.session_id
+            entry.session_id = agent.session_id
+            entry.last_turn_at = _utcnow()
+            entry.turns = (entry.turns or 0) + 1
             self._persist()
         return result
 
@@ -548,6 +574,35 @@ class Orchestrator:
         """
         return self._locked(self._agent_lock_path(name), revalidate=True)
 
+    def _agent_is_busy(self, name: str) -> bool:
+        """Is a turn in flight for `name` right now?
+
+        A turn holds `_agent_lock` (`fcntl.LOCK_EX`) for its whole duration,
+        so trying to take it is the signal, with no new state required.
+
+        Guarded on `path.exists()` first: `_flock` opens the path with
+        `"a+"`, which *creates* it, and an unguarded probe would scatter
+        lock files as a side effect of listing.
+
+        Probed with `LOCK_SH`, not `LOCK_EX`: a shared lock is blocked by
+        the exclusive holder a real turn takes — the entire signal — and by
+        nothing else. An exclusive probe would also collide with another
+        concurrent `list agents` and with `_reclaim_agent_lock`, reporting
+        `busy` for an agent that is merely being listed or reclaimed.
+
+        Not `revalidate=True`: the probe does not care whether the inode
+        got reclaimed underneath it, and the revalidation loop would spin
+        on that instead of just answering the question.
+        """
+        path = self._agent_lock_path(name)
+        if not path.exists():
+            return False
+        try:
+            with _flock(path, fcntl.LOCK_SH | fcntl.LOCK_NB):
+                return False
+        except BlockingIOError:
+            return True
+
     def _reload(self) -> None:
         self.agents = {}
         for name, entry in self._load_state().items():
@@ -563,6 +618,9 @@ class Orchestrator:
                 ),
             )
             agent.session_id = entry.get("session_id")
+            agent.created_at = entry.get("created_at")
+            agent.last_turn_at = entry.get("last_turn_at")
+            agent.turns = entry.get("turns")
             self.agents[name] = agent
 
     def _load_state(self) -> dict[str, dict]:
@@ -579,6 +637,13 @@ class Orchestrator:
                     if a.backend.reasoning_effort is not None
                     else {}
                 ),
+                **({"created_at": a.created_at} if a.created_at is not None else {}),
+                **(
+                    {"last_turn_at": a.last_turn_at}
+                    if a.last_turn_at is not None
+                    else {}
+                ),
+                **({"turns": a.turns} if a.turns is not None else {}),
             }
             for name, a in self.agents.items()
         }
@@ -728,7 +793,17 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(json.dumps(result.structured, indent=2, sort_keys=True))
 
 
+# ISO-8601-UTC-seconds width, matching _utcnow()'s "2026-08-25T23:27:32Z":
+# padding a missing "-" out to this width keeps every field after it, up to
+# session=, aligned regardless of which agents have talked yet.
+_TIMESTAMP_WIDTH = len("2026-08-25T23:27:32Z")
+
+
 def _print_agents(orchestrator: Orchestrator) -> None:
+    # Printed unconditionally, including the `no agents` case: which
+    # registry a `--team`/AGENTS_ARMY_STATE_FILE/AGENTS_ARMY_HOME ladder
+    # resolved to is exactly what's unknowable without this line.
+    print(f"registry: {orchestrator.state_file}")
     agents = orchestrator.list_agents()
     if not agents:
         print("no agents")
@@ -736,8 +811,22 @@ def _print_agents(orchestrator: Orchestrator) -> None:
     width = max(20, max(len(n) for n in agents))
     for name in agents:
         agent = orchestrator.agents[name]
+        model = agent.backend.model or "-"
+        effort = agent.backend.reasoning_effort or "-"
+        turns = "-" if agent.turns is None else str(agent.turns)
+        created = agent.created_at or "-"
+        last = agent.last_turn_at or "-"
+        # A fixed-width marker, not a bare "busy" appended only when true, so
+        # the session= column starts at the same offset whether or not this
+        # agent is mid-turn.
+        busy = "busy" if orchestrator._agent_is_busy(name) else "    "
         sid = agent.session_id or "-"
-        print(f"{name:{width}} backend={agent.backend.name:6} session={sid}")
+        print(
+            f"{name:{width}}  backend={agent.backend.name:6}  "
+            f"model={model:6}  effort={effort:6}  turns={turns:<3}  "
+            f"created={created:{_TIMESTAMP_WIDTH}}  last={last:{_TIMESTAMP_WIDTH}}  "
+            f"{busy}  session={sid}"
+        )
 
 
 def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:

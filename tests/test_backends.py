@@ -2470,8 +2470,11 @@ class TestOrchestrator:
         assert orch3.agents["a1"].session_id == "persist-me"
         assert orch3.talk("a1", "second").reply == "reply"
 
-    def test_persist_writes_sorted_indented_json(self, tmp_path: Path) -> None:
+    def test_persist_writes_sorted_indented_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         state_file = tmp_path / "state.json"
+        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch = Orchestrator(state_file=state_file)
         orch.spawn("b", "codex")
         orch.spawn("a", "claude")
@@ -2479,11 +2482,15 @@ class TestOrchestrator:
             "{\n"
             '  "a": {\n'
             '    "backend": "claude",\n'
-            '    "session_id": null\n'
+            '    "created_at": "2026-08-25T00:00:00Z",\n'
+            '    "session_id": null,\n'
+            '    "turns": 0\n'
             "  },\n"
             '  "b": {\n'
             '    "backend": "codex",\n'
-            '    "session_id": null\n'
+            '    "created_at": "2026-08-25T00:00:00Z",\n'
+            '    "session_id": null,\n'
+            '    "turns": 0\n'
             "  }\n"
             "}\n"
         )
@@ -3453,9 +3460,10 @@ class TestCLI:
     def test_cmd_list_empty(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        state_file = tmp_path / "s.json"
+        orch = Orchestrator(state_file=state_file)
         _cmd_list(orch, _options(["list"]))
-        assert capsys.readouterr().out == "no agents\n"
+        assert capsys.readouterr().out == f"registry: {state_file}\nno agents\n"
 
     def test_cmd_list_prints_each_agent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -4139,7 +4147,9 @@ class TestVerboseFlag:
     @pytest.mark.parametrize("flag", ["-v", "--verbose", "-vv", "-vvv"])
     def test_flag_is_not_treated_as_a_command(self, flag: str, capsys) -> None:
         main([flag, "list"])
-        assert capsys.readouterr().out == "no agents\n"
+        out = capsys.readouterr().out
+        assert out.startswith("registry: ")
+        assert out.endswith("no agents\n")
 
     def test_the_loudest_flag_given_wins(self) -> None:
         main(["-v", "-vv", "list"])
