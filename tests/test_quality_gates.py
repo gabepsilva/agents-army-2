@@ -2162,6 +2162,45 @@ class TestMutationCache:
         assert mutation_cache.main([]) == 1
         assert "tests/check_b.py" in capsys.readouterr().out
 
+    def test_check_d_accepts_python_files_as_a_space_separated_string(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """pytest's ini format allows python_files as a list or as a single
+        space-separated string; the check must parse both the way pytest
+        does, not just the list form."""
+        selected = tmp_path / "tests" / "check_a.py"
+        _write(selected, "assert True\n")
+        pyproject = self._project(
+            tmp_path,
+            [str(selected)],
+            ini_options={"python_files": "check_*.py"},
+        )
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 0
+
+        unselected = tmp_path / "tests" / "check_b.py"
+        _write(unselected, "assert True\n")
+        assert mutation_cache.main([]) == 1
+        assert "tests/check_b.py" in capsys.readouterr().out
+
+    def test_check_d_a_directory_selection_entry_covers_only_what_is_beneath_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """mutmut passes a directory selection entry straight through as a
+        pytest CLI arg, so pytest collects everything beneath it -- but the
+        check must not treat the whole watched root as covered just because
+        one subdirectory of it is selected."""
+        _write(tmp_path / "tests" / "unit" / "test_a.py", "assert True\n")
+        _write(tmp_path / "tests" / "test_b.py", "assert True\n")
+        pyproject = self._project(tmp_path, ["tests/unit"])
+        self._wire(monkeypatch, tmp_path, pyproject)
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_b.py" in out
+        assert "tests/unit/test_a.py" not in out
+
     # -- Check E: the gate's own input cannot survive a run that measured
     # nothing. -----------------------------------------------------------------
 
