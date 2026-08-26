@@ -302,7 +302,7 @@ class _AgentRecord:
     projection over both rather than a mirror of `Agent.__init__`.
 
     Frozen because a record is what a file said (or is about to say), never
-    the object a turn mutates -- that stays `Agent`.
+    the object a turn mutates — that stays `Agent`.
     """
 
     backend: str
@@ -320,7 +320,7 @@ class _AgentRecord:
         Only a missing `backend` is rejected here: it is the one field with
         nothing sensible to be `None`, and every other key is legitimately
         absent in a registry written before it existed. An unregistered
-        backend *name* is not this function's error -- it stays `get_backend`'s,
+        backend *name* is not this function's error — it stays `get_backend`'s,
         raised in `into_agent`, so a read-only reader that never builds an
         Agent is unaffected.
         """
