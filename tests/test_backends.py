@@ -3600,7 +3600,7 @@ class TestCLI:
         assert captured.err == "unable to determine agents-army version\n"
         assert "Traceback" not in captured.err
 
-    def test_main_version_after_command_remains_prompt_data(
+    def test_main_version_after_command_is_rejected(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,

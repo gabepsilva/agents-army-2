@@ -260,7 +260,9 @@ def test_version_after_the_separator_stays_prompt_text(
 
     orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
 
-    assert capsys.readouterr().out.endswith("reply:text with --version in it\n")
+    out = capsys.readouterr().out
+    assert out.endswith("reply:text with --version in it\n")
+    assert "0.1.0" not in out
 
 
 def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
