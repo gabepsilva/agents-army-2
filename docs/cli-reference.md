@@ -208,9 +208,10 @@ metadata are left for the caller to remove with `git worktree remove`.
 Neither `--team` alone nor a bare `NAME` is an error; `delete` with
 **neither** is (exit 2). Teardown takes an exclusive, non-blocking lock on
 the team and refuses (exit 1) if another command is using it; it also exits
-1 if the named team doesn't exist. It never reads the registry it removes,
-so it still works on a team whose state file has gone bad. See
-[Teams](#teams) below.
+1 if the named team doesn't exist under `$AGENTS_ARMY_TEAMS_DIR` (with
+`AGENTS_ARMY_TEAMS_DIR` unset, an unresolvable name is exit 2 instead — see
+the table below). It never reads the registry it removes, so it still works
+on a team whose state file has gone bad. See [Teams](#teams) below.
 
 Deleting a single agent never fails on account of its lock file: if a turn
 for that agent is in flight, the file is left for that turn to clean up as
