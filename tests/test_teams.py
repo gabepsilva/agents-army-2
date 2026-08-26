@@ -16,22 +16,22 @@ import pytest
 import orchestrator
 from backends.base import AgentBackend, TurnError, TurnResult
 from backends.registry import register_backend
-from orchestrator import teams
+from orchestrator import paths, teams
 
 
 @pytest.fixture(autouse=True)
 def _protect_module_globals(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore the path constants after every test.
+    """Restore `ROOT`/`TEAMS_DIR` after every test.
 
-    `--team` reassigns `orchestrator.STATE_FILE`/`WORKDIR`/`SKILLS_DIR` as
-    real module globals (by design — see the PR description), not through
-    `monkeypatch`. Registering their current values here means monkeypatch's
-    teardown puts them back regardless of what a test or `main()` did to
-    them meanwhile, so one test's team never leaks into the next.
+    Nothing rebinds them any more — `--team` resolves its paths into a
+    returned `RuntimePaths` instead. These two are here because most tests
+    in this file point them at a `tmp_path` with a bare
+    `monkeypatch.setattr` of their own and the machine's real
+    `$AGENTS_ARMY_ROOT` must not be what a test that forgets one walks;
+    registering the current values makes that restoration unconditional.
+    `STATE_FILE`/`WORKDIR`/`SKILLS_DIR` no longer need it: a team run leaves
+    them alone (see `test_a_team_run_leaves_the_module_path_globals_alone`).
     """
-    monkeypatch.setattr(orchestrator, "STATE_FILE", orchestrator.STATE_FILE)
-    monkeypatch.setattr(orchestrator, "WORKDIR", orchestrator.WORKDIR)
-    monkeypatch.setattr(orchestrator, "SKILLS_DIR", orchestrator.SKILLS_DIR)
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", orchestrator.TEAMS_DIR)
     monkeypatch.setattr(orchestrator, "ROOT", orchestrator.ROOT)
 
@@ -117,6 +117,20 @@ def _env_without(*unset: str, **overrides: str) -> dict[str, str]:
 
 def _read_state(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _resolved_paths(argv: list[str]) -> paths.RuntimePaths:
+    """The `RuntimePaths` a run of `argv` resolves, without running the verb.
+
+    `_resolve_team` is where a `--team` run's paths are now decided, and the
+    object it returns is the only thing downstream reads — so this is the
+    seam that says what a team resolves to, in place of the module globals
+    the old assertions read.
+    """
+    opts = orchestrator._build_parser().parse_args(argv)
+    runtime_paths, lock = orchestrator._resolve_team(opts, teardown=False)
+    with lock:
+        return runtime_paths
 
 
 def _make_team(
@@ -276,15 +290,17 @@ def test_state_file_and_skills_dir_resolve_under_the_team_root(
     worktree.mkdir(parents=True)
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
 
-    orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
+    resolved = _resolved_paths(["create", "a", "--team", "t1", "-b", "recording"])
 
     assert (
-        teams_dir / "t1" / "agents" / "orchestrator_state.json"
-        == orchestrator.STATE_FILE
+        resolved.state_file == teams_dir / "t1" / "agents" / "orchestrator_state.json"
     )
-    assert orchestrator.STATE_FILE.exists()
-    assert worktree == orchestrator.WORKDIR
-    assert worktree / "SKILLS" == orchestrator.SKILLS_DIR
+    assert resolved.workdir == worktree
+    assert resolved.skills_dir == worktree / "SKILLS"
+
+    orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
+
+    assert resolved.state_file.exists()
 
 
 def test_explicit_agents_army_skills_still_wins_under_team(
@@ -298,9 +314,9 @@ def test_explicit_agents_army_skills_still_wins_under_team(
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(custom_skills))
 
-    orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
+    resolved = _resolved_paths(["create", "a", "--team", "t1", "-b", "recording"])
 
-    assert custom_skills == orchestrator.SKILLS_DIR
+    assert resolved.skills_dir == custom_skills
 
 
 def test_teamless_behavior_is_unaffected_by_team_support(
@@ -1525,3 +1541,59 @@ def test_agents_army_root_does_not_conflict_with_team(
     orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
 
     assert (teams_dir / "t1" / "agents" / "orchestrator_state.json").exists()
+
+
+def test_two_teams_in_one_process_do_not_share_a_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second `main()` must not inherit the first run's team."""
+    register_backend("recording", _make_recording_backend([]))
+    teams_dir = tmp_path / "teams"
+    for team in ("t1", "t2"):
+        (teams_dir / team / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["create", "first", "--team", "t1", "-b", "recording"])
+    orchestrator.main(["create", "second", "--team", "t2", "-b", "recording"])
+
+    def state(team: str) -> Path:
+        return teams_dir / team / "agents" / "orchestrator_state.json"
+
+    assert sorted(_read_state(state("t1"))) == ["first"]
+    assert sorted(_read_state(state("t2"))) == ["second"]
+
+
+def test_a_second_teams_turn_runs_in_its_own_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workdir leak a registry assertion alone would miss."""
+    seen: list[Path] = []
+    register_backend("recording", _make_recording_backend(seen))
+    teams_dir = tmp_path / "teams"
+    for team in ("t1", "t2"):
+        (teams_dir / team / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    orchestrator.main(["talk", "a", "--team", "t1", "-b", "recording", "-p", "hi"])
+    orchestrator.main(["talk", "a", "--team", "t2", "-b", "recording", "-p", "hi"])
+
+    assert seen == [teams_dir / "t1" / "worktree", teams_dir / "t2" / "worktree"]
+
+
+def test_a_team_run_leaves_the_module_path_globals_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--team` resolves paths for the run; it never rebinds the globals."""
+    register_backend("recording", _make_recording_backend([]))
+    teams_dir = tmp_path / "teams"
+    (teams_dir / "t1" / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    before = (orchestrator.STATE_FILE, orchestrator.WORKDIR, orchestrator.SKILLS_DIR)
+
+    orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
+
+    assert before == (
+        orchestrator.STATE_FILE,
+        orchestrator.WORKDIR,
+        orchestrator.SKILLS_DIR,
+    )

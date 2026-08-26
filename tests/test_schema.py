@@ -859,7 +859,7 @@ class TestTalkSchema:
     ) -> None:
         """Exit 2 like every other bad argument, so a caller can tell 'fix your
         schema' from 'the agent failed' without reading the message."""
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         lax = _write(tmp_path, {"type": "object", "properties": {}, "required": []})
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "fresh", "--schema", str(lax), "-p", "go"])
@@ -878,7 +878,7 @@ class TestTalkSchema:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "a", "--schema", str(tmp_path / "absent.json"), "-p", "go"])
         captured = capsys.readouterr()
@@ -898,7 +898,7 @@ class TestTalkSchema:
         stderr line are the boundary's, and a `ReplyValidationError` shares a
         base with the `SchemaLoadError` that exits 2 above.
         """
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         bad = '{"stage":"build","verdict":"banana"}'
         calls = _scripted([bad, bad])
         schema_path = _write(tmp_path, STRICT)
@@ -1066,7 +1066,7 @@ class TestTalkSchema:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "--schema", str(_write(tmp_path, STRICT)), "-p", "go"])
         assert capsys.readouterr().err == "claude output was not JSON\n"

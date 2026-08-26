@@ -60,6 +60,26 @@ STATE_FILE = _PATHS.state_file
 WORKDIR = _PATHS.workdir
 SKILLS_DIR = _PATHS.skills_dir
 TEAMS_DIR = _PATHS.teams_dir
+
+
+def _global_paths() -> paths.RuntimePaths:
+    """The runtime paths as the module globals say they are, right now.
+
+    Read at call time, not once at import: the globals above are the seam
+    tests rebind (`monkeypatch.setattr(orchestrator, "STATE_FILE", ...)`),
+    and `_PATHS` would not see those rebinds. `home` has no such seam, so it
+    comes straight off the import-time resolution.
+    """
+    return paths.RuntimePaths(
+        root=ROOT,
+        home=_PATHS.home,
+        state_file=STATE_FILE,
+        workdir=WORKDIR,
+        skills_dir=SKILLS_DIR,
+        teams_dir=TEAMS_DIR,
+    )
+
+
 # The backend an agent gets when none is named: by `create`, and by the agent a
 # talk creates for a name that does not exist yet.
 DEFAULT_BACKEND = "claude"
@@ -153,9 +173,14 @@ def _utcnow() -> str:
 class Agent:
     """A single named agent backed by one persistent CLI session."""
 
-    def __init__(self, name: str, backend: AgentBackend) -> None:
+    def __init__(
+        self, name: str, backend: AgentBackend, workdir: Path | None = None
+    ) -> None:
         self.name = name
         self.backend = backend
+        # The directory this agent's turns run in; see the `workdir` property
+        # for what `None` means.
+        self._workdir = workdir
         self.session_id: str | None = None
         self.created_at: str | None = None
         self.last_turn_at: str | None = None
@@ -163,6 +188,17 @@ class Agent:
         # per attempt by design (see its own docstring), so a schema-repair
         # retry inside `_validated_turn` increments this once per attempt.
         self.turns: int | None = None
+
+    @property
+    def workdir(self) -> Path:
+        """Where this agent's turns run.
+
+        Unset means "wherever the module global points when the turn starts",
+        which is what a bare `Agent(name, backend)` gets: resolving lazily
+        keeps the `orchestrator.WORKDIR` seam working for a caller that
+        rebinds it after building the agent.
+        """
+        return WORKDIR if self._workdir is None else self._workdir
 
     def talk(
         self,
@@ -181,7 +217,7 @@ class Agent:
         log.log(TRACE, "agent '%s' prompt in:\n%s", self.name, prompt)
         started = time.monotonic()
         result = self.backend.run_turn(
-            prompt, self.session_id, WORKDIR, timeout, schema
+            prompt, self.session_id, self.workdir, timeout, schema
         )
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
@@ -332,7 +368,7 @@ class _AgentRecord(NamedTuple):
             turns=agent.turns,
         )
 
-    def into_agent(self, name: str) -> Agent:
+    def into_agent(self, name: str, workdir: Path | None = None) -> Agent:
         """Build the live `Agent` this record describes.
 
         The one place a stored backend name is resolved: backend construction
@@ -346,6 +382,7 @@ class _AgentRecord(NamedTuple):
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
             ),
+            workdir,
         )
         agent.session_id = self.session_id
         agent.created_at = self.created_at
@@ -406,13 +443,32 @@ class Orchestrator:
     agent once and talk to it later, resuming the same CLI session.
     """
 
-    def __init__(self, state_file: Path | None = None) -> None:
-        self.state_file = STATE_FILE if state_file is None else state_file
+    def __init__(
+        self,
+        runtime_paths: paths.RuntimePaths | None = None,
+        *,
+        state_file: Path | None = None,
+    ) -> None:
+        self._runtime_paths = runtime_paths
+        self.state_file = (
+            self.runtime_paths.state_file if state_file is None else state_file
+        )
         self.agents: dict[str, Agent] = {}
         self._reload()
         log.debug(
             "state: loaded %d agent(s) from %s", len(self.agents), self.state_file
         )
+
+    @property
+    def runtime_paths(self) -> paths.RuntimePaths:
+        """The paths this registry's agents work from.
+
+        Unset — a bare `Orchestrator()` — resolves from the module globals on
+        every read rather than snapshotting them at construction, so a caller
+        that rebinds `orchestrator.SKILLS_DIR`/`WORKDIR` afterwards is still
+        honoured. `main` hands the run's resolved paths in instead.
+        """
+        return _global_paths() if self._runtime_paths is None else self._runtime_paths
 
     def spawn(
         self,
@@ -469,6 +525,7 @@ class Orchestrator:
                 model=model,
                 reasoning_effort=reasoning_effort,
             ),
+            self.runtime_paths.workdir,
         )
         agent.created_at = _utcnow()
         agent.turns = 0
@@ -726,7 +783,9 @@ class Orchestrator:
 
     def _reload(self) -> None:
         self.agents = {
-            name: _AgentRecord.from_entry(name, entry, self.state_file).into_agent(name)
+            name: _AgentRecord.from_entry(name, entry, self.state_file).into_agent(
+                name, self.runtime_paths.workdir
+            )
             for name, entry in self._load_state().items()
         }
 
@@ -834,7 +893,7 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     composed = prompt
     if opts.skill is not None:
         names = parse_skill_names(opts.skill)
-        resolved = resolve_skills(names, SKILLS_DIR)
+        resolved = resolve_skills(names, orchestrator.runtime_paths.skills_dir)
         composed = compose_skill_prompt(resolved, prompt)
         log.info(
             "agent '%s': attaching skill(s) %s",
@@ -919,7 +978,7 @@ def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     if opts.target == "agents":
         _print_agents(orchestrator)
         return
-    print(format_skill_listing(index_skills(SKILLS_DIR)))
+    print(format_skill_listing(index_skills(orchestrator.runtime_paths.skills_dir)))
 
 
 def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
@@ -974,10 +1033,13 @@ def _format_team_line(team: teams.Team, agents: dict[str, str] | None) -> str:
     return line
 
 
-def _print_teams() -> None:
-    root_teams = teams.discover(ROOT)
-    groups = [(ROOT, root_teams)]
-    if TEAMS_DIR is not None:
+def _print_teams(runtime_paths: paths.RuntimePaths) -> None:
+    root = runtime_paths.root
+    teams_dir = runtime_paths.teams_dir
+    state_file = runtime_paths.state_file
+    root_teams = teams.discover(root)
+    groups = [(root, root_teams)]
+    if teams_dir is not None:
         # Walked unconditionally, then deduped by path — not skipped
         # whenever TEAMS_DIR overlaps ROOT. Dropping the whole group
         # whenever TEAMS_DIR is an *ancestor* of ROOT hid every team outside
@@ -986,23 +1048,23 @@ def _print_teams() -> None:
         # already shown under ROOT is simply never repeated under TEAMS_DIR.
         seen = {team.path for team in root_teams}
         extra_teams = [
-            team for team in teams.discover(TEAMS_DIR) if team.path not in seen
+            team for team in teams.discover(teams_dir) if team.path not in seen
         ]
         if extra_teams:
-            groups.append((TEAMS_DIR, extra_teams))
-    # STATE_FILE, not "$ROOT/orchestrator_state.json": the registry `list
-    # teams` reports as (teamless) must be the one `list agents`/`talk`
-    # actually use, which an explicit AGENTS_ARMY_STATE_FILE or
-    # AGENTS_ARMY_HOME relocates away from ROOT (see the STATE_FILE ladder
-    # above) — main() never lets --team reach this function, so STATE_FILE
-    # here is always the teamless resolution, never a team's. Not
+            groups.append((teams_dir, extra_teams))
+    # The resolved state file, not "$root/orchestrator_state.json": the
+    # registry `list teams` reports as (teamless) must be the one `list
+    # agents`/`talk` actually use, which an explicit AGENTS_ARMY_STATE_FILE
+    # or AGENTS_ARMY_HOME relocates away from root (see the state file
+    # ladder in orchestrator.paths) — main() never lets --team reach this
+    # function, so these paths are always the teamless resolution. Not
     # `agents/orchestrator_state.json` inside a directory, so `teams.discover`
     # never finds this bare file on its own — checked explicitly. Its
     # existence and its readability are tracked separately: a corrupt
     # registry here must still show up as a flagged line, the same as a
     # corrupt team registry does, rather than being indistinguishable from
     # "there was never a teamless registry at all".
-    has_teamless = STATE_FILE.is_file()
+    has_teamless = state_file.is_file()
 
     if not any(group_teams for _, group_teams in groups) and not has_teamless:
         print("no teams")
@@ -1017,8 +1079,8 @@ def _print_teams() -> None:
         print()
 
     if has_teamless:
-        print(f"(teamless) {STATE_FILE}")
-        teamless = _agents_from_registry(STATE_FILE)
+        print(f"(teamless) {state_file}")
+        teamless = _agents_from_registry(state_file)
         if not teamless:
             print(f"  {_format_agents(teamless)}")
         else:
@@ -1547,11 +1609,15 @@ def _resolve_team_root(team: str, opts: argparse.Namespace) -> Path:
 
 def _resolve_team(
     opts: argparse.Namespace, teardown: bool
-) -> AbstractContextManager[None]:
-    """Point STATE_FILE/WORKDIR/SKILLS_DIR at a team's paths and lock it.
+) -> tuple[paths.RuntimePaths, AbstractContextManager[None]]:
+    """Resolve the run's paths and, for a `--team` run, lock the team.
 
-    Teamless commands (`opts.team is None`) are untouched: this returns
-    `nullcontext()` and leaves the three globals exactly as they were.
+    Returns the `RuntimePaths` every read site downstream works from, so
+    nothing here rebinds module state and a second `main()` in one process
+    cannot inherit the first one's team.
+
+    Teamless commands (`opts.team is None`) get the globals as they stand
+    plus `nullcontext()`.
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
@@ -1559,17 +1625,11 @@ def _resolve_team(
     `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.
-
-    Reassigning the globals here, once, rather than threading a `Paths`
-    object through `Orchestrator`/`Agent.talk`/every `cmd_*`, is deliberate:
-    each constant is read at call time at exactly four sites, and `WORKDIR =
-    HOME` at import time means reassigning `orchestrator.HOME` alone would
-    move nothing — all three must be set individually.
     """
-    global STATE_FILE, WORKDIR, SKILLS_DIR
+    resolved = _global_paths()
     team = opts.team
     if team is None:
-        return nullcontext()
+        return resolved, nullcontext()
     _validate_team_name(team, opts)
     if "AGENTS_ARMY_STATE_FILE" in os.environ:
         opts._parser.error(
@@ -1589,7 +1649,7 @@ def _resolve_team(
         # `delete NAME --team` never launch a backend, they read and edit a
         # JSON file, so they must work on a team whose worktree is gone (the
         # state teardown deliberately leaves behind) or not there yet.
-        # `create` keeps the gate because it stores WORKDIR at resolution —
+        # `create` keeps the gate because it stores the workdir at resolution —
         # letting it through would only defer this same failure to `talk`
         # with a registry already written.
         if not worktree.is_dir():
@@ -1613,15 +1673,15 @@ def _resolve_team(
         # check still passes for it. A no-op under the AGENTS_ARMY_ROOT walk:
         # `teams.resolve` only ever returns directories that already exist.
         raise OrchestratorError(f"team '{team}' not found at {team_root}")
-    STATE_FILE = team_root / "agents" / "orchestrator_state.json"
-    WORKDIR = worktree
-    SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", worktree / "SKILLS"))
     # LOCK_SH for every team verb but teardown, so concurrent turns in one
     # team don't serialize on each other; LOCK_EX|LOCK_NB for teardown, so a
     # team must not be torn down while a command in it is running, and a
     # busy team fails fast (flock has no writer fairness — see _team_locked).
     mode = fcntl.LOCK_EX | fcntl.LOCK_NB if teardown else fcntl.LOCK_SH
-    return _team_locked(_team_lock_path(team_root), team, mode)
+    return (
+        resolved.for_team(team_root, os.environ),
+        _team_locked(_team_lock_path(team_root), team, mode),
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1661,7 +1721,7 @@ def main(argv: list[str] | None = None) -> None:
     # require NAME, so this is False for them without inspecting opts.team.
     teardown = opts.verb == "delete" and opts.name is None
     try:
-        team_lock = _resolve_team(opts, teardown)
+        runtime_paths, team_lock = _resolve_team(opts, teardown)
         with team_lock:
             log.debug("cli: dispatching '%s'", opts.verb)
             if teardown:
@@ -1674,10 +1734,10 @@ def main(argv: list[str] | None = None) -> None:
                 _teardown_team(opts.team, opts._team_root)
             elif list_teams:
                 # Also ahead of Orchestrator(): that constructor binds one
-                # STATE_FILE, and this reads N of them.
-                _print_teams()
+                # state file, and this reads N of them.
+                _print_teams(runtime_paths)
             else:
-                VERBS[opts.verb](Orchestrator(), opts)
+                VERBS[opts.verb](Orchestrator(runtime_paths), opts)
     except _CLI_ERRORS as exc:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)
