@@ -115,7 +115,7 @@ aarmy talk doku --team "$team" -v -b claude -m opus -e medium \
     departs from the original request and why, since the discussion is allowed to change the ask; \
     the alternatives that were rejected and the reason each lost; the compromises accepted and what \
     they cost; the risk this carries and what would catch it; and what a reader gains when it ships. \
-    Return nothing here, just the consice comment in shor paragraphs or bullet points. \
+    Return nothing here, just the concise comment in short paragraphs or bullet points. \
     Post as the github app: \
     app_id: 4577311 \
     private_key: ~/keys/doku-documentation-agent.2026-08-12.private-key.pem" &> "$log_dir/doku.log"
