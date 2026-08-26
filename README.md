@@ -298,7 +298,9 @@ its own working directory, isolated from every other team. This is what
 lets two fleets work two different GitHub issues at once without both
 running `git checkout`/`commit`/`gh pr create` against the same tree.
 
-A team lives under `$AGENTS_ARMY_TEAMS_DIR/<team>/`:
+A team lives under `<team_root>/<team>/`, where `<team_root>` is
+`$AGENTS_ARMY_TEAMS_DIR` if set, otherwise wherever `--team` resolves the
+team under `$AGENTS_ARMY_ROOT` — see below:
 
 ```
 $AGENTS_ARMY_TEAMS_DIR/<team>/
@@ -333,9 +335,27 @@ script came from — the #80 run had an agent editing seven files there. This
 doc kept recommending the broken value after `go.sh` itself moved on; that is
 fixed here too.
 
+`AGENTS_ARMY_TEAMS_DIR` is optional, not required: when it is set, `--team
+NAME` resolves straight to `$AGENTS_ARMY_TEAMS_DIR/NAME` — no walk, no
+ambiguity, and every example on this page keeps working exactly as shown.
+When it is unset, `--team NAME` resolves by walking `$AGENTS_ARMY_ROOT` the
+same way `orchestrator list teams` does (see [Listing every
+team](#listing-every-team)): any directory with an `agents/` or `worktree/`
+subdirectory is a candidate, and `NAME` may be a bare team name (`issue-97`)
+or a `/`-qualified tail of the path `list teams` prints
+(`agents-army-2/gdw-v3/issue-97`). One matching candidate resolves; zero
+matches is an error naming `$AGENTS_ARMY_ROOT` with a recovery instruction;
+two or more matches is an error listing every candidate's full path and
+asking for a qualified name — `--team` never guesses which team you meant. A
+`/`-qualified name is rejected outright while `AGENTS_ARMY_TEAMS_DIR` is set:
+it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
+`AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
+
 The orchestrator never runs `git` itself — you create the worktree, and
-`--team` refuses to run `create`/`talk`/`list` against a team whose
-`worktree/` doesn't exist yet:
+`--team` refuses to run `create`/`talk` against a team whose `worktree/`
+doesn't exist yet, since those launch a backend into it. `list agents --team`
+and `delete NAME --team` only read and edit the registry, so they work even
+with `worktree/` missing or not yet created:
 
 ```sh
 git worktree add -B issue-73 "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree" origin/master

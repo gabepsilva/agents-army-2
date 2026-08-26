@@ -668,8 +668,9 @@ def _add_team_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--team",
         help=(
-            "run against $AGENTS_ARMY_TEAMS_DIR/<team>/{agents,worktree} "
-            "instead of the teamless layout"
+            "run against team <team>'s {agents,worktree} instead of the "
+            "teamless layout; found under $AGENTS_ARMY_TEAMS_DIR if set, "
+            "otherwise resolved under $AGENTS_ARMY_ROOT"
         ),
     )
 
@@ -954,15 +955,20 @@ def _print_teams() -> None:
                 print(f"  {name} backend={backend}")
 
 
-def _teardown_team(team: str) -> None:
+def _teardown_team(team: str, team_root: Path) -> None:
     """Remove a team's registry, leaving its worktree and git metadata alone.
+
+    Takes the already-resolved `team_root` rather than rebuilding it from
+    `TEAMS_DIR / team`: `_resolve_team` is the one place a team name is
+    joined to a root, whether that root is `TEAMS_DIR` or a `teams.resolve`
+    hit under `ROOT`.
 
     Scoped to `agents/`: that directory holds the state file, its lock, and
     the directory of per-agent turn locks. `worktree/` is a git working tree —
     removing it is `git worktree remove`, and it is the caller's call, not
     teardown's. The team lock's own file, a sibling of `agents/`, survives.
     """
-    agents_dir = cast(Path, TEAMS_DIR) / team / "agents"
+    agents_dir = team_root / "agents"
     if agents_dir.exists():
         shutil.rmtree(agents_dir)
     print(f"deleted team '{team}'")
@@ -1356,9 +1362,14 @@ def _resolve_talk_prompt(
 
 # A team name becomes a directory name; an agent name never does (see
 # Orchestrator._agent_lock_path, which digests it for exactly that reason).
-# '.' and '..' match the charset below but must still be rejected: they
-# escape TEAMS_DIR (Path('/teams') / '..' / 'agents' == Path('/teams/../agents')).
-_TEAM_NAME_RE = re.compile(r"[-_.A-Za-z0-9]+")
+# One or more '/'-joined segments, so a name can be a bare team ('issue-97')
+# or a root-relative qualified tail ('agents-army-2/gdw-v3/issue-97') — the
+# same string `teams.discover`/`teams.resolve` print and match against. '.'
+# and '..' match the charset per segment but must still be rejected there:
+# they escape the root (Path('/teams') / '..' / 'agents' ==
+# Path('/teams/../agents')), and the escape works from any segment, not just
+# the whole name.
+_TEAM_NAME_RE = re.compile(r"[-_.A-Za-z0-9]+(?:/[-_.A-Za-z0-9]+)*")
 
 
 def _team_lock_path(team_root: Path) -> Path:
@@ -1393,6 +1404,86 @@ def _team_locked(path: Path, team: str, mode: int) -> Iterator[None]:
         yield
 
 
+def _usage_error(opts: argparse.Namespace, message: str) -> NoReturn:
+    """`opts._parser.error(message)`, typed `NoReturn`.
+
+    `opts._parser` is a dynamically-set `argparse.Namespace` attribute, so
+    neither `ty` nor a reader can see that `_CLIArgumentParser.error` never
+    returns; a caller that must produce a value (`_resolve_team_root`) needs
+    that fact spelled out. The fallback raise carries no message: it can
+    never execute (`.error()` always raises `SystemExit` first), so a
+    message here would be untestable text with nothing to check it against.
+    """
+    opts._parser.error(message)
+    raise AssertionError  # pragma: no cover
+
+
+def _validate_team_name(team: str, opts: argparse.Namespace) -> None:
+    if not _TEAM_NAME_RE.fullmatch(team) or any(
+        segment in (".", "..") for segment in team.split("/")
+    ):
+        _usage_error(
+            opts,
+            f"invalid team name {team!r}: must match "
+            f"{_TEAM_NAME_RE.pattern!r} segment-by-segment, and no segment "
+            "may be '.' or '..'",
+        )
+    if "/" in team and TEAMS_DIR is not None:
+        # A qualified name is ROOT-relative by construction — it is the
+        # string `list teams` prints under the ROOT header. TEAMS_DIR
+        # supplies its own namespace, so joining a ROOT-relative name under
+        # it double-joins instead of resolving. See the PR description's
+        # worked example (go.sh's export + the printed qualified name).
+        _usage_error(
+            opts,
+            f"invalid team name {team!r}: a qualified name is relative to "
+            "$AGENTS_ARMY_ROOT and cannot be used while AGENTS_ARMY_TEAMS_DIR "
+            f"is set. Use the bare name {team.split('/')[-1]!r}, or "
+            f"unset AGENTS_ARMY_TEAMS_DIR to resolve under {ROOT}.",
+        )
+
+
+def _resolve_team_root(team: str, opts: argparse.Namespace) -> Path:
+    """The one place a team name is joined to a root.
+
+    `AGENTS_ARMY_TEAMS_DIR` set short-circuits: `team_root` is just
+    `TEAMS_DIR / team`, exactly as before this function existed, with no
+    walk and no ambiguity — the one script that matters (`go.sh`) exports it
+    and never reaches the branch below.
+
+    `AGENTS_ARMY_TEAMS_DIR` unset walks `$AGENTS_ARMY_ROOT` with
+    `teams.resolve` and never guesses: one hit is used, zero or two-or-more
+    are reported through `_usage_error` (exit 2) — a usage problem (bad
+    name, wrong environment, team lives elsewhere) regardless of which verb
+    asked, teardown included. That is distinct from the `TEAMS_DIR`-set
+    branch's own not-found case, handled by the caller once `team_root`
+    comes back here: a `TEAMS_DIR/name` that simply does not exist on disk
+    is "this resource is not there", not a usage mistake.
+    """
+    if TEAMS_DIR is not None:
+        return TEAMS_DIR / team
+    hits = teams.resolve(ROOT, team)
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        _usage_error(
+            opts,
+            f"no team named {team!r} under {ROOT}; a team is a directory "
+            "with an agents/ or worktree/ subdirectory, e.g.:\n"
+            f"  git worktree add -B {team} "
+            f"{ROOT}/<repo>/<workflow>/{team}/worktree ...\n"
+            "if the team lives outside $AGENTS_ARMY_ROOT, export "
+            "AGENTS_ARMY_TEAMS_DIR to point at its parent",
+        )
+    _usage_error(
+        opts,
+        f"team name {team!r} is ambiguous under {ROOT}:\n"
+        + "\n".join(f"  {hit}" for hit in hits)
+        + "\nre-run with a qualified name, e.g. --team "
+        + hits[0].relative_to(ROOT).as_posix(),
+    )
+
+
 def _resolve_team(
     opts: argparse.Namespace, teardown: bool
 ) -> AbstractContextManager[None]:
@@ -1403,9 +1494,10 @@ def _resolve_team(
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
-    already does — except for teardown of a team that no longer exists, which
-    is not a usage error and is left to raise `OrchestratorError` (exit 1),
-    the same as any other `delete` of something that isn't there.
+    already does — except for every verb but `create`/`talk` (`list`,
+    `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
+    which is not a usage error and is left to raise `OrchestratorError`
+    (exit 1), the same as any other `delete` of something that isn't there.
 
     Reassigning the globals here, once, rather than threading a `Paths`
     object through `Orchestrator`/`Agent.talk`/every `cmd_*`, is deliberate:
@@ -1417,17 +1509,7 @@ def _resolve_team(
     team = opts.team
     if team is None:
         return nullcontext()
-    if TEAMS_DIR is None:
-        opts._parser.error(
-            "--team requires AGENTS_ARMY_TEAMS_DIR to be set; export it "
-            "first, e.g.:\n"
-            '  export AGENTS_ARMY_TEAMS_DIR="$HOME/.agents-army/<repo>/<workflow>"'
-        )
-    if not _TEAM_NAME_RE.fullmatch(team) or team in (".", ".."):
-        opts._parser.error(
-            f"invalid team name {team!r}: must match "
-            f"{_TEAM_NAME_RE.pattern!r} and not be '.' or '..'"
-        )
+    _validate_team_name(team, opts)
     if "AGENTS_ARMY_STATE_FILE" in os.environ:
         opts._parser.error(
             "--team cannot be combined with an explicit AGENTS_ARMY_STATE_FILE "
@@ -1438,19 +1520,38 @@ def _resolve_team(
             "--team cannot be combined with an explicit AGENTS_ARMY_HOME "
             "(unset it, or drop --team)"
         )
-    team_root = cast(Path, TEAMS_DIR) / team
+    team_root = _resolve_team_root(team, opts)
+    opts._team_root = team_root
     worktree = team_root / "worktree"
-    if teardown:
-        # V5 does not apply to teardown: teardown must stay possible after
-        # `git worktree remove`, or a team's state is orphaned forever. Only
-        # the team root itself — not the worktree — has to still be there.
-        if not team_root.is_dir():
-            raise OrchestratorError(f"team '{team}' not found at {team_root}")
-    elif not worktree.is_dir():
-        opts._parser.error(
-            f"team workspace {worktree} does not exist; create it first with "
-            f"'git worktree add {worktree} ...'"
-        )
+    if opts.verb in ("create", "talk"):
+        # Gated on the verb, not on `teardown`: `list agents --team` and
+        # `delete NAME --team` never launch a backend, they read and edit a
+        # JSON file, so they must work on a team whose worktree is gone (the
+        # state teardown deliberately leaves behind) or not there yet.
+        # `create` keeps the gate because it stores WORKDIR at resolution —
+        # letting it through would only defer this same failure to `talk`
+        # with a registry already written.
+        if not worktree.is_dir():
+            opts._parser.error(
+                f"team workspace {worktree} does not exist; create it first "
+                f"with 'git worktree add {worktree} ...'"
+            )
+    elif not team_root.is_dir():
+        # Every other verb (list, delete NAME, and teardown) still needs
+        # `team_root` itself to exist, even though none of them touch
+        # `worktree/`. Skipping this check let a bogus `--team NAME` reach
+        # `_team_locked` -> `_flock`, whose first statement is
+        # `path.parent.mkdir(parents=True, exist_ok=True)` — silently
+        # fabricating `team_root` (and, for `delete NAME`'s later
+        # `_agent_lock_path`, `agents/` alongside it) on disk for a typo.
+        # That residue is self-perpetuating: once it exists, `_walk`'s
+        # candidate rule sees `agents/` and treats it as a real team on
+        # every future AGENTS_ARMY_ROOT walk. Teardown must stay possible
+        # after `git worktree remove`, or a team's state is orphaned
+        # forever — that removes only `worktree/`, not `team_root`, so this
+        # check still passes for it. A no-op under the AGENTS_ARMY_ROOT walk:
+        # `teams.resolve` only ever returns directories that already exist.
+        raise OrchestratorError(f"team '{team}' not found at {team_root}")
     STATE_FILE = team_root / "agents" / "orchestrator_state.json"
     WORKDIR = worktree
     SKILLS_DIR = Path(os.environ.get("AGENTS_ARMY_SKILLS", worktree / "SKILLS"))
@@ -1509,7 +1610,7 @@ def main(argv: list[str] | None = None) -> None:
                 # has — is exactly what teardown exists to remove. Building
                 # one first left `rm -rf` as the only way to retire a team
                 # whose state file had gone bad.
-                _teardown_team(opts.team)
+                _teardown_team(opts.team, opts._team_root)
             elif list_teams:
                 # Also ahead of Orchestrator(): that constructor binds one
                 # STATE_FILE, and this reads N of them.

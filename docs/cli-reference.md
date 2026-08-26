@@ -36,7 +36,7 @@ orchestrator create NAME [-b/--backend {claude,codex,grok,opencode}] [-m/--model
 | `-b`, `--backend` | backend to bind the agent to; defaults to `claude` |
 | `-m`, `--model` | model name to pass to the backend CLI |
 | `-e`, `--reasoning-effort` | reasoning-effort value to pass to the backend CLI |
-| `--team` | run against `$AGENTS_ARMY_TEAMS_DIR/NAME`'s registry and worktree instead of the teamless layout — see [Teams](#teams) |
+| `--team` | run against team `NAME`'s registry and worktree instead of the teamless layout; found under `$AGENTS_ARMY_TEAMS_DIR` if set, otherwise resolved by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 ```sh
 uv run orchestrator create reviewer -b claude
@@ -75,7 +75,7 @@ possibly-new agent without a separate `create` step.
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
-| `--team` | run against `$AGENTS_ARMY_TEAMS_DIR/NAME`'s registry and worktree instead of the teamless layout — see [Teams](#teams) |
+| `--team` | run against team `NAME`'s registry and worktree instead of the teamless layout; found under `$AGENTS_ARMY_TEAMS_DIR` if set, otherwise resolved by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
 passing more than one, or none, is an error.
@@ -226,9 +226,10 @@ metadata are left for the caller to remove with `git worktree remove`.
 Neither `--team` alone nor a bare `NAME` is an error; `delete` with
 **neither** is (exit 2). Teardown takes an exclusive, non-blocking lock on
 the team and refuses (exit 1) if another command is using it; it also exits
-1 if the named team doesn't exist. It never reads the registry it removes,
-so it still works on a team whose state file has gone bad. See
-[Teams](#teams) below.
+1 if the named team doesn't exist under `$AGENTS_ARMY_TEAMS_DIR` (with
+`AGENTS_ARMY_TEAMS_DIR` unset, an unresolvable name is exit 2 instead — see
+the table below). It never reads the registry it removes, so it still works
+on a team whose state file has gone bad. See [Teams](#teams) below.
 
 Deleting a single agent never fails on account of its lock file: if a turn
 for that agent is in flight, the file is left for that turn to clean up as
@@ -240,12 +241,15 @@ orchestrator_state.json.*.lock` when no orchestrator command is running.
 
 ## Teams
 
-`--team NAME`, on `create`/`talk`/`list`/`delete`, points the command at
-`$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json` for state and
-`$AGENTS_ARMY_TEAMS_DIR/NAME/worktree` for the backend's working directory
-(and, unless `AGENTS_ARMY_SKILLS` is set, its skill catalog) instead of the
-teamless layout — a named group of agents gets its own registry and its own
-working directory, isolated from every other team.
+`--team NAME`, on `create`/`talk`/`list`/`delete`, points the command at a
+team root's `agents/orchestrator_state.json` for state and its `worktree`
+for the backend's working directory (and, unless `AGENTS_ARMY_SKILLS` is
+set, its skill catalog) instead of the teamless layout — a named group of
+agents gets its own registry and its own working directory, isolated from
+every other team.
+
+The team root itself resolves one of two ways. With `AGENTS_ARMY_TEAMS_DIR`
+set, it is `$AGENTS_ARMY_TEAMS_DIR/NAME` — no walk, no ambiguity:
 
 ```sh
 repo=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")
@@ -259,10 +263,27 @@ uv run orchestrator delete --team issue-73          # teardown: agents/ only
 git worktree remove "$AGENTS_ARMY_TEAMS_DIR/issue-73/worktree"
 ```
 
+With `AGENTS_ARMY_TEAMS_DIR` unset, `--team NAME` instead resolves by
+walking `$AGENTS_ARMY_ROOT` — the same walk `list teams` uses (see
+[`list teams`](#list--show-agents-the-skill-catalog-or-every-team) above):
+any directory with an `agents/` or `worktree/` subdirectory is a candidate,
+and `NAME` may be a bare team name (`issue-73`) or a `/`-qualified tail of
+the path `list teams` prints (`my-repo/gdw-v3/issue-73`). One matching
+candidate resolves; zero is an error naming `$AGENTS_ARMY_ROOT` with a
+recovery instruction; two or more is an error listing every candidate's
+full path and asking for a qualified name instead of guessing. A
+`/`-qualified name is rejected outright while `AGENTS_ARMY_TEAMS_DIR` is
+set — it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
+`AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
+
+`create`/`talk --team` still require the team's `worktree` to exist, since
+they launch a backend into it; `list agents`/`delete NAME --team` only read
+and edit the registry, so they work whether or not `worktree` is there.
+
 | exit code | meaning |
 |---|---|
-| `2` | `AGENTS_ARMY_TEAMS_DIR` is unset, the team name is invalid, `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE`, or (for `create`/`talk`/`list`/`delete NAME`) the team's `worktree/` doesn't exist yet |
-| `1` | teardown (`delete --team NAME` with no agent name) found no such team, or another command currently holds the team's lock |
+| `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`) the team's `worktree/` doesn't exist yet |
+| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
 
 See the [README's Teams section](../README.md#teams) for the full
 `agents/`/`worktree/`/`.lock` layout and the locking model, and
