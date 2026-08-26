@@ -1706,7 +1706,7 @@ class TestMutationCache:
     def test_a_malformed_pyproject_fails_loudly_instead_of_crashing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     ) -> None:
-        """Checks A-C read pyproject.toml before compute_digest does, so they
+        """Checks A-D read pyproject.toml before compute_digest does, so they
         need their own guard against a missing or unparsable file rather than
         relying on the one around compute_digest."""
         pyproject = tmp_path / "pyproject.toml"
@@ -2102,6 +2102,28 @@ class TestMutationCache:
 
         assert mutation_cache.main([]) == 0
 
+    def test_check_d_rejects_a_file_that_is_both_selected_and_excused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A selected file is collected, so it can decide a verdict --
+        DIGEST_EXCLUSIONS claiming the opposite about the same file is a
+        stale exclusion or a stale selection, not a state Check D can wave
+        through."""
+        test_file = tmp_path / "tests" / "test_a.py"
+        _write(test_file, "assert True\n")
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(
+            mutation_cache,
+            "DIGEST_EXCLUSIONS",
+            {"tests/test_a.py": "stale exclusion left behind by a rename"},
+        )
+
+        assert mutation_cache.main([]) == 1
+        out = capsys.readouterr().out
+        assert "tests/test_a.py" in out
+        assert "both selected and in DIGEST_EXCLUSIONS" in out
+
     def test_check_d_conftest_is_exempt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2183,6 +2205,25 @@ class TestMutationCache:
         _write(unselected, "assert True\n")
         assert mutation_cache.main([]) == 1
         assert "tests/check_b.py" in capsys.readouterr().out
+
+    def test_python_files_string_is_parsed_with_shlex_not_str_split(
+        self, tmp_path: Path
+    ) -> None:
+        """str.split() and shlex.split() only disagree on a quoted token,
+        which is exactly why this must be shlex.split(): it is what pytest's
+        own INI-mode parser (_pytest.config.Config._getini_ini) uses for a
+        string-valued "args" option, and str.split() would instead cut the
+        quoted pattern in half."""
+        pyproject = self._project(
+            tmp_path,
+            ["tests/test_a.py"],
+            ini_options={"python_files": "'weird pattern*.py' *_test.py"},
+        )
+
+        assert mutation_cache._python_files_patterns(pyproject) == (
+            "weird pattern*.py",
+            "*_test.py",
+        )
 
     def test_check_d_a_directory_selection_entry_covers_only_what_is_beneath_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
