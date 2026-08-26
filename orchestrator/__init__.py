@@ -34,6 +34,7 @@ from backends.registry import UnknownBackendError
 from orchestrator import teams
 from orchestrator.schema import (
     ReplyValidationError,
+    SchemaError,
     SchemaLoadError,
     compose_schema_prompt,
     load_schema,
@@ -127,9 +128,37 @@ class TeamBusyError(OrchestratorError):
     """Teardown asked for a team another command is still holding."""
 
 
-# User-facing failures that must print one line and exit 1, never a traceback.
+# User-facing failures that must print one line and exit, never a traceback,
+# paired with the exit code each one earns. Scanned in order and the first
+# match wins, so the most specific entry comes first: SchemaLoadError is a
+# SchemaError but exits 2, and an exact-type dict would miss the subclasses
+# backends raise (ClaudeTurnError and friends).
+#
+# Every entry is a leaf the code raises on purpose. Listing a base broad
+# enough to catch an incidental builtin — ValueError under
+# UnknownBackendError, RuntimeError under TurnError — would reprint a real
+# bug inside a backend as a one-line user mistake with no traceback, which
+# is what OrchestratorError above exists to prevent.
 # UnknownBackendError comes from the registry, which cannot import this module.
-_CLI_ERRORS = (OrchestratorError, UnknownBackendError)
+_CLI_EXIT_CODES: tuple[tuple[tuple[type[Exception], ...], int], ...] = (
+    # A schema file that will not load is a bad argument, the same class of
+    # mistake argparse exits 2 for. A caller can tell "fix your schema" from
+    # "the agent failed" without reading the message.
+    ((SchemaLoadError,), 2),
+    (
+        (
+            OrchestratorError,
+            UnknownBackendError,
+            SkillError,
+            SchemaError,
+            TurnError,
+        ),
+        1,
+    ),
+)
+# The `except` clause's tuple, derived from the table above so the two cannot
+# drift: every type the boundary catches has a code, and vice versa.
+_CLI_ERRORS = tuple(error for errors, _code in _CLI_EXIT_CODES for error in errors)
 
 
 def _utcnow() -> str:
@@ -742,12 +771,8 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     prompt = opts.prompt
     composed = prompt
     if opts.skill is not None:
-        try:
-            names = parse_skill_names(opts.skill)
-            resolved = resolve_skills(names, SKILLS_DIR)
-        except SkillError as exc:
-            print(str(exc), file=sys.stderr)
-            raise SystemExit(1) from None
+        names = parse_skill_names(opts.skill)
+        resolved = resolve_skills(names, SKILLS_DIR)
         composed = compose_skill_prompt(resolved, prompt)
         log.info(
             "agent '%s': attaching skill(s) %s",
@@ -756,14 +781,7 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
         )
     schema = None
     if opts.schema is not None:
-        try:
-            schema = load_schema(Path(opts.schema))
-        except SchemaLoadError as exc:
-            # Exit 2, not 1: the schema file is a bad argument, the same class
-            # of mistake argparse exits 2 for. A caller can tell "fix your
-            # schema" from "the agent failed" without reading the message.
-            print(str(exc), file=sys.stderr)
-            raise SystemExit(2) from None
+        schema = load_schema(Path(opts.schema))
         log.info("agent '%s': validating the reply against %s", opts.name, schema.path)
     # After the skills and the schema resolve, so a bad argument exits without
     # having left a new agent behind for a turn that never ran.
@@ -774,17 +792,13 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
         opts.model,
         opts.reasoning_effort,
     )
-    try:
-        result = orchestrator.talk(
-            opts.name,
-            composed,
-            schema=schema,
-            retries=opts.retries,
-            timeout=opts.timeout,
-        )
-    except (TurnError, ReplyValidationError) as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1) from None
+    result = orchestrator.talk(
+        opts.name,
+        composed,
+        schema=schema,
+        retries=opts.retries,
+        timeout=opts.timeout,
+    )
     print(f"[{opts.name} session={result.session_id}]")
     if schema is None:
         print(result.reply)
@@ -843,12 +857,7 @@ def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     if opts.target == "agents":
         _print_agents(orchestrator)
         return
-    try:
-        catalog = index_skills(SKILLS_DIR)
-    except SkillError as exc:
-        print(str(exc), file=sys.stderr)
-        raise SystemExit(1) from None
-    print(format_skill_listing(catalog))
+    print(format_skill_listing(index_skills(SKILLS_DIR)))
 
 
 def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
@@ -1616,7 +1625,12 @@ def main(argv: list[str] | None = None) -> None:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)
         print(message, file=sys.stderr)
-        raise SystemExit(1) from None
+        code = next(
+            exit_code
+            for errors, exit_code in _CLI_EXIT_CODES
+            if isinstance(exc, errors)
+        )
+        raise SystemExit(code) from None
 
 
 if __name__ == "__main__":  # pragma: no cover

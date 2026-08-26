@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
-from backends.base import AgentBackend, TurnResult
+from backends.base import AgentBackend, TurnError, TurnResult
 from backends.registry import register_backend
 from orchestrator import teams
 
@@ -860,6 +860,47 @@ def test_an_incidental_blocking_io_error_is_not_a_busy_team(
         orchestrator.main(["talk", "a", *team_argv, "-b", "blocking", "-p", "hi"])
 
     assert "in use by another command" not in capsys.readouterr().err
+
+
+def test_a_boundary_caught_error_releases_the_team_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The next command must not find the team busy because the last one failed.
+
+    The lock is a context manager inside the boundary's `try`, so it unwinds
+    on the way out; this pins that, since the boundary is now the only place
+    a user-facing failure turns into an exit code.
+    """
+
+    class BoomBackend(AgentBackend):
+        @property
+        def name(self) -> str:
+            return "boom"
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
+            schema=None,
+        ) -> TurnResult:
+            raise TurnError("cli failed")
+
+    register_backend("boom", BoomBackend)
+    teams_dir = tmp_path / "teams"
+    (teams_dir / "t1" / "worktree").mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["talk", "a", "--team", "t1", "-b", "boom", "-p", "hi"])
+
+    assert excinfo.value.code == 1
+    assert capsys.readouterr().err.endswith("cli failed\n")
+    with (teams_dir / "t1" / ".lock").open("a+", encoding="utf-8") as lock:
+        # Would raise BlockingIOError if the failed command still held it.
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def test_teardown_of_an_unknown_team_exits_1(

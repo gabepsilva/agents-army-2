@@ -3451,7 +3451,10 @@ class TestCLI:
         assert capsys.readouterr().err.startswith("usage: orchestrator talk ")
 
     def test_cmd_talk_prints_backend_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BoomBackend(AgentBackend):
             @property
@@ -3471,14 +3474,18 @@ class TestCLI:
         register_backend("boom", BoomBackend)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("b", "boom")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "b", "-p", "hi"]))
+            main(["talk", "b", "-p", "hi"])
         captured = capsys.readouterr()
         assert captured.err == "claude output was not JSON\n"
         assert captured.out == ""
 
     def test_cmd_talk_prints_codex_backend_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BoomCodex(AgentBackend):
             @property
@@ -3498,12 +3505,16 @@ class TestCLI:
         register_backend("boomcodex", BoomCodex)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("c", "boomcodex")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "c", "-p", "hi"]))
+            main(["talk", "c", "-p", "hi"])
         assert capsys.readouterr().err == "codex did not report a thread_id\n"
 
     def test_cmd_talk_prints_any_turn_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """The CLI catches TurnError, so a new backend does not need a new except."""
 
@@ -3525,14 +3536,60 @@ class TestCLI:
         register_backend("boomany", BoomAny)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("d", "boomany")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "d", "-p", "hi"]))
+            main(["talk", "d", "-p", "hi"])
         captured = capsys.readouterr()
         assert captured.err == "cli failed\n"
         assert captured.out == ""
 
+    @pytest.mark.parametrize(
+        ("incidental", "message"),
+        [(RuntimeError, "dict changed size"), (ValueError, "bad literal")],
+    )
+    def test_an_incidental_builtin_from_a_backend_still_gets_a_traceback(
+        self,
+        incidental: type[Exception],
+        message: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The boundary lists leaf types, never the bases they inherit from.
+
+        `TurnError` is a `RuntimeError` and `UnknownBackendError` is a
+        `ValueError`; catching either base would reprint a genuine bug inside
+        a backend as a one-line user mistake with the traceback thrown away.
+        """
+
+        class IncidentalBackend(AgentBackend):
+            @property
+            def name(self) -> str:
+                return "incidental"
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+            ) -> TurnResult:
+                raise incidental(message)
+
+        register_backend("incidental", IncidentalBackend)
+        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch.spawn("i", "incidental")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
+        with pytest.raises(incidental, match=message):
+            main(["talk", "i", "-p", "hi"])
+        assert capsys.readouterr().err == ""
+
     def test_cmd_talk_prints_grok_backend_error(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BoomGrok(AgentBackend):
             @property
@@ -3552,8 +3609,9 @@ class TestCLI:
         register_backend("boomgrok", BoomGrok)
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("g", "boomgrok")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(orch, _talk_options(["talk", "g", "-p", "hi"]))
+            main(["talk", "g", "-p", "hi"])
         assert capsys.readouterr().err == "grok did not report a sessionId\n"
 
     def test_cmd_create_accepts_grok(

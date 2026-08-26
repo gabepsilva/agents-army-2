@@ -851,71 +851,69 @@ class TestTalkSchema:
         assert out.endswith('{\n  "stage": "build",\n  "verdict": "pass"\n}\n')
 
     def test_a_bad_schema_file_exits_2_and_creates_no_agent(
-        self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Exit 2 like every other bad argument, so a caller can tell 'fix your
         schema' from 'the agent failed' without reading the message."""
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         lax = _write(tmp_path, {"type": "object", "properties": {}, "required": []})
         with pytest.raises(SystemExit, match="2"):
-            _cmd_talk(
-                orch,
-                _talk_options(
-                    [
-                        "talk",
-                        "fresh",
-                        "--schema",
-                        str(lax),
-                        "-p",
-                        "go",
-                    ]
-                ),
-            )
+            main(["talk", "fresh", "--schema", str(lax), "-p", "go"])
         captured = capsys.readouterr()
         assert '"additionalProperties": false' in captured.err
+        # The bare message, not argparse's: `usage:` here would send a reader
+        # to the flag spelling for a file whose *contents* are the problem.
+        assert "usage:" not in captured.err
         assert captured.out == ""
         assert orch.list_agents() == ["a"]
 
     def test_a_missing_schema_file_exits_2(
-        self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="2"):
-            _cmd_talk(
-                orch,
-                _talk_options(
-                    [
-                        "talk",
-                        "a",
-                        "--schema",
-                        str(tmp_path / "absent.json"),
-                        "-p",
-                        "go",
-                    ]
-                ),
-            )
-        assert "cannot read schema file" in capsys.readouterr().err
+            main(["talk", "a", "--schema", str(tmp_path / "absent.json"), "-p", "go"])
+        captured = capsys.readouterr()
+        assert "cannot read schema file" in captured.err
+        assert "usage:" not in captured.err
 
     def test_exhausted_retries_exit_1(
-        self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Exit 1 like a failed turn: the agent ran and could not deliver."""
+        """Exit 1 like a failed turn: the agent ran and could not deliver.
+
+        Driven through `main()` rather than `cmd_talk`: the exit code and the
+        stderr line are the boundary's, and a `ReplyValidationError` shares a
+        base with the `SchemaLoadError` that exits 2 above.
+        """
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         bad = '{"stage":"build","verdict":"banana"}'
         calls = _scripted([bad, bad])
         schema_path = _write(tmp_path, STRICT)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(
-                orch,
-                _talk_options(
-                    [
-                        "talk",
-                        "a",
-                        "--schema",
-                        str(schema_path),
-                        "--retries",
-                        "1",
-                        "-p",
-                        "go",
-                    ]
-                ),
+            main(
+                [
+                    "talk",
+                    "a",
+                    "--schema",
+                    str(schema_path),
+                    "--retries",
+                    "1",
+                    "-p",
+                    "go",
+                ]
             )
         captured = capsys.readouterr()
         assert "$.verdict" in captured.err
@@ -1045,7 +1043,11 @@ class TestTalkSchema:
         assert calls[0]["schema"].path == (tmp_path / "schema.json").resolve()
 
     def test_a_backend_failure_still_exits_1(
-        self, orch: Orchestrator, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         class BoomBackend(AgentBackend):
             @property
@@ -1064,20 +1066,9 @@ class TestTalkSchema:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
+        monkeypatch.setattr(orchestrator, "Orchestrator", lambda: orch)
         with pytest.raises(SystemExit, match="1"):
-            _cmd_talk(
-                orch,
-                _talk_options(
-                    [
-                        "talk",
-                        "b",
-                        "--schema",
-                        str(_write(tmp_path, STRICT)),
-                        "-p",
-                        "go",
-                    ]
-                ),
-            )
+            main(["talk", "b", "--schema", str(_write(tmp_path, STRICT)), "-p", "go"])
         assert capsys.readouterr().err == "claude output was not JSON\n"
 
     def test_the_flag_composes_with_a_skill(
