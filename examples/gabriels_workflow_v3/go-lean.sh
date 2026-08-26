@@ -43,8 +43,11 @@ issue_is_converged() {
 
 echo "Setting up the worktree at $worktree"
 git fetch origin --quiet
+# A previous run that died before its cleanup leaves this worktree behind; the
+# add then fails and the whole workflow runs against the stale checkout.
+git worktree remove --force "$worktree" 2>/dev/null
 git worktree prune
-git worktree add --detach "$worktree" origin/master
+git worktree add --detach "$worktree" origin/master || exit 5
 
 # Normal path: one compact proposal and one adversarial decision. The author
 # gets one rebuttal and the reviewer one final decision only if they disagree.
@@ -74,7 +77,7 @@ aarmy talk spectacle --team "$team" -b claude -m opus -e low -v \
     Otherwise post at most three blocking disagreements, each with re-checkable evidence. \
     Do not post optional questions. You get one final decision turn after the author's rebuttal. \
     All communication goes in the GitHub issue; return only a short status here. \
-    Post as the github app: \
+    Authenticate as the github app: \
     app_id: 4287312 \
     private_key: ~/keys/ai-specialist-reviewer.2026-08-04.private-key.pem" &> "$log_dir/spectacle.log"
 
