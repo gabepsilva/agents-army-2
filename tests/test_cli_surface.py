@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import logging
 from pathlib import Path
 
@@ -351,12 +350,11 @@ def test_verbosity_counts_before_and_after_verb(
     assert logging.getLogger("backends").level == level
 
 
-def test_add_verb_parser_establishes_the_common_verb_contract() -> None:
-    subparsers = argparse.ArgumentParser().add_subparsers()
+@pytest.mark.parametrize(("verb", "argv"), VERB_INVOCATIONS)
+def test_every_verb_accepts_verbosity_after_the_verb(
+    verb: str, argv: list[str]
+) -> None:
+    opts = orchestrator._build_parser().parse_args([*argv, "-vv"])
 
-    parser = orchestrator._add_verb_parser(subparsers, "demo")
-
-    assert parser.prog == "orchestrator demo"
-    opts = parser.parse_args(["-vv"])
     assert opts.verbosity_after == 2
-    assert opts._parser is parser
+    assert opts._parser.prog == f"orchestrator {verb}"
