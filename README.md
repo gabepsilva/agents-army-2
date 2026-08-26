@@ -61,7 +61,8 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # Set the wall-clock turn limit for a flag-style invocation
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
-# List all agents and their session ids
+# List every agent: registry path, backend, model/effort, turn count,
+# timestamps, busy status, and session id
 uv run orchestrator list
 
 # Same agent listing, or the SKILLS/ catalog

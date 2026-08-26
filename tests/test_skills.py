@@ -364,15 +364,24 @@ class TestListCommand:
         return Orchestrator(state_file=tmp_path / "s.json")
 
     def test_list_agents_matches_the_list_command(
-        self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
+        self,
+        orch: Orchestrator,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch.spawn("a", "echo")
         _cmd_list(orch, _options(["list"]))
         via_command = capsys.readouterr().out
         _cmd_list(orch, _options(["list", "agents"]))
         via_flag = capsys.readouterr().out
         assert via_flag == via_command
-        assert via_flag == "a                    backend=echo   session=-\n"
+        assert via_flag == (
+            f"registry: {orch.state_file}\n"
+            "a                     backend=echo  model=-  effort=-  "
+            "turns=0  created=2026-08-25T00:00:00Z  last=-        "
+            "session=-\n"
+        )
 
     def test_list_agents_aligns_columns_for_long_names(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
@@ -381,19 +390,20 @@ class TestListCommand:
         orch.spawn("a", "echo")
         orch.spawn(long_name, "echo")
         _cmd_list(orch, _options(["list", "agents"]))
-        lines = capsys.readouterr().out.splitlines()
+        header, *lines = capsys.readouterr().out.splitlines()
+        assert header == f"registry: {orch.state_file}"
         assert len(lines) == 2
         backend_offsets = {line.index("backend=") for line in lines}
         session_offsets = {line.index("session=") for line in lines}
         assert len(backend_offsets) == 1
         assert len(session_offsets) == 1
-        assert backend_offsets.pop() == len(long_name) + 1
+        assert backend_offsets.pop() == len(long_name) + 2
 
     def test_list_agents_empty(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _cmd_list(orch, _options(["list", "agents"]))
-        assert capsys.readouterr().out == "no agents\n"
+        assert capsys.readouterr().out == f"registry: {orch.state_file}\nno agents\n"
 
     def test_list_skills_prints_catalog(
         self,
@@ -430,7 +440,7 @@ class TestListCommand:
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _cmd_list(orch, _options(["list"]))
-        assert capsys.readouterr().out == "no agents\n"
+        assert capsys.readouterr().out == f"registry: {orch.state_file}\nno agents\n"
 
     def test_unknown_list_target_is_argparse_exit_2(
         self, orch: Orchestrator, capsys: pytest.CaptureFixture[str]
@@ -772,8 +782,12 @@ class TestMainSkillInvocation:
         self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["list", "agents"])
-        assert (
-            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        created = isolated.agents["a"].created_at
+        assert capsys.readouterr().out == (
+            f"registry: {isolated.state_file}\n"
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
+            "session=-\n"
         )
 
     def test_list_skills_via_main(
@@ -799,8 +813,12 @@ class TestMainSkillInvocation:
         self, isolated: Orchestrator, capsys: pytest.CaptureFixture[str]
     ) -> None:
         main(["list"])
-        assert (
-            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        created = isolated.agents["a"].created_at
+        assert capsys.readouterr().out == (
+            f"registry: {isolated.state_file}\n"
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
+            "session=-\n"
         )
 
     def test_verbose_flag_is_peeled_before_list(
@@ -811,8 +829,12 @@ class TestMainSkillInvocation:
     ) -> None:
         with caplog.at_level("DEBUG", logger="orchestrator"):
             main(["-v", "list", "agents"])
-        assert (
-            capsys.readouterr().out == "a                    backend=echo   session=-\n"
+        created = isolated.agents["a"].created_at
+        assert capsys.readouterr().out == (
+            f"registry: {isolated.state_file}\n"
+            "a                     backend=echo  model=-  effort=-  "
+            f"turns=0  created={created}  last=-        "
+            "session=-\n"
         )
         assert "cli: dispatching 'list'" in [r.getMessage() for r in caplog.records]
 
