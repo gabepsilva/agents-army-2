@@ -4,21 +4,43 @@
 mutmut hashes what it mutates: every `[tool.mutmut] source_paths` file, per
 function, invalidated individually when its AST changes. This file hashes
 everything else that can decide a verdict — the selected tests, every other
-.py file mutmut copies into `mutants/` without hashing, and the pytest
-configuration that governs how those tests run. Analysis done against
+.py file mutmut copies into `mutants/` without hashing, the structure of a
+mutated file around its functions, and the pytest configuration that governs
+how those tests run. Analysis done against
 mutmut 3.7.0, installed via `uv sync --locked`; reproduce any line a comment
 here points at with
 `sed -n '<range>p' .venv/lib/python*/site-packages/mutmut/__main__.py`.
 
-Known gap, accepted rather than closed (agents-army-2#86): mutmut's
-per-function hash covers only `cst.FunctionDef` bodies
-(mutmut/mutation/file_mutation.py's `_compute_mutated_function_hashes`), so a
-module-level change in a `source_paths` file — a top-level constant, an
-import, a class attribute set outside a method — is invisible to both
-mutmut's own hash and this digest, which deliberately excludes
-`source_paths` (see digest_inputs below). Widening either would re-hash a
-mutated file wholesale on any edit and delete the per-commit reuse this
-cache exists for.
+mutmut hashes a `source_paths` file per function and only per function:
+`compute_function_hashes` (mutmut/mutation/file_mutation.py:40-58) keys a
+sha256 of `ast.dump(node)` by mangled function name, and
+`_compute_mutated_function_hashes` passes an `accept` that keeps only
+functions which actually produced a mutation. Everything else in the file is
+hashed by nothing — module-level statements, a `ClassDef`'s own name, bases
+and decorators, class attributes set outside a method, and every method of a
+class mutmut skips wholesale for carrying a decorator (`:292-293`).
+
+`source_structure_digest` below hashes exactly that complement: the module
+with every function replaced by a marker naming it and its decorators. A
+change confined to a function's signature or body does not move it — mutmut's
+own per-function hash owns that case, and re-hashing it here would drop the
+whole cache on any source edit and delete the per-commit reuse this cache
+exists for. A change to the structure around those functions does move it,
+which is what agents-army-2#86 left open and what this closes.
+
+The failure that motivated it (PR #118, runs 33009537164 vs 33010463443):
+turning `@dataclass(frozen=True)` into `NamedTuple` on a class in a
+`source_paths` file added 86 mutants whose functions had no entry in the
+cached hashes. mutmut generated them, reused the restored test mapping that
+predated them, and reported all 86 as `no tests` — the same 2329 kills over
+a larger denominator, 98.3% to 94.8%, a false red on a change that is in
+fact fully killed.
+
+Residual, and deliberately not closed: a change confined to a function body
+that turns a function which produced *no* mutants into one that does is still
+invisible — it has no cached hash to differ from, and detecting it would mean
+running mutmut's own mutation analysis from here. Narrow, because the common
+route to that state is a decorator, which the marker covers.
 
 The digest is recorded only by `--record`, which the Makefile runs after
 mutmut has measured *and* mutation_gate.py has cleared the floor. Writing it
@@ -75,6 +97,7 @@ restored mutants/ can never be read by mutation_gate.py.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import hashlib
 import os
@@ -184,13 +207,71 @@ def digest(paths: list[Path]) -> str:
     return running.hexdigest()
 
 
+class _FunctionsToMarkers(ast.NodeTransformer):
+    """Replace every function with a marker naming it and its decorators.
+
+    What survives is the half of the file mutmut's per-function hashes do not
+    cover. The marker keeps the two things about a function that are decided
+    outside its own hash: that it exists at all under this name — a method
+    appearing, vanishing or being renamed changes which mutants exist — and
+    its decorators, which are what mutmut consults to skip a function
+    outright (`file_mutation.py:285-293`), so a function whose only change is
+    gaining `@property` still moves the digest.
+    """
+
+    @staticmethod
+    def _marker(node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.Expr:
+        decorators = ",".join(
+            ast.dump(decorator, annotate_fields=False)
+            for decorator in node.decorator_list
+        )
+        return ast.Expr(ast.Constant(f"def {node.name}({decorators})"))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.Expr:
+        return self._marker(node)
+
+    # mutmut hashes an async def exactly as it hashes a def
+    # (compute_function_hashes accepts both), and NodeTransformer dispatches
+    # on the node's exact class name, so this cannot be left to the sync case.
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.Expr:
+        return self._marker(node)
+
+
+def structure_only(source: str) -> str:
+    """`source` reduced to what mutmut's per-function hashes cannot see.
+
+    `annotate_fields=False` and the default `include_attributes=False` keep
+    this to shape alone: reindenting a class or moving it down the file does
+    not move the digest, and neither does a comment, because neither can
+    decide a mutant's verdict. The dump's exact form is a Python-version
+    detail, which is why the cache key in `.github/workflows/ci.yml` carries
+    the interpreter version.
+    """
+    return ast.dump(_FunctionsToMarkers().visit(ast.parse(source)))
+
+
+def source_structure_digest(pyproject: Path) -> str:
+    """One digest over the structure of every `source_paths` file."""
+    root = pyproject.parent
+    running = hashlib.sha256()
+    for entry in sorted(_source_paths(pyproject)):
+        running.update(entry.encode("utf-8"))
+        running.update(b"\0")
+        source = (root / entry).read_text(encoding="utf-8")
+        running.update(structure_only(source).encode("utf-8"))
+        running.update(b"\0")
+    return running.hexdigest()
+
+
 def digest_inputs(pyproject: Path) -> list[Path]:
     """Every file this gate hashes: the selected tests, every non-source .py
     file under a watched root, and anything hand-listed in DIGEST_EXTRA.
 
-    source_paths files are deliberately excluded: mutmut already hashes them
-    per function, and including them here would drop the whole cache on any
-    source edit and destroy the per-commit reuse this cache exists for.
+    source_paths files are deliberately excluded from this content hash:
+    mutmut already hashes them per function, and hashing them whole here
+    would drop the cache on any source edit and destroy the per-commit reuse
+    this cache exists for. Their structure around those functions is hashed
+    separately by source_structure_digest.
     """
     root = pyproject.parent
     files = repo_files(root)
@@ -212,11 +293,14 @@ def digest_inputs(pyproject: Path) -> list[Path]:
 
 def compute_digest(pyproject: Path) -> str:
     """The digest widened past `selected_tests`: also everything closure's
-    walk of the watched roots pulls in, plus the pytest configuration that
-    governs how the selected tests run."""
+    walk of the watched roots pulls in, the structure of every mutated file
+    around its functions, and the pytest configuration that governs how the
+    selected tests run."""
     ini_options = _pytest_ini_options(pyproject)
-    fingerprint = digest(digest_inputs(pyproject)) + repr(
-        dict(sorted(ini_options.items()))
+    fingerprint = (
+        digest(digest_inputs(pyproject))
+        + source_structure_digest(pyproject)
+        + repr(dict(sorted(ini_options.items())))
     )
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
@@ -401,7 +485,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         current = compute_digest(PYPROJECT_PATH)
-    except (OSError, KeyError, RuntimeError, tomllib.TOMLDecodeError) as exc:
+    except (
+        OSError,
+        KeyError,
+        RuntimeError,
+        SyntaxError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
         print(f"error: cannot hash the mutation cache inputs: {exc}")
         return 1
 

@@ -128,9 +128,11 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --all-groups
 
-      # mutation-v1 is the format version for this cache's own digest scheme
+      # mutation-v2 is the format version for this cache's own digest scheme
       # (tools/mutation_cache.py); bump it to flush every cache in scope on a
-      # deliberate change to what that digest covers.
+      # deliberate change to what that digest covers. v2: the digest now also
+      # covers the structure of every source_paths file around its functions,
+      # so a v1 cache was recorded under a digest that cannot be compared.
       - name: Restore mutation cache
         id: mutation-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -138,9 +140,9 @@ jobs:
           path: |
             mutants
             reports/mutation-test-inputs.sha256
-          key: mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          key: mutation-v2-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
           restore-keys: |
-            mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
+            mutation-v2-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-
 
       - name: Run mutation gate
         run: make verify-mutation
@@ -157,7 +159,7 @@ jobs:
           path: |
             mutants
             reports/mutation-test-inputs.sha256
-          key: mutation-v1-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
+          key: mutation-v2-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('uv.lock', 'pyproject.toml') }}-${{ github.sha }}
 
   security-static:
     name: Static security
