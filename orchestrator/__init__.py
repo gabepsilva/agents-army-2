@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NoReturn, TextIO, cast
+from typing import Any, NamedTuple, NoReturn, TextIO, cast
 
 from backends import AgentBackend, TurnError, TurnResult, get_backend, list_backends
 from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
@@ -288,6 +288,119 @@ def _flock(
                 return
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+class _AgentRecord(NamedTuple):
+    """One agent as `orchestrator_state.json` stores it.
+
+    The persisted shape lives here and nowhere else: `_reload` and `_persist`
+    both go through this type, so the seven fields are named once per
+    direction instead of once per call site drifting apart. A live `Agent`
+    spreads them across itself and its `AgentBackend`, which is why this is a
+    projection over both rather than a mirror of `Agent.__init__`.
+
+    Immutable because a record is what a file said (or is about to say),
+    never the object a turn mutates — that stays `Agent`. A `NamedTuple`
+    rather than a frozen dataclass for that immutability: mutmut skips a
+    decorated class body wholesale (`mutation/file_mutation.py:292`), so
+    `@dataclass` would take all four methods below — the omission branches
+    and the backend guard among them — out of the mutation gate's reach
+    without anything reporting that it had.
+    """
+
+    backend: str
+    session_id: str | None
+    model: str | None
+    reasoning_effort: str | None
+    created_at: str | None
+    last_turn_at: str | None
+    turns: int | None
+
+    @classmethod
+    def from_entry(cls, name: str, entry: dict, state_file: Path) -> _AgentRecord:
+        """Read one raw registry entry.
+
+        Only a missing `backend` is rejected here: it is the one field with
+        nothing sensible to be `None`, and every other key is legitimately
+        absent in a registry written before it existed. An unregistered
+        backend *name* is not this function's error — it stays `get_backend`'s,
+        raised in `into_agent`, so a read-only reader that never builds an
+        Agent is unaffected.
+        """
+        backend = entry.get("backend")
+        if backend is None:
+            raise StateError(f"{state_file}: agent '{name}' has no backend")
+        return cls(
+            backend=backend,
+            session_id=entry.get("session_id"),
+            model=entry.get("model"),
+            reasoning_effort=entry.get("reasoning_effort"),
+            created_at=entry.get("created_at"),
+            last_turn_at=entry.get("last_turn_at"),
+            turns=entry.get("turns"),
+        )
+
+    @classmethod
+    def of(cls, agent: Agent) -> _AgentRecord:
+        """Project a live `Agent` and its backend into a record."""
+        return cls(
+            backend=agent.backend.name,
+            session_id=agent.session_id,
+            model=agent.backend.model,
+            reasoning_effort=agent.backend.reasoning_effort,
+            created_at=agent.created_at,
+            last_turn_at=agent.last_turn_at,
+            turns=agent.turns,
+        )
+
+    def into_agent(self, name: str) -> Agent:
+        """Build the live `Agent` this record describes.
+
+        The one place a stored backend name is resolved: backend construction
+        belongs at the registry boundary, so `UnknownBackendError` surfaces
+        here, when someone actually asks for the agent.
+        """
+        agent = Agent(
+            name,
+            get_backend(
+                self.backend,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+            ),
+        )
+        agent.session_id = self.session_id
+        agent.created_at = self.created_at
+        agent.last_turn_at = self.last_turn_at
+        agent.turns = self.turns
+        return agent
+
+    def to_entry(self) -> dict:
+        """The JSON entry for this record.
+
+        Written field by field rather than from `asdict`, because the mapping
+        is not mechanical: `session_id` is written even when `None` (a
+        freshly spawned agent's file has said `"session_id": null` since
+        before the other fields existed, and dropping it would rewrite every
+        such file), while every other optional field is omitted when unset so
+        an older registry round-trips unchanged.
+        """
+        return {
+            "backend": self.backend,
+            "session_id": self.session_id,
+            **({"model": self.model} if self.model is not None else {}),
+            **(
+                {"reasoning_effort": self.reasoning_effort}
+                if self.reasoning_effort is not None
+                else {}
+            ),
+            **({"created_at": self.created_at} if self.created_at is not None else {}),
+            **(
+                {"last_turn_at": self.last_turn_at}
+                if self.last_turn_at is not None
+                else {}
+            ),
+            **({"turns": self.turns} if self.turns is not None else {}),
+        }
 
 
 def _load_state_file(state_file: Path) -> dict[str, dict]:
@@ -633,48 +746,18 @@ class Orchestrator:
             return True
 
     def _reload(self) -> None:
-        self.agents = {}
-        for name, entry in self._load_state().items():
-            backend = entry.get("backend")
-            if backend is None:
-                raise StateError(f"{self.state_file}: agent '{name}' has no backend")
-            agent = Agent(
-                name,
-                get_backend(
-                    backend,
-                    model=entry.get("model"),
-                    reasoning_effort=entry.get("reasoning_effort"),
-                ),
-            )
-            agent.session_id = entry.get("session_id")
-            agent.created_at = entry.get("created_at")
-            agent.last_turn_at = entry.get("last_turn_at")
-            agent.turns = entry.get("turns")
-            self.agents[name] = agent
+        self.agents = {
+            name: _AgentRecord.from_entry(name, entry, self.state_file).into_agent(name)
+            for name, entry in self._load_state().items()
+        }
 
     def _load_state(self) -> dict[str, dict]:
         return _load_state_file(self.state_file)
 
     def _persist(self) -> None:
         state = {
-            name: {
-                "backend": a.backend.name,
-                "session_id": a.session_id,
-                **({"model": a.backend.model} if a.backend.model is not None else {}),
-                **(
-                    {"reasoning_effort": a.backend.reasoning_effort}
-                    if a.backend.reasoning_effort is not None
-                    else {}
-                ),
-                **({"created_at": a.created_at} if a.created_at is not None else {}),
-                **(
-                    {"last_turn_at": a.last_turn_at}
-                    if a.last_turn_at is not None
-                    else {}
-                ),
-                **({"turns": a.turns} if a.turns is not None else {}),
-            }
-            for name, a in self.agents.items()
+            name: _AgentRecord.of(agent).to_entry()
+            for name, agent in self.agents.items()
         }
         payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
         tmp = self.state_file.with_name(self.state_file.name + ".tmp")

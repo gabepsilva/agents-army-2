@@ -1234,6 +1234,28 @@ def test_list_teams_unreadable_team_registry_does_not_abort_the_walk(
     assert "dev/claude" in out
 
 
+def test_list_teams_reports_a_team_whose_backend_plugin_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A registry naming a backend nobody registers any more is well-formed —
+    the plugin is the thing that is missing, not the entry. `list teams` reads
+    the stored backend *name* and must print it, so this stays off the loading
+    path that resolves a name into a backend and raises for an unknown one."""
+    root = tmp_path / "root"
+    _make_team(root, "legacy", agents={"dev": "retired-plugin"})
+    _make_team(root, "healthy", agents={"ops": "claude"})
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    out = capsys.readouterr().out
+    assert "dev/retired-plugin" in out
+    assert "ops/claude" in out
+    assert "registry unreadable" not in out
+
+
 def test_list_teams_unreadable_teamless_registry_does_not_abort_the_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

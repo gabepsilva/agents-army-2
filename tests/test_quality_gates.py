@@ -1830,14 +1830,15 @@ class TestMutationCache:
         assert mutation_cache.main([]) == 0
         assert not cache.exists()
 
-    def test_a_source_paths_edit_does_not_drop_the_cache(
+    _SOURCE_BEFORE = "class Registry:\n    def get(self, name):\n        return name\n"
+
+    def _warm_source_cache(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-    ) -> None:
-        """The negative control: without it the suite cannot tell a correct
-        digest from one that simply hashes everything mutmut copies."""
+    ) -> Path:
+        """A recorded digest over one `source_paths` file, cache in place."""
         test_file = tmp_path / "tests" / "test_a.py"
         _write(test_file, "assert True\n")
-        _write(tmp_path / "backends" / "registry.py", "REGISTRY = {}\n")
+        _write(tmp_path / "backends" / "registry.py", self._SOURCE_BEFORE)
         pyproject = self._project(
             tmp_path,
             [str(test_file)],
@@ -1851,11 +1852,86 @@ class TestMutationCache:
         cache.mkdir()
         assert mutation_cache.main([]) == 0
         capsys.readouterr()
+        return cache
 
-        _write(tmp_path / "backends" / "registry.py", "REGISTRY = {'a': 1}\n")
+    def test_a_source_paths_function_body_edit_does_not_drop_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """The negative control: without it the suite cannot tell a correct
+        digest from one that simply hashes everything mutmut copies.
+
+        mutmut hashes a function's own AST and invalidates it alone, so
+        re-measuring the whole file here would delete the per-commit reuse
+        this cache exists for.
+        """
+        cache = self._warm_source_cache(tmp_path, monkeypatch, capsys)
+
+        _write(
+            tmp_path / "backends" / "registry.py",
+            "class Registry:\n    def get(self, name):\n        return name.lower()\n",
+        )
         assert mutation_cache.main([]) == 0
         assert cache.exists()
         assert "reusing cached mutant results" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("label", "after"),
+        [
+            (
+                "class decorator",
+                "import dataclasses\n\n"
+                "@dataclasses.dataclass\n"
+                "class Registry:\n    def get(self, name):\n        return name\n",
+            ),
+            (
+                "base class",
+                "class Registry(dict):\n    def get(self, name):\n        return name\n",
+            ),
+            (
+                "class attribute",
+                "class Registry:\n    default = 1\n"
+                "    def get(self, name):\n        return name\n",
+            ),
+            (
+                "module-level constant",
+                "VERSION = 1\n\n"
+                "class Registry:\n    def get(self, name):\n        return name\n",
+            ),
+            (
+                "method added",
+                "class Registry:\n    def get(self, name):\n        return name\n"
+                "    def put(self, name):\n        return name\n",
+            ),
+            (
+                "method decorator",
+                "class Registry:\n    @property\n"
+                "    def get(self, name):\n        return name\n",
+            ),
+        ],
+    )
+    def test_a_source_paths_structure_edit_drops_the_cache(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys,
+        label: str,
+        after: str,
+    ) -> None:
+        """Everything mutmut's per-function hashes cannot see (#86).
+
+        Each of these changes which mutants exist, or whether a function is
+        mutated at all, without touching any function's own AST. Reusing the
+        cached verdicts then scores mutants no test mapping covers as `no
+        tests` — the false red of PR #118, where `@dataclass` becoming
+        `NamedTuple` added 86 mutants that were never run and took a green
+        98.3% to a failing 94.8% with the identical kill count.
+        """
+        cache = self._warm_source_cache(tmp_path, monkeypatch, capsys)
+
+        _write(tmp_path / "backends" / "registry.py", after)
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists(), f"{label} left the stale cache in place"
+        assert "tests changed since the cached run" in capsys.readouterr().out
 
     # -- Check A: closure. ----------------------------------------------------
 
@@ -2323,8 +2399,11 @@ class TestMutationCache:
 
         # 4. the key names its format version, the OS, the interpreter, and
         #    the lockfile/config that decide what mutmut measured against.
+        # The literal version is pinned rather than matched as a pattern:
+        # flushing every cache in scope is a reviewed act, so a bump should
+        # have to land here too.
         required_components = (
-            "mutation-v1",
+            "mutation-v2",
             "runner.os",
             "steps.setup-python.outputs.python-version",
             "hashFiles('uv.lock', 'pyproject.toml')",

@@ -121,6 +121,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_cli_surface.py",
     "tests/test_schema.py",
     "tests/test_skills.py",
+    "tests/test_state_round_trip.py",
     "tests/test_teams.py",
 ]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]
