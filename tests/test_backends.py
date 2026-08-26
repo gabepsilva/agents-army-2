@@ -1869,7 +1869,7 @@ class TestOpenCodeRunTurn:
             return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        with caplog.at_level("DEBUG"):
+        with caplog.at_level("DEBUG", logger="backends"):
             result = backend.run_turn(prompt, None, tmp_path)
 
         assert calls[0][0] == [
