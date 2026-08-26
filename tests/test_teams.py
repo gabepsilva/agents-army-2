@@ -463,6 +463,40 @@ def test_v5_missing_worktree_exits_2_for_create_and_talk_only(
     assert not teams_dir.exists()
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["list", "agents", "--team", "nosuch"],
+        ["delete", "someagent", "--team", "nosuch"],
+    ],
+)
+def test_bogus_team_under_teams_dir_exits_1_and_creates_nothing(
+    argv: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """list agents/delete NAME must not reach `_team_locked` -> `_flock` for
+    a team_root that was never created — `_flock`'s own
+    `path.parent.mkdir(parents=True, exist_ok=True)` would otherwise
+    fabricate `nosuch/` (and `.lock`) on disk for a plain typo, and that
+    residue is a real `agents/`-or-`worktree/` candidate on every future
+    AGENTS_ARMY_ROOT walk."""
+    teams_dir = tmp_path / "teams"
+    teams_dir.mkdir()
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(argv)
+
+    assert excinfo.value.code == 1
+    assert (
+        capsys.readouterr().err
+        == f"team 'nosuch' not found at {teams_dir / 'nosuch'}\n"
+    )
+    assert list(teams_dir.iterdir()) == []
+
+
 def test_list_agents_team_succeeds_with_no_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -557,9 +591,17 @@ def test_zero_hits_exits_2_for_teardown_too(
     """Unlike the TEAMS_DIR-set not-found case (exit 1, a missing
     resource), zero hits under the AGENTS_ARMY_ROOT walk is a usage
     problem — bad name, wrong environment, team lives elsewhere — and stays
-    exit 2 even for teardown."""
+    exit 2 even for teardown. Points --team at the §6 residue shape (`logs/`
+    + `.lock` + `spectacle.prompt`, neither `agents/` nor `worktree/`) so
+    this also covers that residue being a zero-hit case for teardown, not
+    just for `teams.resolve` at the unit level.
+    """
     root = tmp_path / "root"
-    root.mkdir()
+    residue = root / "nope"
+    residue.mkdir(parents=True)
+    (residue / "logs").mkdir()
+    (residue / ".lock").touch()
+    (residue / "spectacle.prompt").touch()
     monkeypatch.setattr(orchestrator, "ROOT", root)
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
 
