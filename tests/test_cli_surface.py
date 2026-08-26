@@ -190,13 +190,25 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
         )
 
 
+# Each verb, with the minimum arguments it needs to get past its own required
+# positionals — otherwise argparse reports the missing name instead of the
+# leftover flag, and the flag's absence goes unproven.
+VERB_INVOCATIONS = (
+    ("create", ["create", "a"]),
+    ("talk", ["talk", "a", "-p", "hi"]),
+    ("list", ["list"]),
+    ("delete", ["delete", "a"]),
+    ("doctor", ["doctor"]),
+)
+VERBS = tuple(verb for verb, _ in VERB_INVOCATIONS)
+
+
 @pytest.mark.parametrize(
     "argv",
     [
         ["--version"],
         ["--version", "ignored"],
-        ["talk", "--version"],
-        ["talk", "a", "-p", "hi", "--version"],
+        ["-v", "--version"],
     ],
 )
 def test_version_exits_before_constructing_orchestrator(
@@ -210,7 +222,47 @@ def test_version_exits_before_constructing_orchestrator(
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(argv)
     assert excinfo.value.code == 0
-    assert capsys.readouterr().out == "0.1.0\n"
+    captured = capsys.readouterr()
+    assert captured.out == "0.1.0\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(("verb", "argv"), VERB_INVOCATIONS)
+def test_version_after_a_verb_is_an_unrecognized_argument(
+    verb: str, argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main([*argv, "--version"])
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"usage: orchestrator {verb}" in captured.err
+    assert "unrecognized arguments: --version" in captured.err
+
+
+@pytest.mark.parametrize("verb", VERBS)
+def test_verb_help_does_not_offer_version(
+    verb: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main([verb, "--help"])
+    assert excinfo.value.code == 0
+    assert "--version" not in capsys.readouterr().out
+
+
+def test_version_after_the_separator_stays_prompt_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+
+    orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
+
+    out = capsys.readouterr().out
+    assert out.endswith("reply:text with --version in it\n")
+    assert "0.1.0" not in out
 
 
 def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(

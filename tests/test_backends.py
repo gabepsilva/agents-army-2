@@ -3600,7 +3600,7 @@ class TestCLI:
         assert captured.err == "unable to determine agents-army version\n"
         assert "Traceback" not in captured.err
 
-    def test_main_version_after_command_remains_prompt_data(
+    def test_main_version_after_command_is_rejected(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -3608,8 +3608,13 @@ class TestCLI:
     ) -> None:
         monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
-        run_version(["talk", "agent", "a", "--version"])
-        assert capsys.readouterr().out == "0.1.0\n"
+        with pytest.raises(SystemExit) as excinfo:
+            main(["talk", "agent", "a", "--version"])
+        assert excinfo.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "usage: orchestrator talk" in captured.err
+        assert "unrecognized arguments: a --version" in captured.err
 
     @pytest.mark.parametrize("flags", [[], ["-v"], ["--verbose"], ["-vv"], ["-vvv"]])
     def test_main_dependency_check_is_clean_and_early(
