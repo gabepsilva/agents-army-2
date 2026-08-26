@@ -105,6 +105,7 @@ skip_empty = true
 [tool.mutmut]
 source_paths = [
     "orchestrator/__init__.py",
+    "orchestrator/paths.py",
     "orchestrator/schema.py",
     "orchestrator/skills.py",
     "backends/base.py",
@@ -119,6 +120,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_agent_listing.py",
     "tests/test_backends.py",
     "tests/test_cli_surface.py",
+    "tests/test_paths.py",
     "tests/test_schema.py",
     "tests/test_skills.py",
     "tests/test_state_round_trip.py",
