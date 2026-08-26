@@ -348,3 +348,13 @@ def test_verbosity_counts_before_and_after_verb(
     orchestrator.main(argv)
     assert logging.getLogger("orchestrator").level == level
     assert logging.getLogger("backends").level == level
+
+
+@pytest.mark.parametrize(("verb", "argv"), VERB_INVOCATIONS)
+def test_every_verb_accepts_verbosity_after_the_verb(
+    verb: str, argv: list[str]
+) -> None:
+    opts = orchestrator._build_parser().parse_args([*argv, "-vv"])
+
+    assert opts.verbosity_after == 2
+    assert opts._parser.prog == f"orchestrator {verb}"

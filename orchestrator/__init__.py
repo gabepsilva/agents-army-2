@@ -1090,7 +1090,12 @@ def _add_verb_parser(
     **kwargs: Any,
 ) -> argparse.ArgumentParser:
     kwargs["prog"] = f"orchestrator {verb}"
-    return subparsers.add_parser(verb, **kwargs)
+    parser = subparsers.add_parser(verb, **kwargs)
+    # Registered here, before the caller's own arguments, so `-v` stays the
+    # first option after `-h` in every verb's usage line.
+    _add_verbosity_argument(parser, "verbosity_after")
+    parser.set_defaults(_parser=parser)
+    return parser
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1100,11 +1105,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="verb", required=True, metavar="<verb>")
 
     create = _add_verb_parser(subparsers, "create")
-    _add_verbosity_argument(create, "verbosity_after")
     create.add_argument("name")
     _add_agent_config_options(create)
     _add_team_option(create)
-    create.set_defaults(_parser=create)
 
     talk = _add_verb_parser(
         subparsers,
@@ -1114,7 +1117,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "[-p TEXT | --prompt-file PATH | -- PROMPT...]"
         ),
     )
-    _add_verbosity_argument(talk, "verbosity_after")
     _add_agent_config_options(talk)
     talk.add_argument("name")
     talk.add_argument("-s", "--skill")
@@ -1126,27 +1128,20 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument("-p", "--prompt")
     talk.add_argument("--prompt-file")
     _add_team_option(talk)
-    talk.set_defaults(_parser=talk)
 
     list_parser = _add_verb_parser(subparsers, "list")
-    _add_verbosity_argument(list_parser, "verbosity_after")
     list_parser.add_argument(
         "target", nargs="?", choices=("agents", "skills", "teams"), default="agents"
     )
     _add_team_option(list_parser)
-    list_parser.set_defaults(_parser=list_parser)
 
     delete = _add_verb_parser(subparsers, "delete")
-    _add_verbosity_argument(delete, "verbosity_after")
     # nargs="?": `--team T` alone tears the whole team down (see cmd_delete);
     # a name deletes one agent. Neither is an error — bare `delete` is.
     delete.add_argument("name", nargs="?")
     _add_team_option(delete)
-    delete.set_defaults(_parser=delete)
 
-    doctor = _add_verb_parser(subparsers, "doctor")
-    _add_verbosity_argument(doctor, "verbosity_after")
-    doctor.set_defaults(_parser=doctor)
+    _add_verb_parser(subparsers, "doctor")
 
     parser._verb_parsers = subparsers.choices
     return parser
