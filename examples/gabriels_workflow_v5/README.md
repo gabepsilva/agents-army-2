@@ -69,10 +69,10 @@ given rather than silently coming out as the primer.
 - A failed `make ci` gets exactly one devin repair pass, then one re-run.
 - A PR still in draft after the self-review is a deliberate stop (exit 6):
   devin found a false assumption and commented on the PR. Do not retry.
-- Find the PR with `gh pr list --draft`, matching the issue reference in the
-  body or the issue number in the head branch name (a body edit must not
-  blind discovery); poll up to 6 × 5 s (read-after-write lag). Never create a
-  second PR when one exists.
+- Find the PR with `gh pr list --draft`, matching the head branch name against
+  `codex/issue-<N>-handoff` exactly - spectacle is told to open it there, and a
+  body that merely mentions another issue must never be adopted; poll up to
+  6 × 5 s (read-after-write lag). Never create a second PR when one exists.
 - Exit codes: the exact table at the bottom of flow.md.
 
 ## Coding rules (as binding as the diagram)

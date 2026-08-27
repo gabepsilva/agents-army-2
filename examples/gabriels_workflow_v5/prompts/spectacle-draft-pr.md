@@ -1,6 +1,8 @@
 The issue '$issue_url' has converged. Open a draft PR against the default
-branch with an empty commit and no file changes. Its description is the
-complete developer handoff. Keep it concise: decided behavior, affected areas,
+branch with an empty commit and no file changes, on a branch named exactly
+'codex/issue-<N>-handoff' where <N> is that issue's number - the driver finds
+the PR by that name and by nothing else. Its description is the complete
+developer handoff. Keep it concise: decided behavior, affected areas,
 acceptance criteria, verification, and evidence only for non-obvious
 load-bearing decisions.
 

@@ -65,6 +65,10 @@ if len(sys.argv) != 2:
 ISSUE_URL = sys.argv[1].rstrip("/")
 ISSUE_NUMBER = ISSUE_URL.rsplit("/", 1)[1]
 TEAM = f"issue-{ISSUE_NUMBER}"
+# The branch spectacle is told to open the draft PR on - the only thing that
+# identifies the PR as this issue's. A spec that merely mentions another issue
+# must never be adopted.
+BRANCH = f"codex/issue-{ISSUE_NUMBER}-handoff"
 MAIN_REPO = str(
     Path(sh("git", "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 )
@@ -319,25 +323,12 @@ def plan():  # Invocation A - BFS the tree, debate every leaf, then die
 
 
 def find_draft_pr():
-    """The list endpoint is read-after-write; the caller polls."""
+    """Only this issue's handoff branch counts. The list endpoint is
+    read-after-write; the caller polls."""
     prs = json.loads(
-        sh(
-            "gh",
-            "pr",
-            "list",
-            "--draft",
-            "--limit",
-            "50",
-            "--json",
-            "url,body,headRefName",
-        )
+        sh("gh", "pr", "list", "--draft", "--limit", "50", "--json", "url,headRefName")
     )
-    hits = [
-        pr
-        for pr in prs
-        if re.search(rf"(#|issues/){ISSUE_NUMBER}\b", pr["body"])
-        or re.search(rf"\b{ISSUE_NUMBER}\b", pr["headRefName"])
-    ]
+    hits = [pr for pr in prs if pr["headRefName"] == BRANCH]
     return (hits[0]["url"], hits[0]["headRefName"]) if hits else None
 
 
