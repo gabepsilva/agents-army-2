@@ -42,8 +42,8 @@ back to fresh agents per issue and print that the fallback is in effect.
 - The first talk to an agent carries its backend flags. One dict per agent
   holds them (`{"backend": ..., "model": ..., "effort": ...}`), so a single
   line moves an agent to another model: primer/owen `claude opus medium`,
-  code-reviewer `claude opus high`, spectacle/devin `claude luna max`, doku
-  `opencode opencode/muse-spark-1.2-contributor-free medium`. The line that
+  code-reviewer `claude opus high`, spectacle/devin `opencode gpt-5.6-luna
+  max`, doku `opencode muse-spark-1.2-contributor-free medium`. The line that
   announces a first talk prints that dict, so the run log says what each agent
   ran on, and every turn is followed by `<agent> worked for N seconds`. Later
   talks resume the session and must not re-send the flags.
