@@ -66,7 +66,7 @@ def _assert_subprocess_kwargs(
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
     assert kwargs["check"] is False
-    assert kwargs["timeout"] == 3600
+    assert kwargs["timeout"] == DEFAULT_TURN_TIMEOUT
     # Not a detail: a CLI whose stdin is an inherited pipe rather than a tty
     # blocks until it is killed. `codex exec "reply ok" --json` under a pipe
     # returns nothing after 25s and exits 124, and claude and grok are given

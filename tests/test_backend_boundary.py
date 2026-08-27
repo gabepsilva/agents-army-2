@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import pkgutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import backends
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -48,6 +51,269 @@ from tests.backend_helpers import (
     _reported_seconds,
     _subprocess_recorder,
 )
+
+
+@dataclass(frozen=True)
+class BackendRow:
+    """One shipped adapter's enrollment in the shared subprocess contract.
+
+    Every expectation is a literal written here, never a value read off the
+    class under test: a row that asks the object what it does would pass
+    against a broken adapter and assert nothing.
+    """
+
+    # Doubles as the pytest id, so a failure names the backend.
+    module: str
+    backend_cls: type[AgentBackend]
+    # The declared capabilities, as literals. `get_backend(expected_name)` is
+    # asserted to resolve `backend_cls`, so the name is a claim about the
+    # registry too, not just about the property.
+    expected_name: str
+    expected_enforces_schema: bool
+    expected_supports_fork: bool
+    expected_error: type[TurnError]
+    # The smallest stdout that reaches this adapter's normal result path,
+    # in that CLI's own envelope dialect. Each was checked against the real
+    # parser rather than assumed portable between them.
+    stdout: str
+    # What the invoking log line shows in the prompt's place. None for the
+    # adapter that sends its prompt on stdin: `describe_command` has nothing
+    # to match in argv, so no placeholder is emitted at all. Verified by
+    # driving each real `run_turn` against a faked `subprocess.run` and
+    # reading the lines, not inferred from the shared helper.
+    expected_redaction: str | None
+    # OpenCode is the one intended divergence: it takes its prompt on stdin
+    # because it joins positional arguments before sending them to the model.
+    prompt_on_stdin: bool = False
+
+
+BACKENDS = [
+    BackendRow(
+        module="claude",
+        backend_cls=ClaudeBackend,
+        expected_name="claude",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=ClaudeTurnError,
+        expected_redaction="<prompt:16chars>",
+        stdout='{"session_id": "s1", "result": "ok"}',
+    ),
+    BackendRow(
+        module="codex",
+        backend_cls=CodexBackend,
+        expected_name="codex",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=CodexTurnError,
+        expected_redaction="<prompt:16chars>",
+        stdout='{"type": "thread.started", "thread_id": "s1"}',
+    ),
+    BackendRow(
+        module="grok",
+        backend_cls=GrokBackend,
+        expected_name="grok",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=GrokTurnError,
+        expected_redaction="<prompt:16chars>",
+        stdout='{"sessionId": "s1", "text": "ok"}',
+    ),
+    BackendRow(
+        module="opencode",
+        backend_cls=OpenCodeBackend,
+        expected_name="opencode",
+        expected_enforces_schema=False,
+        expected_supports_fork=True,
+        expected_error=OpenCodeTurnError,
+        expected_redaction=None,
+        stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
+        prompt_on_stdin=True,
+    ),
+]
+
+BACKEND_ROWS = pytest.mark.parametrize(
+    "row", BACKENDS, ids=[row.module for row in BACKENDS]
+)
+
+PROMPT = "sequoia rutabaga"
+
+
+def _only_invoking_line(caplog: pytest.LogCaptureFixture) -> str:
+    """The single line that renders the argv, so a missing one is not a pass.
+
+    Searching the whole log for the prompt would also pass if the adapter
+    stopped logging its invocation at all; naming the one line keeps the
+    assertion about redaction rather than about silence.
+    """
+    invoking = [line for line in _messages(caplog) if " turn: invoking " in line]
+    assert len(invoking) == 1, invoking
+    return invoking[0]
+
+
+class TestEveryShippedAdapterIsEnrolled:
+    """A shipped adapter with no row silently inherits none of the above."""
+
+    def test_every_adapter_module_has_a_row(self) -> None:
+        """The oracle is the package inventory, not the live registry.
+
+        Tests register throwaway backends into the process-global registry and
+        never restore it, so a guard built on `list_backends()` is both
+        order-dependent under parallel runs and satisfiable by test junk.
+        """
+        shipped = {
+            module.name
+            for module in pkgutil.iter_modules(backends.__path__)
+            if module.name not in {"base", "registry"}
+        }
+
+        assert {row.module for row in BACKENDS} == shipped
+
+
+class TestSharedSubprocessBoundary:
+    """The contract every shipped adapter owes the operating system.
+
+    One row per backend, so a fifth adapter inherits all of it by enrolling
+    rather than by remembering to call a helper.
+    """
+
+    def _run(
+        self,
+        row: BackendRow,
+        monkeypatch: pytest.MonkeyPatch,
+        cwd: Path,
+        *,
+        returncode: int = 0,
+        timeout: int | None = None,
+    ) -> dict:
+        """Drive the row's real ``run_turn`` and return the subprocess kwargs."""
+        fake_run, calls = _subprocess_recorder(_completed(returncode, row.stdout))
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        backend = row.backend_cls()
+        # Spelled out rather than splatted: omitting the argument is what
+        # distinguishes an adapter that forwards the shared default from one
+        # that hard-codes a number, and a splatted mapping leaves the type
+        # checker no keyword-only signature to match.
+        if timeout is None:
+            backend.run_turn(PROMPT, None, cwd)
+        else:
+            backend.run_turn(PROMPT, None, cwd, timeout)
+        # One turn is one process. A second call would mean the assertions
+        # below describe only whichever invocation happened to come first.
+        assert len(calls) == 1
+        return calls[0][1]
+
+    @BACKEND_ROWS
+    def test_runs_its_cli_under_the_shared_subprocess_discipline(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        kwargs = self._run(row, monkeypatch, tmp_path)
+
+        _assert_subprocess_kwargs(
+            kwargs,
+            tmp_path,
+            expected_stdin=None if row.prompt_on_stdin else subprocess.DEVNULL,
+            expected_input=PROMPT if row.prompt_on_stdin else None,
+        )
+
+    @BACKEND_ROWS
+    def test_stdin_is_closed_unless_the_prompt_goes_there(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exactly one stdin arm fires, never both.
+
+        A CLI left reading an inherited pipe blocks until it is killed, and
+        the shared helper checks only the arm a row declares. These are the
+        negative halves: the arm the row did not declare is absent entirely.
+        """
+        kwargs = self._run(row, monkeypatch, tmp_path)
+
+        if row.prompt_on_stdin:
+            assert "stdin" not in kwargs
+            assert kwargs["input"] == PROMPT
+        else:
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert "input" not in kwargs
+
+    @BACKEND_ROWS
+    def test_forwards_an_explicit_timeout_rather_than_the_default(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The caller's budget, not a number each adapter picked for itself."""
+        kwargs = self._run(row, monkeypatch, tmp_path, timeout=17)
+
+        assert kwargs["timeout"] == 17
+
+    @BACKEND_ROWS
+    def test_the_prompt_text_never_reaches_the_invoking_log_line(
+        self,
+        row: BackendRow,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A debug log that echoes the prompt buries the flags under it.
+
+        Absence of the prompt text is flat across all four adapters, because
+        that guarantee is uniform. What replaces it is not: the three adapters
+        that pass the prompt in argv leave a `<prompt:Nchars>` placeholder,
+        while opencode sends it on stdin and so has nothing to redact.
+        """
+        with caplog.at_level(logging.DEBUG):
+            self._run(row, monkeypatch, tmp_path)
+
+        invoking = _only_invoking_line(caplog)
+        assert PROMPT not in invoking
+        if row.expected_redaction is None:
+            assert "<prompt:" not in invoking
+        else:
+            assert row.expected_redaction in invoking
+
+    @BACKEND_ROWS
+    def test_a_non_zero_exit_raises_that_backends_own_error(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exit code alone is the trigger.
+
+        Stdout is the row's own good envelope, so an adapter that reached its
+        parser instead of raising would return a result rather than fail here
+        for the wrong reason.
+        """
+        with pytest.raises(row.expected_error):
+            self._run(row, monkeypatch, tmp_path, returncode=1)
+
+
+class TestDeclaredCapabilities:
+    """What each adapter tells the CLI it can do, and how it is reached.
+
+    Every expected value is a literal from the enrollment row. Reading the
+    expectation off the class under test would pass against a declaration
+    that had been corrupted to anything at all.
+    """
+
+    @BACKEND_ROWS
+    def test_declares_its_name(self, row: BackendRow) -> None:
+        assert row.backend_cls().name == row.expected_name
+
+    @BACKEND_ROWS
+    def test_declares_whether_it_enforces_the_schema(self, row: BackendRow) -> None:
+        assert row.backend_cls.enforces_schema is row.expected_enforces_schema
+
+    @BACKEND_ROWS
+    def test_declares_whether_it_supports_forking(self, row: BackendRow) -> None:
+        assert row.backend_cls.supports_fork is row.expected_supports_fork
+
+    @BACKEND_ROWS
+    def test_raises_a_turn_error_of_the_shared_family(self, row: BackendRow) -> None:
+        """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
+        assert issubclass(row.expected_error, TurnError)
+
+    @BACKEND_ROWS
+    def test_its_declared_name_resolves_it_through_the_registry(
+        self, row: BackendRow
+    ) -> None:
+        # Exact class, not isinstance: a registry entry pointing at some
+        # subclass of the adapter is a different backend, not this one.
+        assert type(get_backend(row.expected_name)) is row.backend_cls
 
 
 class TestRunCliTurn:
@@ -152,39 +418,9 @@ class TestRunCliTurn:
 
 
 class TestAgentBackendInterface:
-    def test_claude_name(self) -> None:
-        assert ClaudeBackend().name == "claude"
-
-    def test_codex_name(self) -> None:
-        assert CodexBackend().name == "codex"
-
-    def test_grok_name(self) -> None:
-        assert GrokBackend().name == "grok"
-
-    def test_opencode_name(self) -> None:
-        assert OpenCodeBackend().name == "opencode"
-        assert "opencode" in list_backends()
-
-    def test_backend_turn_errors_share_the_orchestrator_type(self) -> None:
-        """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
-        assert issubclass(ClaudeTurnError, TurnError)
-        assert issubclass(CodexTurnError, TurnError)
-        assert issubclass(GrokTurnError, TurnError)
-        assert issubclass(OpenCodeTurnError, TurnError)
-
-    def test_schema_enforcement_defaults_and_opencode_override(self) -> None:
-        assert ClaudeBackend.enforces_schema is True
-        assert CodexBackend.enforces_schema is True
-        assert GrokBackend.enforces_schema is True
-        assert OpenCodeBackend.enforces_schema is False
-
-    def test_fork_support_is_declared_per_backend(self) -> None:
-        """The capability the CLI checks before it will fork an agent."""
+    def test_a_third_party_backend_does_not_inherit_fork_support(self) -> None:
+        """The base-class default: forking is opt-in, never assumed."""
         assert AgentBackend.supports_fork is False
-        assert ClaudeBackend.supports_fork is True
-        assert GrokBackend.supports_fork is True
-        assert CodexBackend.supports_fork is True
-        assert OpenCodeBackend.supports_fork is True
 
     def test_chat_support_is_declared_per_backend(self) -> None:
         """Interactive chat is opt-in, just like session forking."""
