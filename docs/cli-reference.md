@@ -269,10 +269,11 @@ already found under `$AGENTS_ARMY_ROOT` is printed as its own group — this
 covers a `AGENTS_ARMY_TEAMS_DIR` that sits outside `$AGENTS_ARMY_ROOT`
 *and* one that is an ancestor of it, so a team reachable only through the
 wider `$AGENTS_ARMY_TEAMS_DIR` is never dropped just because the two roots
-overlap. Whatever registry `list agents`/`talk` currently resolve to
-(`STATE_FILE` — see [Configuration](configuration.md#environment-variables)
-for its default ladder) is printed as a `(teamless)` group, headed by its
-own path. Each team is printed with its agent count, its agents' names and
+overlap. Whatever registry `list agents`/`talk` currently resolve to (the
+resolved registry path — see
+[Configuration](configuration.md#environment-variables) for its default
+ladder) is printed as a `(teamless)` group, headed by its own path. Each team
+is printed with its agent count, its agents' names and
 backends, and a flag when `worktree/` is missing (the state `delete --team
 NAME` leaves behind — see [Teams](#teams) below). An empty walk prints
 `no teams` and still exits `0`.

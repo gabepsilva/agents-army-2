@@ -2770,7 +2770,7 @@ class TestOrchestrator:
     def test_spawn_talk_persists_and_resumes(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
         seen_session_ids: list[str | None] = []
-        # A literal, not orchestrator.WORKDIR: comparing the module constant
+        # A literal, not a module-level path: comparing a module constant
         # against itself would pass whatever it happened to be set to.
         workdir = tmp_path / "workdir"
 
@@ -3135,7 +3135,7 @@ class TestOrchestrator:
 
     def test_delete_agent(self, tmp_path: Path, monkeypatch) -> None:
         state_file = tmp_path / "state.json"
-        # A literal, not orchestrator.WORKDIR: comparing the module constant
+        # A literal, not a module-level path: comparing a module constant
         # against itself would pass whatever it happened to be set to.
         workdir = tmp_path / "workdir"
 
@@ -3808,8 +3808,8 @@ class TestCLI:
             encoding="utf-8",
         )
         before = state_file.read_bytes()
-        monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
-        monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path)
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state_file))
+        monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path))
         calls: list[tuple[list[str], dict]] = []
 
         def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
@@ -3943,7 +3943,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         state_file = tmp_path / "s.json"
-        monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state_file))
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
@@ -4322,7 +4322,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit) as excinfo:
             main(["talk", "agent", "a", "--version"])
@@ -4578,7 +4578,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "agent", "a", "--dependency-check"])
@@ -4655,7 +4655,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
@@ -4673,7 +4673,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """`talk <new-name>` creates it and runs the turn, not an error."""
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         main(["talk", "nope", "-p", "hi"])
         captured = capsys.readouterr()
@@ -4686,7 +4686,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         main(["create", "a", "-b", "echo"])
         capsys.readouterr()
         with pytest.raises(SystemExit, match="1"):
@@ -4701,7 +4701,7 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         with pytest.raises(SystemExit, match="1"):
             main(["delete", "nope"])
         assert capsys.readouterr().err == "no agent named 'nope'\n"
@@ -4749,7 +4749,7 @@ class TestCLI:
                 raise KeyError("some internal dict key")
 
         register_backend("buggy", BuggyBackend)
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "s.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         main(["create", "b", "-b", "buggy"])
         capsys.readouterr()
         with pytest.raises(KeyError, match="some internal dict key"):
@@ -4763,7 +4763,7 @@ class TestCLI:
     ) -> None:
         state = tmp_path / "s.json"
         state.write_text("{", encoding="utf-8")
-        monkeypatch.setattr(orchestrator, "STATE_FILE", state)
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state))
         with pytest.raises(SystemExit, match="1"):
             main(["list"])
         err = capsys.readouterr().err

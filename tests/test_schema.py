@@ -1138,7 +1138,7 @@ class TestTalkSchema:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         _scripted([json.dumps(CONFORMING)])
-        monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "scripted")
         main(
             [

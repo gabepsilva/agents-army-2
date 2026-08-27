@@ -330,7 +330,7 @@ def test_the_cli_forks_and_reports_the_new_agent(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     state_file = tmp_path / "state.json"
-    monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state_file))
     _primed(state_file)
     capsys.readouterr()
 
@@ -350,7 +350,7 @@ def test_the_cli_reports_a_rejected_fork_in_one_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
 
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(["fork", "ghost", "copy"])

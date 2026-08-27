@@ -66,7 +66,7 @@ class TestFromEnv:
         """Presence of the key decides, not whether its value differs from cwd.
 
         An implementation comparing `home != cwd` would fall through to the
-        ROOT branch here and put the registry somewhere else entirely.
+        root fallback branch here and put the registry somewhere else entirely.
         """
         paths = resolve(AGENTS_ARMY_HOME=str(CWD))
         assert paths.state_file == CWD / "orchestrator_state.json"
@@ -188,15 +188,14 @@ def _reads_ambient_state(node: ast.AST) -> bool:
 class TestModuleScopeIsAmbientFree:
     """The extraction only holds if the ladder cannot regrow at import time."""
 
-    def test_orchestrator_reads_the_environment_once_at_module_scope(self) -> None:
+    def test_orchestrator_does_not_read_ambient_state_at_module_scope(self) -> None:
         source = (REPO / "orchestrator/__init__.py").read_text(encoding="utf-8")
         module = ast.parse(source)
         reading = [
             statement for statement in module.body if _reads_ambient_state(statement)
         ]
         rendered = [ast.unparse(statement) for statement in reading]
-        assert len(reading) == 1, rendered
-        assert "from_env" in rendered[0]
+        assert reading == [], rendered
 
     def test_the_paths_module_reads_nothing_ambient_at_all(self) -> None:
         module = ast.parse((REPO / "orchestrator/paths.py").read_text(encoding="utf-8"))
