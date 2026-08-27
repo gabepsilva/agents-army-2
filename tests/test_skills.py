@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 import orchestrator.skills as skills_module
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -20,15 +21,13 @@ from backends.base import (
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
 from orchestrator import (
-    Orchestrator,
-    main,
-)
-from orchestrator import (
     cmd_list as _cmd_list,
 )
 from orchestrator import (
     cmd_talk as _cmd_talk,
 )
+from orchestrator import main
+from orchestrator.core import Orchestrator
 from orchestrator.skills import (
     PROMPT_HEADER,
     SkillError,
@@ -378,7 +377,7 @@ class TestListCommand:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
+        monkeypatch.setattr(core, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch.spawn("a", "echo")
         _cmd_list(orch, _options(["list"]))
         via_command = capsys.readouterr().out
@@ -441,7 +440,7 @@ class TestListCommand:
         orch = Orchestrator(
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
         )
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
         captured = capsys.readouterr()
@@ -519,7 +518,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "nope", "-p", "x"])
         captured = capsys.readouterr()
@@ -532,7 +531,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "missing", "--skill", "nope", "-p", "x"])
         assert orch.list_agents() == ["a"]
@@ -544,7 +543,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "clash", "-p", "x"])
         captured = capsys.readouterr()
@@ -556,7 +555,7 @@ class TestTalkSkills:
     def test_unknown_agent_is_created_then_talked_to(
         self, orch: Orchestrator, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         _cmd_talk(
             orch,
             _talk_options(["talk", "missing", "--skill", "foo", "-p", "x"]),
@@ -626,7 +625,7 @@ class TestTalkSkills:
     ) -> None:
         orch.spawn("configured", "echo", model="stored", reasoning_effort="high")
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match=r"agent 'configured' already uses backend/model/effort \('echo', 'stored', 'high'\); configured \('codex', None, None\)",
         ):
             _cmd_talk(
@@ -639,7 +638,7 @@ class TestTalkSkills:
     ) -> None:
         orch.spawn("configured", "echo", model="stored")
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match=r"configured \('echo', None, None\)$",
         ):
             _cmd_talk(
@@ -697,7 +696,7 @@ class TestTalkSkills:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo,foo", "-p", "x"])
         assert "duplicate skill name 'foo'" in capsys.readouterr().err
@@ -728,7 +727,7 @@ class TestTalkSkills:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "--skill", "foo", "-p", "x"])
         captured = capsys.readouterr()
@@ -761,7 +760,7 @@ class TestMainSkillInvocation:
             )
         )
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         for name in ("orchestrator", "backends"):
             logging.getLogger(name).setLevel(logging.NOTSET)
         return orch
@@ -887,7 +886,7 @@ class TestMainSkillInvocation:
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
         )
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo", "--prompt", "x"])
         captured = capsys.readouterr()

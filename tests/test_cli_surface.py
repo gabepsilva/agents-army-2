@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import AgentBackend, TurnResult
 from backends.registry import register_backend
@@ -41,7 +42,7 @@ def test_prompt_flag_and_separator_forward_identical_text(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+    monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "-p", "same prompt"])
     flag_output = capsys.readouterr().out
@@ -107,7 +108,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
         encoding="utf-8",
     )
     fake = FakeOrchestrator()
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: fake)
+    monkeypatch.setattr(core, "Orchestrator", lambda *_: fake)
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "skills"))
 
     orchestrator.main(
@@ -170,7 +171,8 @@ def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
     def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    monkeypatch.setattr(core, "Orchestrator", fail)
+
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(argv)
     assert excinfo.value.code == 2
@@ -187,7 +189,8 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
     def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    monkeypatch.setattr(core, "Orchestrator", fail)
+
     for argv in (
         ["talk", "a", "-p", "one", "--prompt-file", str(prompt_file)],
         ["talk", "a", "--prompt-file", str(prompt_file), "--", "two"],
@@ -238,7 +241,7 @@ def test_version_exits_before_constructing_orchestrator(
     argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
@@ -279,7 +282,7 @@ def test_version_after_the_separator_stays_prompt_text(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+    monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
 
@@ -303,7 +306,7 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
     )
     monkeypatch.setattr(orchestrator, "_print_dependency_check", report)
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
@@ -337,6 +340,31 @@ def test_doctor_reporting_names_are_reexported_from_package() -> None:
     assert all(getattr(orchestrator, name) is getattr(doctor, name) for name in moved)
 
 
+def test_core_names_are_reexported_from_package() -> None:
+    moved = (
+        "Agent",
+        "AgentBusyError",
+        "AgentExistsError",
+        "AgentNotFoundError",
+        "Orchestrator",
+        "OrchestratorError",
+        "StateError",
+        "TeamBusyError",
+        "TRACE",
+        "DEFAULT_BACKEND",
+        "DEFAULT_VALIDATION_RETRIES",
+        "_AgentRecord",
+        "_MAX_REVALIDATE_ATTEMPTS",
+        "_flock",
+        "_is_live",
+        "_load_state_file",
+        "_utcnow",
+    )
+
+    assert set(moved) <= set(orchestrator.__all__)
+    assert all(getattr(orchestrator, name) is getattr(core, name) for name in moved)
+
+
 def test_missing_skills_directory_has_one_stderr_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -356,9 +384,9 @@ def test_missing_skills_directory_has_one_stderr_line(
     ("argv", "level"),
     [
         (["-v", "list"], logging.DEBUG),
-        (["-vv", "list"], orchestrator.TRACE),
-        (["-vvv", "list"], orchestrator.TRACE),
-        (["-v", "talk", "-v", "a", "-p", "x"], orchestrator.TRACE),
+        (["-vv", "list"], core.TRACE),
+        (["-vvv", "list"], core.TRACE),
+        (["-v", "talk", "-v", "a", "-p", "x"], core.TRACE),
     ],
 )
 def test_verbosity_counts_before_and_after_verb(
@@ -393,7 +421,7 @@ def test_verbosity_counts_before_and_after_verb(
         def talk(self, *args, **kwargs) -> TurnResult:
             return TurnResult(session_id="sid", reply="reply", raw="")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(core, "Orchestrator", FakeOrchestrator)
     for logger_name in orchestrator.OWN_LOGGERS:
         logging.getLogger(logger_name).setLevel(logging.NOTSET)
     orchestrator.main(argv)
