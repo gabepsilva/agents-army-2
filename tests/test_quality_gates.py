@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,37 @@ def _coverage_report(files: dict[str, float]) -> dict:
             for path, percent in files.items()
         }
     }
+
+
+def _configured_mutmut_test_selection() -> set[str]:
+    config = tomllib.loads(REPO.joinpath("pyproject.toml").read_text(encoding="utf-8"))
+    return set(config["tool"]["mutmut"]["pytest_add_cli_args_test_selection"])
+
+
+def _on_disk_test_files() -> set[str]:
+    return {
+        path.relative_to(REPO).as_posix()
+        for path in REPO.joinpath("tests").glob("test_*.py")
+    }
+
+
+def _assert_mutmut_selection_matches_test_files(selection: set[str]) -> None:
+    expected = _on_disk_test_files() - {"tests/test_quality_gates.py"}
+    assert selection == expected, (
+        "mutmut test selection differs from on-disk tests: "
+        f"missing={sorted(expected - selection)!r}, "
+        f"unexpected={sorted(selection - expected)!r}"
+    )
+
+
+def test_mutmut_selection_matches_test_files() -> None:
+    _assert_mutmut_selection_matches_test_files(_configured_mutmut_test_selection())
+
+
+def test_mutmut_selection_rejects_an_omitted_test_file() -> None:
+    selection = _configured_mutmut_test_selection() - {"tests/test_schema.py"}
+    with pytest.raises(AssertionError, match=r"missing=.*test_schema.py"):
+        _assert_mutmut_selection_matches_test_files(selection)
 
 
 class TestCoverageGate:
