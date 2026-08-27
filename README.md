@@ -322,7 +322,7 @@ team under `$AGENTS_ARMY_ROOT` — see below:
 ```
 $AGENTS_ARMY_TEAMS_DIR/<team>/
     agents/          # orchestrator_state.json + its lock + the per-agent locks/ dir
-    worktree/        # WORKDIR for every agent in the team — a git worktree you create
+    worktree/        # resolved working directory for every agent — a git worktree you create
     .lock            # the team lock
 ```
 
@@ -416,7 +416,7 @@ team). If `$AGENTS_ARMY_TEAMS_DIR` is set, it is walked too and any team not
 already found under `$AGENTS_ARMY_ROOT` is reported as its own group —
 whether `$AGENTS_ARMY_TEAMS_DIR` sits outside `$AGENTS_ARMY_ROOT` or is an
 ancestor of it, so a team only the wider one reaches is never dropped just
-because the two overlap. `STATE_FILE` (the registry `list agents`/`talk`
+because the two overlap. The resolved registry path (the registry `list agents`/`talk`
 actually use — see [State](#state)) is reported as a `(teamless)` group
 headed by its own path, when it exists. Each team is printed with its agent
 count, its agents' names and backends, and a flag when its `worktree/` is
