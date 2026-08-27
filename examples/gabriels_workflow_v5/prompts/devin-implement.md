@@ -8,10 +8,13 @@ do not improvise around it: comment on the PR saying what is false and what
 you recommend, stop, and leave the PR as draft.
 
 Use TDD, keep the design maintainable, and push the implementation to the PR
-branch. Commit and push in small increments as you go - one coherent step per
-commit, pushed as soon as its tests pass - rather than one big-bang commit at
-the end. Run commands in the foreground and do not return while tests or gates
-are still running. Leave the PR as draft: one separate self-review follows.
+branch. Commit and push in small increments as you go - one coherent step
+per commit, pushed as soon as its tests pass - rather than one big-bang
+commit at the end. Run every command in the foreground and let it finish;
+never put work in the background and poll for it. If you must wait on a
+process, wait on its PID - never test for one by matching text in `ps` or
+`pgrep` output, because the pattern matches your own polling command and the
+wait never ends. Leave the PR as draft: one separate self-review follows.
 Post as the github app:
 app_id: 4579193
 private_key: ~/keys/devin-development-specialist.2026-08-13.private-key.pem
