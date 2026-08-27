@@ -14,7 +14,7 @@ from typing import ClassVar
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -335,7 +335,7 @@ def test_the_cli_forks_and_reports_the_new_agent(
     _primed(state_file)
     capsys.readouterr()
 
-    orchestrator.main(["fork", "source", "copy"])
+    cli.main(["fork", "source", "copy"])
 
     assert capsys.readouterr().out == (
         "forked agent 'source' into 'copy' backend=forking\n"
@@ -354,7 +354,7 @@ def test_the_cli_reports_a_rejected_fork_in_one_line(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["fork", "ghost", "copy"])
+        cli.main(["fork", "ghost", "copy"])
 
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
