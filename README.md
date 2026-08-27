@@ -329,10 +329,16 @@ the registry's *default* location moved to `$AGENTS_ARMY_ROOT`.
 somewhere else, `$AGENTS_ARMY_TEAMS_DIR`) to show every team on the machine
 in one shot — see [Teams](#teams) below.
 
-Skill files are read from `SKILLS/` next to that same home. `--skill tdd`
-walks the whole tree and attaches the matching markdown path to the prompt.
-A skill name must be unique across every subfolder; a collision is an error.
-To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
+Skill files are read from `SKILLS/` next to that same home, falling back to
+`$AGENTS_ARMY_ROOT/SKILLS` when there is none there — so a driver run from
+another repository, from cron, or from CI still finds the catalog you
+installed once, with nothing exported. Exactly one catalog wins: a checkout
+with its own `SKILLS/` shadows the root one. `--skill tdd` walks the whole
+tree and attaches the matching markdown path to the prompt. A skill name must
+be unique across every subfolder; a collision is an error. To point at a
+different catalog, set `AGENTS_ARMY_SKILLS`. See
+[Configuration](docs/configuration.md#environment-variables) for the full
+ladder.
 
 ### Teams
 
