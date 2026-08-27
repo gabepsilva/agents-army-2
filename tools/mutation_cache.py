@@ -82,13 +82,18 @@ Excusing a selected file would claim, in the same dict, both that it
 decides nothing and that it is running against every mutant — Check D
 rejects that combination rather than letting the contradiction stand.
 
-tests/test_quality_gates.py is the repo's single exclusion because it
+The repo has two exclusions. tests/test_quality_gates.py is excused because it
 shells out to `make` against a path derived from `__file__`
 (tests/test_quality_gates.py:25, TestCiGateAnnouncements._make). Inside a
 mutant run that path resolves to `mutants/`, which has no Makefile, so
 every one of its `make` assertions fails on the baseline collect. It tests
 the build, not the code under mutation: it cannot decide a mutant's
 verdict, and it cannot survive being collected inside one.
+
+tests/install_sh_acceptance.sh is excused because pytest never collects it at
+all: it is a shell script, run by hand against install.sh, which holds no
+Python and is in no source_paths entry. Nothing it asserts can change with a
+mutant, so it cannot decide one's verdict.
 
 Check E clears the gate's own stats file before measurement, on both the
 reuse path and the rmtree path, so a stale mutmut-cicd-stats.json inside a
@@ -129,6 +134,11 @@ DIGEST_EXCLUSIONS: dict[str, str] = {
         "resolves to mutants/ (no Makefile there) inside a mutant run, so "
         "every one of its make assertions fails on the baseline collect — "
         "see the module docstring for the full argument"
+    ),
+    "tests/install_sh_acceptance.sh": (
+        "a shell script pytest never collects, exercising install.sh, which "
+        "holds no Python and is in no source_paths entry, so no mutant can "
+        "change what it asserts"
     ),
 }
 
