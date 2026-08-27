@@ -41,7 +41,7 @@ It states what it will change before changing it, then does three things:
    the installed CLI does not depend on the checkout staying put.
 2. Copies this checkout's `SKILLS/` to `$AGENTS_ARMY_ROOT/SKILLS`
    (`~/.agents-army/SKILLS` unless overridden), so a run from any repository
-   finds the catalog with nothing exported.
+   that has no `SKILLS/` of its own finds the catalog with nothing exported.
 3. Appends one delimited block to your login shell's rc file (`~/.zshrc` for
    zsh; `~/.bashrc` for bash on Linux, `~/.bash_profile` on macOS) putting
    `~/.local/bin` on `PATH`. Nothing else goes in the block.
@@ -72,17 +72,25 @@ remove it by hand if you want it gone.
 ### Uninstall
 
 There is no `--uninstall` flag; the installer only ever installs and
-upgrades. Removal is three steps, and the delimited rc block is what makes
-the second one safe:
+upgrades. Removal is three manual steps, and the delimited rc block is what
+makes the middle one safe:
 
-```sh
-uv tool uninstall agents-army          # removes aarmy, agents-army, orchestrator
-                                       # then delete the block between the
-                                       # `# >>> agents-army install.sh >>>` and
-                                       # `# <<< agents-army install.sh <<<`
-                                       # markers in your rc file
-rm -rf ~/.agents-army/SKILLS           # the installed catalog
-```
+1. Remove the tool, which takes all three executables with it:
+
+   ```sh
+   uv tool uninstall agents-army
+   ```
+
+2. Delete the block from your rc file, markers included — everything from
+   `# >>> agents-army install.sh >>>` through `# <<< agents-army install.sh <<<`.
+   Nothing outside those two lines belongs to this project.
+
+3. Remove the installed catalog. Anything of your own kept beside the
+   vendored entries goes with it, so move that out first:
+
+   ```sh
+   rm -rf ~/.agents-army/SKILLS
+   ```
 
 ## The orchestrator CLI
 

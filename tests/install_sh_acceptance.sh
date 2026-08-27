@@ -3,7 +3,8 @@
 #
 # No `make ci` gate lints or executes shell -- the source lists, the semgrep
 # rules and the coverage gate are all Python-only -- so this script is the
-# only automated check install.sh has. It is deliberately hermetic: every run
+# only mechanical check install.sh has, and it is run by hand rather than by
+# a gate. It is deliberately hermetic: every run
 # gets a throwaway $HOME and a stub `uv` on PATH, so it never touches the
 # real tool installation or the real rc files. Run it directly:
 #
