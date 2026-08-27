@@ -123,6 +123,42 @@ def test_streaming_drains_a_large_prompt_and_child_stderr(
     assert capsys.readouterr().err == f"{len(prompt.encode())}\n"
 
 
+def test_streaming_does_not_starve_stderr_while_stdout_stays_ready(
+    tmp_path: Path,
+) -> None:
+    child_stderr_size = 4 * 1024 * 1024
+    result = run_cli_turn(
+        "demo",
+        _child(
+            f"""
+import os
+import threading
+
+released = threading.Event()
+
+def write_stdout():
+    while not released.is_set():
+        os.write(1, b'x' * 1024)
+
+thread = threading.Thread(target=write_stdout)
+thread.start()
+os.write(2, b'e' * {child_stderr_size})
+released.set()
+thread.join()
+"""
+        ),
+        prompt="",
+        session_id=None,
+        cwd=tmp_path,
+        timeout=1,
+        stream=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout
+    assert result.stderr == "e" * child_stderr_size
+
+
 def test_streaming_raw_matches_text_mode_across_chunks_and_newlines(
     tmp_path: Path, capsys
 ) -> None:
@@ -294,6 +330,89 @@ def test_streaming_retries_if_read_is_interrupted(tmp_path: Path, monkeypatch) -
 
     assert result.stdout == "ok\n"
     assert calls >= 2
+
+
+def test_streaming_retries_if_read_would_block(tmp_path: Path, monkeypatch) -> None:
+    real_read = base_backend.os.read
+    real_popen = base_backend.subprocess.Popen
+    calls = 0
+
+    def would_block_once(file_descriptor, size):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise BlockingIOError
+        return real_read(file_descriptor, size)
+
+    def start_process(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        monkeypatch.setattr(base_backend.os, "read", would_block_once)
+        return process
+
+    monkeypatch.setattr(base_backend.subprocess, "Popen", start_process)
+    result = run_cli_turn(
+        "demo",
+        _child("print('ok', flush=True)"),
+        prompt="",
+        session_id=None,
+        cwd=tmp_path,
+        timeout=2,
+        stream=True,
+    )
+
+    assert result.stdout == "ok\n"
+    assert calls >= 2
+
+
+def test_streaming_checks_the_deadline_before_each_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    clock = iter((0.0, 0.1, 2.0))
+    monkeypatch.setattr(base_backend.time, "monotonic", lambda: next(clock))
+
+    def report_stdout_ready(readable, writable, exceptional, timeout):
+        return [readable[0]], [], []
+
+    monkeypatch.setattr(base_backend.select, "select", report_stdout_ready)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_cli_turn(
+            "demo",
+            _child("import time; time.sleep(10)"),
+            prompt="",
+            session_id=None,
+            cwd=tmp_path,
+            timeout=1,
+            stream=True,
+        )
+
+
+def test_streaming_keeps_pipe_reads_nonblocking_after_spurious_readiness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real_select = base_backend.select.select
+    first_select = True
+
+    def report_spurious_stdout_ready(readable, writable, exceptional, timeout):
+        nonlocal first_select
+        if first_select:
+            first_select = False
+            return [readable[0]], [], []
+        return real_select(readable, writable, exceptional, timeout)
+
+    monkeypatch.setattr(base_backend.select, "select", report_spurious_stdout_ready)
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_cli_turn(
+            "demo",
+            _child("import time; time.sleep(2)"),
+            prompt="",
+            session_id=None,
+            cwd=tmp_path,
+            timeout=1,
+            stream=True,
+        )
+
+    assert time.monotonic() - started < 1.5
 
 
 def test_streaming_rejects_an_incomplete_utf8_sequence(tmp_path: Path) -> None:

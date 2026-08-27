@@ -127,7 +127,7 @@ def _drain_pipe(
     deadline: float,
     timeout: Callable[[], subprocess.TimeoutExpired],
 ) -> bool:
-    """Read all currently available bytes, returning whether EOF was seen."""
+    """Read one available chunk, returning whether EOF was seen."""
     file_descriptor = pipe.fileno()
     while True:
         if time.monotonic() >= deadline:
@@ -138,9 +138,11 @@ def _drain_pipe(
             return False
         except InterruptedError:
             continue
-        if not data:
-            return True
-        capture.feed(data)
+        break
+    if not data:
+        return True
+    capture.feed(data)
+    return False
 
 
 def _reap_after_failure(proc: subprocess.Popen[bytes]) -> None:
