@@ -76,6 +76,12 @@ class BackendRow:
     # in that CLI's own envelope dialect. Each was checked against the real
     # parser rather than assumed portable between them.
     stdout: str
+    # What the invoking log line shows in the prompt's place. None for the
+    # adapter that sends its prompt on stdin: `describe_command` has nothing
+    # to match in argv, so no placeholder is emitted at all. Verified by
+    # driving each real `run_turn` against a faked `subprocess.run` and
+    # reading the lines, not inferred from the shared helper.
+    expected_redaction: str | None
     # OpenCode is the one intended divergence: it takes its prompt on stdin
     # because it joins positional arguments before sending them to the model.
     prompt_on_stdin: bool = False
@@ -89,6 +95,7 @@ BACKENDS = [
         expected_enforces_schema=True,
         expected_supports_fork=True,
         expected_error=ClaudeTurnError,
+        expected_redaction="<prompt:16chars>",
         stdout='{"session_id": "s1", "result": "ok"}',
     ),
     BackendRow(
@@ -98,6 +105,7 @@ BACKENDS = [
         expected_enforces_schema=True,
         expected_supports_fork=True,
         expected_error=CodexTurnError,
+        expected_redaction="<prompt:16chars>",
         stdout='{"type": "thread.started", "thread_id": "s1"}',
     ),
     BackendRow(
@@ -107,6 +115,7 @@ BACKENDS = [
         expected_enforces_schema=True,
         expected_supports_fork=True,
         expected_error=GrokTurnError,
+        expected_redaction="<prompt:16chars>",
         stdout='{"sessionId": "s1", "text": "ok"}',
     ),
     BackendRow(
@@ -116,6 +125,7 @@ BACKENDS = [
         expected_enforces_schema=False,
         expected_supports_fork=True,
         expected_error=OpenCodeTurnError,
+        expected_redaction=None,
         stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
         prompt_on_stdin=True,
     ),
@@ -126,6 +136,18 @@ BACKEND_ROWS = pytest.mark.parametrize(
 )
 
 PROMPT = "sequoia rutabaga"
+
+
+def _only_invoking_line(caplog: pytest.LogCaptureFixture) -> str:
+    """The single line that renders the argv, so a missing one is not a pass.
+
+    Searching the whole log for the prompt would also pass if the adapter
+    stopped logging its invocation at all; naming the one line keeps the
+    assertion about redaction rather than about silence.
+    """
+    invoking = [line for line in _messages(caplog) if " turn: invoking " in line]
+    assert len(invoking) == 1, invoking
+    return invoking[0]
 
 
 class TestEveryShippedAdapterIsEnrolled:
@@ -221,10 +243,30 @@ class TestSharedSubprocessBoundary:
 
         assert kwargs["timeout"] == 17
 
-    # The prompt-redaction row is deliberately absent: the design's claim that
-    # the `<prompt:Nchars>` form is emitted uniformly by all four adapters is
-    # false, and opencode emits no placeholder at all. Blocked pending the
-    # answer on PR #156 rather than worked around here.
+    @BACKEND_ROWS
+    def test_the_prompt_text_never_reaches_the_invoking_log_line(
+        self,
+        row: BackendRow,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A debug log that echoes the prompt buries the flags under it.
+
+        Absence of the prompt text is flat across all four adapters, because
+        that guarantee is uniform. What replaces it is not: the three adapters
+        that pass the prompt in argv leave a `<prompt:Nchars>` placeholder,
+        while opencode sends it on stdin and so has nothing to redact.
+        """
+        with caplog.at_level(logging.DEBUG):
+            self._run(row, monkeypatch, tmp_path)
+
+        invoking = _only_invoking_line(caplog)
+        assert PROMPT not in invoking
+        if row.expected_redaction is None:
+            assert "<prompt:" not in invoking
+        else:
+            assert row.expected_redaction in invoking
 
     @BACKEND_ROWS
     def test_a_non_zero_exit_raises_that_backends_own_error(
