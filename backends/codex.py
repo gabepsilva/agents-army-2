@@ -47,6 +47,88 @@ ERROR_EVENT = "error"
 FAILED_TURN_EVENT = "turn.failed"
 
 
+def _stream_value(value: object) -> str:
+    """Keep a streamed value readable on one stderr line."""
+    if isinstance(value, str):
+        return value.replace("\r", "\\r").replace("\n", "\\n")
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_error_event(event: dict) -> str:
+    """Format a Codex parser failure without rendering usage metadata."""
+    error = event.get("error")
+    message = error.get("message") if isinstance(error, dict) else event.get("message")
+    if not isinstance(message, str) or not message:
+        message = "Codex reported an error"
+    return f"Error: {_stream_value(message)}"
+
+
+def _mcp_name(item: dict) -> str:
+    """Return the readable server/tool name used by an MCP item."""
+    name = item.get("tool")
+    if not isinstance(name, str):
+        name = item.get("name")
+    if not isinstance(name, str):
+        name = "unknown"
+    server = item.get("server")
+    if isinstance(server, str) and server:
+        return f"{server}/{name}"
+    return name
+
+
+def _item_output(item: dict) -> object:
+    """Find the result field used by a completed Codex item."""
+    for key in ("aggregated_output", "output", "result", "error"):
+        if key in item:
+            return item[key]
+    return None
+
+
+def _format_item(event_type: object, item: dict) -> str | None:
+    """Format one Codex item event."""
+    item_type = item.get("type")
+    if item_type == "reasoning":
+        return "Thinking..."
+    if item_type == "agent_message":
+        text = item.get("text")
+        return f"Assistant: {_stream_value(text)}" if isinstance(text, str) else None
+    if item_type not in {"command_execution", "mcp_tool_call"}:
+        return None
+
+    is_result = event_type == "item.completed" or (
+        event_type == "item.updated"
+        and (
+            item.get("status") == "completed"
+            or any(key in item for key in ("aggregated_output", "output", "result"))
+        )
+    )
+    if is_result:
+        output = _item_output(item)
+        label = "MCP result" if item_type == "mcp_tool_call" else "Tool result"
+        return f"{label}: {_stream_value(output)}" if output is not None else None
+
+    if item_type == "mcp_tool_call":
+        return (
+            f"MCP call: {_mcp_name(item)} "
+            f"{_stream_value(item.get('arguments', item.get('input', {})))}"
+        )
+    return f"Tool call: command {_stream_value(item.get('command', ''))}"
+
+
+def format_event(event: dict) -> str | None:
+    """Render one Codex JSONL event for the live stderr display."""
+    event_type = event.get("type")
+    if event_type in {ERROR_EVENT, FAILED_TURN_EVENT}:
+        return _format_error_event(event)
+    item = event.get("item")
+    if not isinstance(item, dict):
+        if event_type == "mcp_tool_call":
+            item = event
+        else:
+            return None
+    return _format_item(event_type, item)
+
+
 def _reported_error_message(stdout: str) -> str | None:
     """Codex's own words for a failed turn, or None if it said none.
 
@@ -127,6 +209,7 @@ class CodexBackend(AgentBackend):
             cwd=cwd,
             timeout=timeout,
             stream=stream,
+            format_event=format_event if stream else None,
         )
         if proc.returncode != 0:
             raise CodexTurnError(

@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.cli as cli
+import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -22,8 +24,9 @@ from backends.base import (
 )
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
-from orchestrator import Orchestrator, main
-from orchestrator import cmd_talk as _cmd_talk
+from orchestrator.cli import cmd_talk as _cmd_talk
+from orchestrator.cli import main
+from orchestrator.core import Orchestrator
 from orchestrator.schema import (
     EXCERPT_CHARS,
     SCHEMA_HEADING,
@@ -71,8 +74,8 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     separator = argv.index("--") if "--" in argv else None
     head = argv if separator is None else argv[:separator]
     tail = [] if separator is None else argv[separator + 1 :]
-    options = orchestrator._build_parser().parse_args(head)
-    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    options = cli._build_parser().parse_args(head)
+    cli._resolve_talk_prompt(options, tail, separator is not None)
     return options
 
 
@@ -698,7 +701,7 @@ class TestValidatedTalk:
         bad = '{"stage":"build","verdict":"banana"}'
         calls = _scripted([bad, bad, bad])
         orch.spawn("a", "scripted")
-        monkeypatch.setattr(orchestrator.time, "monotonic", _stepping_clock(120.0))
+        monkeypatch.setattr(core.time, "monotonic", _stepping_clock(120.0))
         with pytest.raises(ReplyValidationError):
             orch.talk("a", "go", schema=strict_schema, retries=2, timeout=1800)
         budgets = [call["timeout"] for call in calls]
@@ -763,7 +766,7 @@ class TestValidationLogging:
         # indented, which is what makes it readable next to the reply.
         _scripted(['{"verdict":"pass","stage":"build"}'])
         orch.spawn("a", "scripted")
-        with caplog.at_level(orchestrator.TRACE, logger="orchestrator"):
+        with caplog.at_level(core.TRACE, logger="orchestrator"):
             orch.talk("a", "go", schema=strict_schema)
         assert (
             _messages(caplog).count(
@@ -779,7 +782,7 @@ class TestValidationLogging:
     ) -> None:
         _scripted(["plain words"])
         orch.spawn("a", "scripted")
-        with caplog.at_level(orchestrator.TRACE, logger="orchestrator"):
+        with caplog.at_level(core.TRACE, logger="orchestrator"):
             orch.talk("a", "go")
         assert not any("structured out" in m for m in _messages(caplog))
 
@@ -863,7 +866,7 @@ class TestTalkSchema:
     ) -> None:
         """Exit 2 like every other bad argument, so a caller can tell 'fix your
         schema' from 'the agent failed' without reading the message."""
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         lax = _write(tmp_path, {"type": "object", "properties": {}, "required": []})
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "fresh", "--schema", str(lax), "-p", "go"])
@@ -882,7 +885,7 @@ class TestTalkSchema:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "a", "--schema", str(tmp_path / "absent.json"), "-p", "go"])
         captured = capsys.readouterr()
@@ -902,7 +905,7 @@ class TestTalkSchema:
         stderr line are the boundary's, and a `ReplyValidationError` shares a
         base with the `SchemaLoadError` that exits 2 above.
         """
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         bad = '{"stage":"build","verdict":"banana"}'
         calls = _scripted([bad, bad])
         schema_path = _write(tmp_path, STRICT)
@@ -1073,7 +1076,7 @@ class TestTalkSchema:
 
         register_backend("boom", BoomBackend)
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "--schema", str(_write(tmp_path, STRICT)), "-p", "go"])
         assert capsys.readouterr().err == "claude output was not JSON\n"
@@ -1139,7 +1142,7 @@ class TestTalkSchema:
     ) -> None:
         _scripted([json.dumps(CONFORMING)])
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "scripted")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "scripted")
         main(
             [
                 "talk",

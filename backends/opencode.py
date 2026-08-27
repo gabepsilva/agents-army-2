@@ -29,6 +29,99 @@ class OpenCodeTurnError(TurnError):
     """Raised when the OpenCode CLI returns something unusable."""
 
 
+def _stream_value(value: object) -> str:
+    """Keep a streamed value readable on one stderr line."""
+    if isinstance(value, str):
+        return value.replace("\r", "\\r").replace("\n", "\\n")
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_error_event(event: dict) -> str:
+    """Format an OpenCode parser failure without rendering metadata."""
+    detail = _error_detail(event)
+    if detail is None:
+        message = event.get("message")
+        if isinstance(message, str) and message:
+            detail = message
+    if detail is None:
+        error = event.get("error")
+        if isinstance(error, str) and error:
+            detail = error
+    if detail is None:
+        detail = "OpenCode reported an error"
+    return f"Error: {_stream_value(detail)}"
+
+
+def _tool_name(part: dict) -> str:
+    """Return the provider/tool name from an OpenCode tool part."""
+    for key in ("tool", "name"):
+        name = part.get(key)
+        if isinstance(name, str) and name:
+            return name
+    return "unknown"
+
+
+def _is_mcp_tool(part: dict, name: str) -> bool:
+    """Recognize OpenCode's MCP tool names and explicit server metadata."""
+    return bool(
+        any(
+            isinstance(part.get(key), str) and part[key]
+            for key in ("server", "mcp_server")
+        )
+        or name.startswith(("mcp__", "mcp_"))
+        or part.get("type") == "mcp"
+    )
+
+
+def _tool_result(state: dict, mcp: bool) -> str | None:
+    """Format a tool result when the part carries one."""
+    if "error" in state:
+        label = "MCP result (error)" if mcp else "Tool result (error)"
+        return f"{label}: {_stream_value(state['error'])}"
+    for key in ("output", "result"):
+        if key in state:
+            label = "MCP result" if mcp else "Tool result"
+            return f"{label}: {_stream_value(state[key])}"
+    return None
+
+
+def _format_tool_event(part: dict) -> str | None:
+    """Format an OpenCode tool call, result, or both in one line."""
+    state = part.get("state")
+    if not isinstance(state, dict):
+        return None
+    name = _tool_name(part)
+    mcp = _is_mcp_tool(part, name)
+    label = "MCP call" if mcp else "Tool call"
+    lines: list[str] = []
+    if "input" in state:
+        lines.append(f"{label}: {name} {_stream_value(state['input'])}")
+    result = _tool_result(state, mcp)
+    if result is not None:
+        lines.append(result)
+    return " | ".join(lines) or None
+
+
+def format_event(event: dict) -> str | None:
+    """Render one OpenCode JSON event for the live stderr display."""
+    event_type = event.get("type")
+    if event_type == "error":
+        return _format_error_event(event)
+
+    part = event.get("part")
+    if not isinstance(part, dict):
+        return None
+    part_type = part.get("type")
+    if event_type == "reasoning" or part_type == "reasoning":
+        return "Thinking..."
+    if event_type == "text" and part_type in {None, "text"}:
+        text = part.get("text")
+        return f"Assistant: {_stream_value(text)}" if isinstance(text, str) else None
+    if event_type == "tool_use" and part_type in {None, "tool", "mcp"}:
+        return _format_tool_event(part)
+    return None
+
+
 def _events(stdout: str) -> list[dict]:
     """Parse OpenCode's newline-delimited event stream, ignoring noise."""
     events: list[dict] = []
@@ -159,6 +252,7 @@ class OpenCodeBackend(AgentBackend):
             timeout=timeout,
             prompt_on_stdin=True,
             stream=stream,
+            format_event=format_event if stream else None,
         )
         events = _events(proc.stdout)
         if proc.returncode != 0:

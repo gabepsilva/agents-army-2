@@ -41,10 +41,13 @@ flowchart TD
         Q["Devin: implement<br>verify assumptions in-file<br>false assumption: stop, comment, stay draft"]
         R["Devin: one self-review, mark ready"]
         DR{"PR ready?"}
-        S{"Driver runs make ci"}
+        SY["Stale-base gate: fetch; if master<br>moved, merge origin/master in<br>(clean: driver merges and pushes;<br>conflicts: devin resolves, else exit 10)"]
+        S{"Driver runs make ci<br>(one at a time machine-wide)"}
         T["Devin: one repair pass"]
         U["Reviewer: reads ci log + diff<br>max 3 rounds"]
         V["Devin: fix or push back"]
+        SY2{"master moved<br>during review?"}
+        REGATE["One re-gate: merge<br>origin/master, make ci again"]
         W["Label: reviewer-approves"]
         X["Doku: user-facing note"]
         Y["Cleanup — logs are kept"]
@@ -52,13 +55,18 @@ flowchart TD
 
     BUILD0 --> Q --> R --> DR
     DR -- "still draft" --> EXIT6(["exit 6 — read devin's PR comment,<br>amend the spec, call again"])
-    DR -- "ready" --> S
+    DR -- "ready" --> SY --> S
     S -- "fail" --> T --> S
     S -- "pass" --> U
     U -- "blockers" --> V
     V -- "new commit" --> S
     V -- "pushback only" --> U
-    U -- "nothing blocks" --> W --> X --> Y --> DONE(["exit 0 — PR ready for merge<br>human merges, then calls the next leaf"])
+    U -- "nothing blocks" --> SY2
+    SY2 -- "no" --> W
+    SY2 -- "yes" --> REGATE
+    REGATE -- "green, master still" --> W
+    REGATE -- "master moved again" --> EXIT10(["exit 10 — merge the<br>open queue in order first"])
+    W --> X --> Y --> DONE(["exit 0 — PR ready for merge<br>human merges, then calls the next leaf"])
     U -- "3 rounds spent" --> FAIL3(["exit 3 — not approved"])
 ```
 
@@ -68,6 +76,7 @@ flowchart TD
 - **Labels are the state machine.** No verdict → plan. `owens-split` → its children get planned. Converged → build. Blocked → refused until resolved. Re-calling after a crash lands in the right phase automatically; an existing draft PR is reused, never duplicated.
 - **The primer.** Planning primes one role-neutral session on the repo, then `orchestrator fork`s it per issue and per role; forks are discarded after their leaf. Repo knowledge is shared through the primer; debate content never is.
 - Code is opened during the debate only when a claim is **disputed and decision-changing**, checked by whoever can check cheapest; everything else rides the assumptions ledger to devin, who verifies in the files he is editing anyway. A false assumption stops the build (exit 6) with devin's finding as a PR comment — amend the spec and call again.
-- The driver owns `make ci`; the reviewer reads the log instead of re-running gates. Remote (GitHub-hosted) CI is never consulted — local `make ci` is authoritative.
-- Run-state vs record: `teams/` content dies with each issue's processing (fresh team + worktree per issue, stale ones reset); `logs/issue-N/<timestamp>/` is permanent.
-- Exit codes: 0 phase completed (planning done / rejected / PR approved) · 1 blocked or unconverged · 2 no PR · 3 not approved in 3 rounds · 4 dirty checkout · 5 worktree/branch failure · 6 draft after self-review (false assumption) · 7 CI unfixable · 8 devin didn't commit/push · 9 tree too big or unparseable split.
+- The driver owns `make ci`; the reviewer reads the log instead of re-running gates. Remote (GitHub-hosted) CI is never consulted — local `make ci` is authoritative *because the stale-base gate guarantees it ran on a branch containing current `origin/master`*. Parallel runs take turns on a machine-wide CI lock, so gates never fight for cores.
+- **Parallel runs.** Each issue works in a private full clone (at `<team>/worktree` — the path `--team` resolves as the workdir), so concurrent runs share no git state; a per-issue flock refuses a second run on the same issue (exit 4). Parallelize across *independent* issues only: the leaves of one split tree still build serially in `CHILDREN:` order — siblings edit the same files, and every merge forces every other in-flight branch through a re-gate.
+- Run-state vs record: `teams/` content dies with each issue's processing (fresh team + clone per issue, stale ones reset); `logs/issue-N/<timestamp>/` is permanent.
+- Exit codes: 0 phase completed (planning done / rejected / PR approved) · 1 blocked or unconverged · 2 no PR · 3 not approved in 3 rounds · 4 another run holds this issue · 5 clone/branch failure · 6 draft after self-review (false assumption) · 7 CI unfixable · 8 devin didn't commit/push · 9 tree too big or unparseable split · 10 stale-base gate failed (merge unresolved, or master kept moving).

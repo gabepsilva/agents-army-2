@@ -21,7 +21,8 @@ from typing import cast
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
+import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -45,10 +46,19 @@ from backends.claude import (
     parse_claude_stdout,
 )
 from backends.claude import SCHEMA_FLAG as CLAUDE_SCHEMA_FLAG
+from backends.claude import (
+    format_event as claude_format_event,
+)
 from backends.codex import FORK_COMMAND as CODEX_FORK_COMMAND
 from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
 from backends.codex import YOLO_FLAG as CODEX_YOLO_FLAG
-from backends.codex import CodexBackend, CodexTurnError
+from backends.codex import (
+    CodexBackend,
+    CodexTurnError,
+)
+from backends.codex import (
+    format_event as codex_format_event,
+)
 from backends.grok import (
     ALWAYS_APPROVE_FLAG,
     PROMPT_FLAG,
@@ -60,29 +70,32 @@ from backends.grok import FORK_FLAG as GROK_FORK_FLAG
 from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
 from backends.opencode import FORK_FLAG as OPENCODE_FORK_FLAG
 from backends.opencode import OpenCodeBackend, OpenCodeTurnError
+from backends.opencode import (
+    format_event as opencode_format_event,
+)
 from backends.registry import (
     UnknownBackendError,
     get_backend,
     list_backends,
     register_backend,
 )
-from orchestrator import (
+from orchestrator.cli import (
+    cmd_create as _cmd_create,
+)
+from orchestrator.cli import (
+    cmd_delete as _cmd_delete,
+)
+from orchestrator.cli import (
+    cmd_list as _cmd_list,
+)
+from orchestrator.cli import (
+    cmd_talk as _cmd_talk,
+)
+from orchestrator.cli import main
+from orchestrator.core import (
     Agent,
     AgentBusyError,
     Orchestrator,
-    main,
-)
-from orchestrator import (
-    cmd_create as _cmd_create,
-)
-from orchestrator import (
-    cmd_delete as _cmd_delete,
-)
-from orchestrator import (
-    cmd_list as _cmd_list,
-)
-from orchestrator import (
-    cmd_talk as _cmd_talk,
 )
 from orchestrator.schema import compose_schema_prompt
 from tests.path_helpers import runtime_paths
@@ -92,13 +105,13 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     separator = argv.index("--") if "--" in argv else None
     head = argv if separator is None else argv[:separator]
     tail = [] if separator is None else argv[separator + 1 :]
-    options = orchestrator._build_parser().parse_args(head)
-    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    options = cli._build_parser().parse_args(head)
+    cli._resolve_talk_prompt(options, tail, separator is not None)
     return options
 
 
 def _options(argv: list[str]) -> argparse.Namespace:
-    return orchestrator._build_parser().parse_args(argv)
+    return cli._build_parser().parse_args(argv)
 
 
 def run_version(argv: list[str] | None = None) -> None:
@@ -647,6 +660,56 @@ class TestClaudeRunTurn:
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("work", None, tmp_path).reply == "done"
 
+    def test_streaming_turn_uses_stream_json_and_keeps_result_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ClaudeBackend(model="sonnet", reasoning_effort="high")
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init"}),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "s1",
+                        "result": '{"verdict":"pass"}',
+                        "structured_output": {"verdict": "pass"},
+                    }
+                ),
+                json.dumps({"type": "system", "subtype": "after_result"}),
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "claude"
+            assert args == [
+                "claude",
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                PERMISSION_MODE,
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "--json-schema",
+                SCHEMA.text,
+                "-p",
+                "work",
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is claude_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.claude.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, schema=SCHEMA, stream=True)
+
+        assert result.session_id == "s1"
+        assert result.reply == '{"verdict":"pass"}'
+        assert result.raw == stdout
+        assert result.structured == {"verdict": "pass"}
+
     def test_new_turn_parses_session_and_result(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1168,6 +1231,37 @@ class TestCodexRunTurn:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("work", None, tmp_path).reply == "done"
+
+    def test_streaming_turn_passes_formatter_and_keeps_codex_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend()
+        stdout = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"t1"}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                '{"type":"turn.completed","usage":{"output_tokens":5}}',
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "codex"
+            assert args == [
+                "codex",
+                "exec",
+                CODEX_YOLO_FLAG,
+                "work",
+                "--json",
+                "--skip-git-repo-check",
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is codex_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.codex.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, stream=True)
+
+        assert result == TurnResult("t1", "done", stdout)
 
     def test_new_turn_parses_thread_and_reply(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -2016,6 +2110,43 @@ class TestParseGrokStdout:
 
 
 class TestOpenCodeRunTurn:
+    def test_streaming_turn_passes_formatter_and_keeps_opencode_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "step_start", "sessionID": "s1"}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "p1", "text": "done"},
+                    }
+                ),
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "opencode"
+            assert args == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--auto",
+                "--dir",
+                str(tmp_path),
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is opencode_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.opencode.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, stream=True)
+
+        assert result == TurnResult("s1", "done", stdout)
+
     def test_fresh_turn_uses_exact_argv_and_verbatim_input(
         self,
         tmp_path: Path,
@@ -2834,7 +2965,7 @@ class TestOrchestrator:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_file = tmp_path / "state.json"
-        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
+        monkeypatch.setattr(core, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("b", "codex")
         orch.spawn("a", "claude")
@@ -2910,7 +3041,7 @@ class TestOrchestrator:
     def test_ensure_defaults_to_the_default_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         agent, _created = orch.ensure("fresh")
-        assert agent.backend.name == orchestrator.DEFAULT_BACKEND
+        assert agent.backend.name == core.DEFAULT_BACKEND
 
     def test_ensure_returns_an_existing_agent_untouched(self, tmp_path: Path) -> None:
         """An existing agent keeps its backend and its session, not a new one."""
@@ -2981,7 +3112,7 @@ class TestOrchestrator:
             calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, 17)
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.subprocess, "run", fake_run)
         monkeypatch.setattr(
             orch,
             "_exclusive",
@@ -3014,7 +3145,7 @@ class TestOrchestrator:
     ) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("unknown agent launched a CLI")
@@ -3037,7 +3168,7 @@ class TestOrchestrator:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("a", "echo")
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("session-less agent launched a CLI")
@@ -3045,7 +3176,7 @@ class TestOrchestrator:
         )
 
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match="agent 'a' has no session to fork yet; talk to it first",
         ):
             orch.chat("a")
@@ -3068,7 +3199,7 @@ class TestOrchestrator:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("pending fork launched a CLI")
@@ -3076,7 +3207,7 @@ class TestOrchestrator:
         )
 
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match="agent 'a' has no session to fork yet; talk to it first",
         ):
             orch.chat("a")
@@ -3092,7 +3223,7 @@ class TestOrchestrator:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("unsupported backend launched a CLI")
@@ -3100,7 +3231,7 @@ class TestOrchestrator:
         )
 
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match="agent 'a' runs on backend 'echo', which cannot chat",
         ):
             orch.chat("a")
@@ -3112,7 +3243,7 @@ class TestOrchestrator:
         agent = orch.spawn("a", "echo")
         agent.session_id = "session-1"
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("busy agent launched a CLI")
@@ -3344,14 +3475,14 @@ class TestOrchestrator:
     def test_corrupt_state_names_the_file(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
         state_file.write_text("{", encoding="utf-8")
-        with pytest.raises(orchestrator.StateError) as excinfo:
+        with pytest.raises(core.StateError) as excinfo:
             Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert str(excinfo.value).startswith(f"{state_file} is not valid JSON: ")
 
     def test_state_entry_without_a_backend_is_reported(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
         state_file.write_text('{"a": {"session_id": "s1"}}', encoding="utf-8")
-        with pytest.raises(orchestrator.StateError) as excinfo:
+        with pytest.raises(core.StateError) as excinfo:
             Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert excinfo.value.args[0] == f"{state_file}: agent 'a' has no backend"
 
@@ -3424,7 +3555,7 @@ class TestOrchestrator:
             # this turn resumes into vanish before it persists, which is the
             # pre-existing AgentNotFoundError path this test isn't about —
             # the reclaim-on-that-path is covered separately, below.
-            with pytest.raises(orchestrator.AgentNotFoundError):
+            with pytest.raises(core.AgentNotFoundError):
                 orch.talk("a", "hi")
 
         # daemon=True on both threads below: several asserts run before
@@ -3514,7 +3645,7 @@ class TestOrchestrator:
         orch.spawn("a", "delduring-reclaim")
         with (
             caplog.at_level("DEBUG", logger="orchestrator"),
-            pytest.raises(orchestrator.AgentNotFoundError),
+            pytest.raises(core.AgentNotFoundError),
         ):
             orch.talk("a", "hi")
         assert list(orch._locks_dir().iterdir()) == []
@@ -3686,7 +3817,7 @@ class TestOrchestrator:
         the agent first, so `main(["talk", ...])` would assert something
         false here."""
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
-        with pytest.raises(orchestrator.AgentNotFoundError):
+        with pytest.raises(core.AgentNotFoundError):
             orch.talk("ghost", "hi")
         assert list(orch._locks_dir().iterdir()) == []
 
@@ -3748,7 +3879,7 @@ class TestCLI:
         An argparse default of its own would leave `create` on claude however
         that constant changed, so the two would silently disagree.
         """
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "codex")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "codex")
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(orch, _options(["create", "a"]))
         assert orch.agents["a"].backend.name == "codex"
@@ -3817,7 +3948,7 @@ class TestCLI:
             calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, 7)
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.subprocess, "run", fake_run)
 
         with pytest.raises(SystemExit) as excinfo:
             main(["chat", "a"])
@@ -3836,7 +3967,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Talking to a name that does not exist spawns it and runs the turn."""
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         state_file = tmp_path / "s.json"
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         _cmd_talk(orch, _talk_options(["talk", "fresh", "--", "hello"]))
@@ -3877,7 +4008,7 @@ class TestCLI:
             ),
         )
         assert capsys.readouterr().err == "created agent 'fresh' backend=echo\n"
-        assert orchestrator._agent_config(orch.agents["fresh"]) == ("echo", "m", "high")
+        assert cli._agent_config(orch.agents["fresh"]) == ("echo", "m", "high")
 
     def test_cmd_talk_matching_flags_reuse_silently(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -3909,7 +4040,7 @@ class TestCLI:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="first", reasoning_effort="high")
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match=r"agent 'a' already uses backend/model/effort \('echo', 'first', 'high'\); configured \('codex', None, None\)",
         ):
             _cmd_talk(orch, _talk_options(["talk", "-b", "codex", "a", "-p", "hi"]))
@@ -3920,7 +4051,7 @@ class TestCLI:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="stored")
         with pytest.raises(
-            orchestrator.OrchestratorError,
+            core.OrchestratorError,
             match=r"configured \('echo', None, None\)$",
         ):
             _cmd_talk(orch, _talk_options(["talk", "-b", "echo", "a", "-p", "hi"]))
@@ -3946,7 +4077,7 @@ class TestCLI:
         state_file = tmp_path / "s.json"
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state_file))
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
         )
@@ -4014,7 +4145,7 @@ class TestCLI:
         register_backend("boom", BoomBackend)
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("b", "boom")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "b", "-p", "hi"])
         captured = capsys.readouterr()
@@ -4048,7 +4179,7 @@ class TestCLI:
         register_backend("boomcodex", BoomCodex)
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("c", "boomcodex")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "c", "-p", "hi"])
         assert capsys.readouterr().err == "codex did not report a thread_id\n"
@@ -4082,7 +4213,7 @@ class TestCLI:
         register_backend("boomany", BoomAny)
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("d", "boomany")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "d", "-p", "hi"])
         captured = capsys.readouterr()
@@ -4129,7 +4260,7 @@ class TestCLI:
         register_backend("incidental", IncidentalBackend)
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("i", "incidental")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(incidental, match=message):
             main(["talk", "i", "-p", "hi"])
         assert capsys.readouterr().err == ""
@@ -4161,7 +4292,7 @@ class TestCLI:
         register_backend("boomgrok", BoomGrok)
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("g", "boomgrok")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "g", "-p", "hi"])
         assert capsys.readouterr().err == "grok did not report a sessionId\n"
@@ -4237,7 +4368,7 @@ class TestCLI:
         def fail_orchestrator() -> None:
             raise AssertionError("version must not construct Orchestrator")
 
-        monkeypatch.setattr(orchestrator, "Orchestrator", fail_orchestrator)
+        monkeypatch.setattr(core, "Orchestrator", fail_orchestrator)
         run_version([*flags, "--version", "ignored"])
         captured = capsys.readouterr()
         assert captured.out == "0.1.0\n"
@@ -4324,7 +4455,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit) as excinfo:
             main(["talk", "agent", "a", "--version"])
         assert excinfo.value.code == 2
@@ -4343,7 +4474,7 @@ class TestCLI:
         def fail_orchestrator() -> None:
             raise AssertionError("dependency check must not construct Orchestrator")
 
-        monkeypatch.setattr(orchestrator, "Orchestrator", fail_orchestrator)
+        monkeypatch.setattr(core, "Orchestrator", fail_orchestrator)
         _fake_dependency_env(monkeypatch, ALL_TOOLS_PRESENT)
         main([*flags, "doctor"])
         captured = capsys.readouterr()
@@ -4578,7 +4709,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "agent", "a", "--dependency-check"])
         assert capsys.readouterr().out == ""
@@ -4613,7 +4744,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
         )
@@ -4639,7 +4770,7 @@ class TestCLI:
     ) -> None:
         monkeypatch.setattr("sys.argv", ["orchestrator", "create", "a", "-b", "echo"])
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: Orchestrator(
                 runtime_paths(tmp_path, state_file=tmp_path / "s.json")
@@ -4656,7 +4787,7 @@ class TestCLI:
     ) -> None:
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: Orchestrator(
                 runtime_paths(tmp_path, state_file=tmp_path / "s.json")
@@ -4673,7 +4804,7 @@ class TestCLI:
     ) -> None:
         """`talk <new-name>` creates it and runs the turn, not an error."""
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         main(["talk", "nope", "-p", "hi"])
         captured = capsys.readouterr()
         assert captured.err == "created agent 'nope' backend=echo\n"
@@ -4844,7 +4975,7 @@ class TestVerboseFlag:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: Orchestrator(
                 runtime_paths(tmp_path, state_file=tmp_path / "s.json")
@@ -4858,8 +4989,8 @@ class TestVerboseFlag:
         [
             ("-v", logging.DEBUG),
             ("--verbose", logging.DEBUG),
-            ("-vv", orchestrator.TRACE),
-            ("-vvv", orchestrator.TRACE),
+            ("-vv", core.TRACE),
+            ("-vvv", core.TRACE),
         ],
     )
     def test_each_flag_selects_its_level(self, flag: str, expected: int) -> None:
@@ -4882,12 +5013,12 @@ class TestVerboseFlag:
 
     def test_the_loudest_flag_given_wins(self) -> None:
         main(["-v", "-vv", "list"])
-        assert logging.getLogger("orchestrator").level == orchestrator.TRACE
+        assert logging.getLogger("orchestrator").level == core.TRACE
 
     def test_verbosity_counts_before_and_after_the_verb(self) -> None:
         main(["-v", "list", "-v"])
-        assert logging.getLogger("orchestrator").level == orchestrator.TRACE
-        assert logging.getLogger("backends").level == orchestrator.TRACE
+        assert logging.getLogger("orchestrator").level == core.TRACE
+        assert logging.getLogger("backends").level == core.TRACE
 
     def test_without_a_flag_our_loggers_stay_quiet(self) -> None:
         main(["list"])
@@ -4901,8 +5032,8 @@ class TestVerboseFlag:
 
     def test_trace_sits_below_debug(self) -> None:
         """Above DEBUG it would fire at -v, dumping transcripts unasked."""
-        assert orchestrator.TRACE < logging.DEBUG
-        assert logging.getLevelName(orchestrator.TRACE) == "TRACE"
+        assert core.TRACE < logging.DEBUG
+        assert logging.getLevelName(core.TRACE) == "TRACE"
 
     def test_prompt_token_equal_to_a_verbose_flag_is_kept(
         self,
@@ -4912,7 +5043,7 @@ class TestVerboseFlag:
     ) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         main(["talk", "a", "--", "add", "-v", "please"])
         assert "echo:add -v please" in capsys.readouterr().out
         assert logging.getLogger("orchestrator").getEffectiveLevel() > logging.DEBUG
@@ -4925,7 +5056,7 @@ class TestVerboseFlag:
     ) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
-        monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
+        monkeypatch.setattr(core, "Orchestrator", lambda *_: orch)
         main(["-v", "talk", "a", "--", "add", "-v", "please"])
         assert "echo:add -v please" in capsys.readouterr().out
         assert logging.getLogger("orchestrator").level == logging.DEBUG
@@ -4966,7 +5097,7 @@ class TestStepLogging:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         prompt = "line one\nline two"
-        with caplog.at_level(orchestrator.TRACE, logger="orchestrator"):
+        with caplog.at_level(core.TRACE, logger="orchestrator"):
             orch.talk("a", prompt)
         messages = _messages(caplog)
         # Multi-line prompts must survive intact; this is the level you turn on
@@ -5004,7 +5135,7 @@ class TestStepLogging:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setattr(
-            orchestrator,
+            core,
             "Orchestrator",
             lambda *_: Orchestrator(
                 runtime_paths(tmp_path, state_file=tmp_path / "s.json")
@@ -5042,7 +5173,7 @@ class TestLoggingConfiguration:
         # default, so starting there would pass without the level ever applying.
         root.setLevel(logging.DEBUG)
 
-        orchestrator._configure_logging(False)
+        cli._configure_logging(False)
 
         assert root.level == logging.WARNING
 
@@ -5050,7 +5181,7 @@ class TestLoggingConfiguration:
         root = logging.getLogger()
         root.handlers.clear()
 
-        orchestrator._configure_logging(False)
+        cli._configure_logging(False)
 
         record = logging.LogRecord(
             "backends.claude", logging.WARNING, "p", 1, "msg", None, None
@@ -5063,7 +5194,7 @@ class TestLoggingConfiguration:
 
 
 def test_parser_exposes_the_complete_new_surface() -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     subparsers = next(
         action
         for action in parser._actions
@@ -5133,7 +5264,7 @@ def test_parser_exposes_the_complete_new_surface() -> None:
 
 
 def test_agent_config_short_options_are_forwarded_by_create_and_talk() -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     create = parser.parse_args(["create", "a", "-m", "model", "-e", "high"])
     talk = parser.parse_args(["talk", "a", "-m", "model", "-e", "high", "-p", "x"])
     assert (create.model, create.reasoning_effort) == ("model", "high")
@@ -5182,10 +5313,10 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     options = parser.parse_args(["talk", "a"])
     with pytest.raises(SystemExit) as missing:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert missing.value.code == 2
     assert (
         "orchestrator talk: error: talk requires exactly one prompt source"
@@ -5194,7 +5325,7 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
 
     options = parser.parse_args(["talk", "a", "-p", " "])
     with pytest.raises(SystemExit) as empty:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert empty.value.code == 2
     assert (
         "orchestrator talk: error: talk prompt must not be empty"
@@ -5202,13 +5333,13 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
     )
 
     options = parser.parse_args(["talk", "a"])
-    orchestrator._resolve_talk_prompt(options, ["  one", "two  "], True)
+    cli._resolve_talk_prompt(options, ["  one", "two  "], True)
     assert options.prompt == "one two"
 
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("  one\n two  \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_file)])
-    orchestrator._resolve_talk_prompt(options, [], False)
+    cli._resolve_talk_prompt(options, [], False)
     assert options.prompt == "one\n two"
 
 
@@ -5228,7 +5359,7 @@ def test_prompt_file_errors_are_exact_and_prevent_side_effects(
         prompt_file.write_text(" \t\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
@@ -5251,12 +5382,12 @@ def test_prompt_file_errors_are_exact_and_prevent_side_effects(
 def test_prompt_file_errors_have_exact_messages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
 
     missing_path = tmp_path / "missing.txt"
     options = parser.parse_args(["talk", "a", "--prompt-file", str(missing_path)])
     with pytest.raises(SystemExit) as missing:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert missing.value.code == 2
     resolved_missing = missing_path.resolve()
     assert (
@@ -5268,7 +5399,7 @@ def test_prompt_file_errors_have_exact_messages(
     directory_path.mkdir()
     options = parser.parse_args(["talk", "a", "--prompt-file", str(directory_path)])
     with pytest.raises(SystemExit) as is_dir:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert is_dir.value.code == 2
     resolved_dir = directory_path.resolve()
     assert (
@@ -5280,7 +5411,7 @@ def test_prompt_file_errors_have_exact_messages(
     binary_path.write_bytes(b"\xff\xfe\x00not utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(binary_path)])
     with pytest.raises(SystemExit) as bad_decode:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert bad_decode.value.code == 2
     resolved_binary = binary_path.resolve()
     assert (
@@ -5292,7 +5423,7 @@ def test_prompt_file_errors_have_exact_messages(
     blank_path.write_text(" \n\t \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(blank_path)])
     with pytest.raises(SystemExit) as blank:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert blank.value.code == 2
     assert (
         "orchestrator talk: error: talk prompt must not be empty"
@@ -5303,11 +5434,11 @@ def test_prompt_file_errors_have_exact_messages(
 def test_prompt_file_strips_outer_whitespace_and_keeps_interior_newlines(
     tmp_path: Path,
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("  line one\nline two  \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_path)])
-    orchestrator._resolve_talk_prompt(options, [], False)
+    cli._resolve_talk_prompt(options, [], False)
     assert options.prompt == "line one\nline two"
 
 
@@ -5323,9 +5454,9 @@ def test_separator_error_and_cli_error_without_arguments_are_exact(
     )
 
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
-        lambda *_: (_ for _ in ()).throw(orchestrator.OrchestratorError()),
+        lambda *_: (_ for _ in ()).throw(core.OrchestratorError()),
     )
     with pytest.raises(SystemExit) as empty_error:
         main(["list"])
@@ -5336,8 +5467,8 @@ def test_separator_error_and_cli_error_without_arguments_are_exact(
 def test_cli_log_counts_head_and_tail_arguments(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setitem(orchestrator.VERBS, "talk", lambda _orch, _opts: None)
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: object())
+    monkeypatch.setitem(cli.VERBS, "talk", lambda _orch, _opts: None)
+    monkeypatch.setattr(core, "Orchestrator", lambda *_: object())
     caplog.set_level(logging.DEBUG, logger="orchestrator")
     main(["-v", "talk", "a", "--", "one", "two"])
     assert "cli: 5 argument(s) after flag splitting" in caplog.text

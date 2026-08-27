@@ -11,7 +11,7 @@ from collections.abc import Iterator
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _restore_own_logger_levels() -> Iterator[None]:
     when pytest-randomly happens to order the two that way, which is exactly
     the shape of flake that reads as a mutant killed by luck.
     """
-    saved = {name: logging.getLogger(name).level for name in orchestrator.OWN_LOGGERS}
+    saved = {name: logging.getLogger(name).level for name in cli.OWN_LOGGERS}
     try:
         yield
     finally:

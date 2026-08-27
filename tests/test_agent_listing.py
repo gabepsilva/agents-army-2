@@ -13,7 +13,8 @@ from typing import TextIO, cast
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
+import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -22,7 +23,7 @@ from backends.base import (
     structured_reply,
 )
 from backends.registry import register_backend
-from orchestrator import Orchestrator
+from orchestrator.core import Orchestrator
 from orchestrator.schema import load_schema
 from tests.path_helpers import runtime_paths
 
@@ -118,14 +119,12 @@ def _flock_probe(path: Path, mode: int) -> TextIO:
 
 class TestUtcNow:
     def test_matches_iso8601_utc_seconds_with_a_z_suffix(self) -> None:
-        assert re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", orchestrator._utcnow()
-        )
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", core._utcnow())
 
     def test_reads_utc_not_local_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Distinct from the format test: a machine whose local clock happens
         to be UTC would pass that one even reading local time by mistake."""
-        real_datetime = orchestrator.datetime
+        real_datetime = core.datetime
         seen_tz = []
 
         class FrozenDatetime(real_datetime):
@@ -134,21 +133,21 @@ class TestUtcNow:
                 seen_tz.append(tz)
                 return real_datetime(2026, 8, 25, 23, 27, 32, tzinfo=tz)
 
-        monkeypatch.setattr(orchestrator, "datetime", FrozenDatetime)
-        assert orchestrator._utcnow() == "2026-08-25T23:27:32Z"
-        assert seen_tz == [orchestrator.UTC]
+        monkeypatch.setattr(core, "datetime", FrozenDatetime)
+        assert core._utcnow() == "2026-08-25T23:27:32Z"
+        assert seen_tz == [core.UTC]
 
 
 class TestAgentDefaults:
     def test_an_agent_requires_an_explicit_workdir(self) -> None:
-        constructor = cast(Callable[..., object], orchestrator.Agent)
+        constructor = cast(Callable[..., object], core.Agent)
         with pytest.raises(TypeError, match="workdir"):
             constructor("a", EchoBackend())
 
     def test_a_freshly_constructed_agent_has_no_metadata_yet(
         self, tmp_path: Path
     ) -> None:
-        agent = orchestrator.Agent("a", EchoBackend(), workdir=tmp_path)
+        agent = core.Agent("a", EchoBackend(), workdir=tmp_path)
         assert agent.created_at is None
         assert agent.last_turn_at is None
         assert agent.turns is None
@@ -184,7 +183,7 @@ class TestNewFieldsRoundTrip:
         assert agent.last_turn_at is None
         assert agent.turns is None
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         line = capsys.readouterr().out.splitlines()[1]
         assert "turns=-" in line
         assert "created=-" in line
@@ -212,7 +211,7 @@ class TestNewFieldsRoundTrip:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         line = capsys.readouterr().out.splitlines()[1]
         assert "turns=0" in line
         assert "last=-" in line
@@ -267,7 +266,7 @@ class TestBusyProbe:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
 
         locks_dir = orch._locks_dir()
         assert not locks_dir.exists() or list(locks_dir.iterdir()) == []
@@ -286,7 +285,7 @@ class TestListingAlignment:
         path = orch._agent_lock_path(long_name)
         holder = _flock_probe(path, fcntl.LOCK_EX)
         try:
-            orchestrator._print_agents(orch)
+            cli._print_agents(orch)
         finally:
             fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
             holder.close()
@@ -313,7 +312,7 @@ class TestListingAlignment:
         orch.spawn("wide", "echo", model="gpt-5-codex", reasoning_effort="medium")
         orch.spawn("narrow", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         _header, *lines = capsys.readouterr().out.splitlines()
         assert len(lines) == 2
         offsets = {line.index("session=") for line in lines}
