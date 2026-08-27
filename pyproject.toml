@@ -124,6 +124,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_backend_boundary.py",
     "tests/test_backend_claude.py",
     "tests/test_backend_codex.py",
+    "tests/test_backend_grok.py",
     "tests/test_backends.py",
     "tests/test_cli_surface.py",
     "tests/test_fork.py",
