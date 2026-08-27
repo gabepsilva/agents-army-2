@@ -539,8 +539,7 @@ def test_talk_stream_keeps_structured_result_on_stdout(
         '"properties":{"ok":{"type":"boolean"}},"required":["ok"]}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path)
+    monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path))
 
     orchestrator.main(["create", "agent", "-b", backend_name])
     capsys.readouterr()
