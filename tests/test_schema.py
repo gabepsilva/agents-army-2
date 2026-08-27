@@ -76,6 +76,8 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     tail = [] if separator is None else argv[separator + 1 :]
     options = cli._build_parser().parse_args(head)
     cli._resolve_talk_prompt(options, tail, separator is not None)
+    # What `main` records for a run whose environment names no catalog.
+    options._skills_explicit = False
     return options
 
 

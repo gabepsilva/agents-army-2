@@ -41,6 +41,7 @@ from orchestrator.skills import (
     format_skill_listing,
     index_skills,
     parse_skill_names,
+    resolve_catalog_dir,
     resolve_skills,
 )
 
@@ -172,7 +173,7 @@ def cmd_talk(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     composed = prompt
     if opts.skill is not None:
         names = parse_skill_names(opts.skill)
-        resolved = resolve_skills(names, orchestrator.runtime_paths.skills_dir)
+        resolved = resolve_skills(names, _catalog_dir(orchestrator.runtime_paths, opts))
         composed = compose_skill_prompt(resolved, prompt)
         log.info(
             "agent '%s': attaching skill(s) %s",
@@ -261,11 +262,29 @@ def _print_agents(orchestrator: core.Orchestrator) -> None:
         )
 
 
+def _catalog_dir(runtime_paths: paths.RuntimePaths, opts: argparse.Namespace) -> Path:
+    """The catalog directory this run indexes, one rung below `skills_dir`.
+
+    `skills_dir` carries no provenance, so `main` records whether it came
+    from AGENTS_ARMY_SKILLS (`_skills_explicit`, alongside `_team_root`);
+    only a catalog the environment did not name falls back to the root one.
+    """
+    return resolve_catalog_dir(
+        runtime_paths.skills_dir, runtime_paths.root, explicit=opts._skills_explicit
+    )
+
+
 def cmd_list(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     if opts.target == "agents":
         _print_agents(orchestrator)
         return
-    print(format_skill_listing(index_skills(orchestrator.runtime_paths.skills_dir)))
+    catalog_dir = _catalog_dir(orchestrator.runtime_paths, opts)
+    listing = format_skill_listing(index_skills(catalog_dir))
+    # Which of the ladder's directories won, the way `list agents` names the
+    # registry it read. Printed only once indexing has succeeded, so a failure
+    # leaves stdout empty rather than half-written.
+    print(f"skills: {catalog_dir}")
+    print(listing)
 
 
 def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
@@ -843,6 +862,10 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = _build_parser()
     opts = parser.parse_args(head)
+    # Provenance the parser cannot know and `skills_dir` does not carry, set
+    # here for the same reason `_team_root` is: `main` is the one place that
+    # reads the environment. `_catalog_dir` is its only consumer.
+    opts._skills_explicit = "AGENTS_ARMY_SKILLS" in env
     if separator_present and opts.verb != "talk":
         opts._parser.error("the -- separator is only valid for talk")
     if opts.verb == "doctor":

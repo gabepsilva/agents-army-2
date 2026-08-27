@@ -320,6 +320,9 @@ def test_state_file_and_skills_dir_resolve_under_the_team_root(
     worktree = teams_dir / "t1" / "worktree"
     worktree.mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
+    # The worktree default is what this asserts; an exported catalog replaces
+    # it (see the test below, which sets one deliberately).
+    monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
 
     resolved = _resolved_paths(["create", "a", "--team", "t1", "-b", "recording"])
 
@@ -349,6 +352,112 @@ def test_explicit_agents_army_skills_still_wins_under_team(
     resolved = _resolved_paths(["create", "a", "--team", "t1", "-b", "recording"])
 
     assert resolved.skills_dir == custom_skills
+
+
+def _make_catalog(directory: Path, skill: str) -> Path:
+    (directory / skill).mkdir(parents=True)
+    (directory / skill / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+    return (directory / skill / "SKILL.md").resolve()
+
+
+@pytest.fixture
+def team_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Team `t1`'s worktree, with the catalog ladder pinned inside `tmp_path`.
+
+    `AGENTS_ARMY_SKILLS` is cleared like every other ambient `AGENTS_ARMY_*`
+    in this file: exported by the contributor running the suite, it would win
+    rung 1 and answer for every rung these tests mean to exercise.
+    """
+    worktree = tmp_path / "teams" / "t1" / "worktree"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(tmp_path / "teams"))
+    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+    monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
+    return worktree
+
+
+def test_team_falls_back_to_the_root_catalog_when_the_worktree_has_none(
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rooted = _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+
+    cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().out == (
+        f"skills: {tmp_path / 'root' / 'SKILLS'}\n{'rooted':20} {rooted}\n"
+    )
+
+
+def test_team_worktree_catalog_shadows_the_root_catalog(
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    local = _make_catalog(team_catalog / "SKILLS", "local")
+    _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+
+    cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().out == (
+        f"skills: {team_catalog / 'SKILLS'}\n{'local':20} {local}\n"
+    )
+
+
+def test_explicit_catalog_wins_over_the_root_catalog_under_team(
+    team_catalog: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    chosen = _make_catalog(tmp_path / "custom", "chosen")
+    _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+    monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "custom"))
+
+    cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().out == (
+        f"skills: {tmp_path / 'custom'}\n{'chosen':20} {chosen}\n"
+    )
+
+
+def test_team_talk_attaches_a_skill_from_the_root_catalog(
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    register_backend("recording", _make_recording_backend([]))
+    rooted = _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+
+    cli.main(
+        ["talk", "a", "--team", "t1", "-b", "recording", "--skill", "rooted", "-p", "x"]
+    )
+
+    assert f"- rooted: {rooted}" in capsys.readouterr().out
+
+
+def test_explicit_missing_catalog_does_not_fall_back_under_team(
+    team_catalog: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+    monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "typo"))
+
+    with pytest.raises(SystemExit, match="1"):
+        cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().err == (
+        f"skills directory not found: {tmp_path / 'typo'}\n"
+    )
+
+
+def test_team_with_no_catalog_anywhere_names_both_directories(
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="1"):
+        cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().err == (
+        f"skills directory not found: tried {team_catalog / 'SKILLS'} "
+        f"and {tmp_path / 'root' / 'SKILLS'}\n"
+    )
 
 
 def test_teamless_behavior_is_unaffected_by_team_support(

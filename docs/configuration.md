@@ -7,7 +7,7 @@
 | `AGENTS_ARMY_ROOT` | `~/.agents-army` | the one folder agents-army owns in `$HOME`: default home of the teamless registry, and the root `list teams` walks — see [Teams](#teams) |
 | `AGENTS_ARMY_HOME` | current working directory | base folder for state (when explicitly set) and, unless overridden, skills |
 | `AGENTS_ARMY_STATE_FILE` | see the ladder below | the registry file's exact path |
-| `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS` | the skill catalog root that `--skill` and `list skills` search |
+| `AGENTS_ARMY_SKILLS` | `$AGENTS_ARMY_HOME/SKILLS`, falling back to `$AGENTS_ARMY_ROOT/SKILLS` | the skill catalog root that `--skill` and `list skills` search — see the ladder below |
 | `AGENTS_ARMY_TEAMS_DIR` | **no default** | root under which `--team NAME` resolves `$AGENTS_ARMY_TEAMS_DIR/NAME/{agents,worktree}`; when unset, `--team NAME` instead resolves by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 `AGENTS_ARMY_STATE_FILE` resolves in this order: an explicit
@@ -16,6 +16,26 @@
 otherwise it defaults to `$AGENTS_ARMY_ROOT/orchestrator_state.json`. The
 current working directory is never consulted for this default — only
 `AGENTS_ARMY_ROOT` (or its own default) is.
+
+The skills catalog resolves in this order:
+
+1. `AGENTS_ARMY_SKILLS`, if set, wins outright — teamless and under `--team`.
+   It never falls back: an explicit catalog is an instruction, so a path that
+   does not exist fails loudly rather than quietly serving other skills.
+2. Otherwise the configured catalog — `$AGENTS_ARMY_HOME/SKILLS` (the current
+   working directory's `SKILLS/` unless `AGENTS_ARMY_HOME` is set), or
+   `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` under `--team` — **if it
+   exists on disk**.
+3. Otherwise `$AGENTS_ARMY_ROOT/SKILLS`.
+
+Exactly one catalog wins; the two are never merged, so a checkout carrying
+its own `SKILLS/` shadows the root catalog entirely. This is what lets the
+driver be run from any repository, or from cron or CI, and still find the
+skills you installed once — no exported variable required. If neither
+directory exists, `--skill` and `list skills` fail naming both (an explicit
+`AGENTS_ARMY_SKILLS` names only itself, the message it has always had); if the
+catalog that won has no skill by that name, the error names the directory
+that was searched. `list skills` prints that directory as its header.
 
 ```sh
 # relocate state, working directory, and skill catalog together
@@ -35,7 +55,8 @@ the resolved registry path, working directory, and (unless
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree`, and
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` respectively — a named group of
 agents gets its own registry and its own working directory, isolated from
-every other team.
+every other team. A team whose worktree has no `SKILLS/` falls back to
+`$AGENTS_ARMY_ROOT/SKILLS` like any other run (see the ladder above).
 
 `AGENTS_ARMY_TEAMS_DIR` has no default; export it once per clone, namespaced
 by repo so two clones sharing one `$AGENTS_ARMY_ROOT` don't collide on the
@@ -120,8 +141,9 @@ own. Every other key is unchanged by this, so a registry written before
 ## Skills
 
 A skill is a markdown file under the skills catalog (`SKILLS/` by default,
-any subfolder). `--skill NAME` resolves `NAME` to its path and prepends it to
-the prompt; `--skill a,b` attaches more than one. A skill name must be
+any subfolder; see the resolution ladder above for which `SKILLS/`).
+`--skill NAME` resolves `NAME` to its path and prepends it to the prompt;
+`--skill a,b` attaches more than one. A skill name must be
 unique across the whole catalog — a collision between two subfolders is an
 error, not a silent pick.
 

@@ -35,6 +35,7 @@ from orchestrator.skills import (
     format_skill_listing,
     index_skills,
     parse_skill_names,
+    resolve_catalog_dir,
     resolve_skills,
 )
 from tests.path_helpers import runtime_paths
@@ -46,11 +47,17 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     tail = [] if separator is None else argv[separator + 1 :]
     options = cli._build_parser().parse_args(head)
     cli._resolve_talk_prompt(options, tail, separator is not None)
-    return options
+    return _with_catalog_provenance(options)
 
 
 def _options(argv: list[str]) -> argparse.Namespace:
-    return cli._build_parser().parse_args(argv)
+    return _with_catalog_provenance(cli._build_parser().parse_args(argv))
+
+
+def _with_catalog_provenance(options: argparse.Namespace) -> argparse.Namespace:
+    """Stand in for what `main` records: no AGENTS_ARMY_SKILLS in play here."""
+    options._skills_explicit = False
+    return options
 
 
 class EchoBackend(AgentBackend):
@@ -196,6 +203,82 @@ class TestIndexSkills:
         assert index_skills(root) == {}
 
 
+class TestResolveCatalogDir:
+    """The three-rung ladder: configured catalog, then `<root>/SKILLS`."""
+
+    def test_configured_catalog_wins_when_it_exists(self, tmp_path: Path) -> None:
+        configured = tmp_path / "checkout" / "SKILLS"
+        configured.mkdir(parents=True)
+        root = tmp_path / "root"
+        (root / "SKILLS").mkdir(parents=True)
+        assert resolve_catalog_dir(configured, root, explicit=False) == configured
+
+    def test_falls_back_to_the_root_catalog_when_configured_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        configured = tmp_path / "nowhere" / "SKILLS"
+        assert (
+            resolve_catalog_dir(configured, tmp_path / "root", explicit=False)
+            == fallback
+        )
+
+    def test_an_empty_root_catalog_still_wins_the_rung(self, tmp_path: Path) -> None:
+        """Existing-but-empty is a correct answer, not a skipped rung."""
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        assert list(fallback.iterdir()) == []
+        assert (
+            resolve_catalog_dir(tmp_path / "nowhere", tmp_path / "root", explicit=False)
+            == fallback
+        )
+
+    def test_a_file_is_not_a_catalog(self, tmp_path: Path) -> None:
+        configured = tmp_path / "SKILLS"
+        configured.write_text("not a dir\n", encoding="utf-8")
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        assert (
+            resolve_catalog_dir(configured, tmp_path / "root", explicit=False)
+            == fallback
+        )
+
+    def test_an_explicit_catalog_does_not_fall_back(self, tmp_path: Path) -> None:
+        """AGENTS_ARMY_SKILLS is an instruction, not a hint."""
+        configured = tmp_path / "typo"
+        (tmp_path / "root" / "SKILLS").mkdir(parents=True)
+        with pytest.raises(SkillError) as excinfo:
+            resolve_catalog_dir(configured, tmp_path / "root", explicit=True)
+        assert str(excinfo.value) == f"skills directory not found: {configured}"
+
+    def test_an_explicit_catalog_that_exists_is_used(self, tmp_path: Path) -> None:
+        configured = tmp_path / "custom"
+        configured.mkdir()
+        (tmp_path / "root" / "SKILLS").mkdir(parents=True)
+        assert (
+            resolve_catalog_dir(configured, tmp_path / "root", explicit=True)
+            == configured
+        )
+
+    def test_neither_catalog_names_both_directories(self, tmp_path: Path) -> None:
+        configured = tmp_path / "checkout" / "SKILLS"
+        root = tmp_path / "root"
+        with pytest.raises(SkillError) as excinfo:
+            resolve_catalog_dir(configured, root, explicit=False)
+        assert str(excinfo.value) == (
+            f"skills directory not found: tried {configured} and {root / 'SKILLS'}"
+        )
+
+    def test_one_directory_is_named_once(self, tmp_path: Path) -> None:
+        """The configured catalog can already be the root one; say it once."""
+        root = tmp_path / "root"
+        configured = root / "SKILLS"
+        with pytest.raises(SkillError) as excinfo:
+            resolve_catalog_dir(configured, root, explicit=False)
+        assert str(excinfo.value) == f"skills directory not found: tried {configured}"
+
+
 class TestResolveSkills:
     def test_lookup_uses_an_empty_list_as_the_missing_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -248,7 +331,8 @@ class TestResolveSkills:
         with pytest.raises(SkillError, match="unknown skill 'nope'") as excinfo:
             resolve_skills(["nope"], skills_tree)
         assert str(excinfo.value) == (
-            "unknown skill 'nope'. available skills: bar, clash, foo, loose"
+            f"unknown skill 'nope' in {skills_tree}. "
+            "available skills: bar, clash, foo, loose"
         )
 
     def test_unknown_name_in_empty_catalog(self, tmp_path: Path) -> None:
@@ -256,7 +340,7 @@ class TestResolveSkills:
         root.mkdir()
         with pytest.raises(SkillError) as excinfo:
             resolve_skills(["nope"], root)
-        assert str(excinfo.value) == "unknown skill 'nope'. no skills found"
+        assert str(excinfo.value) == f"unknown skill 'nope'. no skills found in {root}"
 
     def test_conflict_lists_every_colliding_path(self, skills_tree: Path) -> None:
         with pytest.raises(SkillError) as excinfo:
@@ -319,6 +403,132 @@ class TestComposeSkillPrompt:
         path = _loose_path(skills_tree)
         assert compose_skill_prompt(resolved, "only this") == (
             f"{PROMPT_HEADER}\n\n- loose: {path}\n\n---\n\nonly this"
+        )
+
+
+class TestCatalogLadderThroughTheCli:
+    """The rungs as a user meets them: env override, cwd catalog, root catalog."""
+
+    @pytest.fixture
+    def checkout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A cwd with no catalog, a runtime root, and nothing inherited."""
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
+        for name in ("AGENTS_ARMY_SKILLS", "AGENTS_ARMY_HOME", "AGENTS_ARMY_TEAMS_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        return cwd
+
+    @staticmethod
+    def _catalog(directory: Path, skill: str) -> Path:
+        (directory / skill).mkdir(parents=True)
+        (directory / skill / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+        return (directory / skill / "SKILL.md").resolve()
+
+    def test_cwd_catalog_wins_and_shadows_the_root_catalog(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        local = self._catalog(checkout / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == f"skills: {checkout / 'SKILLS'}\n{'local':20} {local}\n"
+
+    def test_root_catalog_is_used_when_the_cwd_has_none(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == (
+            f"skills: {tmp_path / 'root' / 'SKILLS'}\n{'rooted':20} {rooted}\n"
+        )
+
+    def test_explicit_catalog_wins_over_both(
+        self,
+        checkout: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._catalog(checkout / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        explicit = self._catalog(tmp_path / "explicit", "chosen")
+        monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "explicit"))
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == f"skills: {tmp_path / 'explicit'}\n{'chosen':20} {explicit}\n"
+
+    def test_an_existing_but_empty_root_catalog_lists_as_empty(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "root" / "SKILLS").mkdir(parents=True)
+        main(["list", "skills"])
+        assert capsys.readouterr().out == (
+            f"skills: {tmp_path / 'root' / 'SKILLS'}\nno skills\n"
+        )
+
+    def test_no_catalog_anywhere_exits_one_naming_both(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            main(["list", "skills"])
+        captured = capsys.readouterr()
+        assert captured.err == (
+            f"skills directory not found: tried {checkout / 'SKILLS'} "
+            f"and {tmp_path / 'root' / 'SKILLS'}\n"
+        )
+        assert captured.out == ""
+
+    def test_an_explicit_missing_catalog_fails_instead_of_falling_back(
+        self,
+        checkout: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A typo'd or unmounted override must not quietly serve another catalog."""
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "typo"))
+        with pytest.raises(SystemExit, match="1"):
+            main(["list", "skills"])
+        captured = capsys.readouterr()
+        assert captured.err == f"skills directory not found: {tmp_path / 'typo'}\n"
+        assert captured.out == ""
+
+    def test_talk_rejects_an_explicit_missing_catalog(
+        self,
+        checkout: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "typo"))
+        with pytest.raises(SystemExit, match="1"):
+            main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
+        assert capsys.readouterr().err == (
+            f"skills directory not found: {tmp_path / 'typo'}\n"
+        )
+
+    def test_talk_attaches_a_skill_from_the_root_catalog(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
+        assert f"- rooted: {rooted}" in capsys.readouterr().out
+
+    def test_talk_prefers_the_cwd_catalog_and_says_where_it_looked(
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._catalog(checkout / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        with pytest.raises(SystemExit, match="1"):
+            main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
+        assert capsys.readouterr().err == (
+            f"unknown skill 'rooted' in {checkout / 'SKILLS'}. available skills: local\n"
         )
 
 
@@ -420,7 +630,9 @@ class TestListCommand:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         _cmd_list(orch, _options(["list", "skills"]))
-        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+        assert capsys.readouterr().out == (
+            f"skills: {skills_tree}\n" + _expected_skill_listing(skills_tree) + "\n"
+        )
 
     def test_list_skills_empty_catalog(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -431,11 +643,14 @@ class TestListCommand:
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=empty)
         )
         _cmd_list(orch, _options(["list", "skills"]))
-        assert capsys.readouterr().out == "no skills\n"
+        assert capsys.readouterr().out == f"skills: {empty}\nno skills\n"
 
     def test_list_skills_missing_dir(
         self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # `main` reads provenance from the real environment, so an exported
+        # AGENTS_ARMY_SKILLS would answer rung 1 for the faked paths below.
+        monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
         missing = tmp_path / "absent"
         orch = Orchestrator(
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
@@ -444,7 +659,9 @@ class TestListCommand:
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
         captured = capsys.readouterr()
-        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.err == (
+            f"skills directory not found: tried {missing} and {tmp_path / 'SKILLS'}\n"
+        )
         assert captured.out == ""
 
     def test_list_without_target_defaults_to_agents(
@@ -834,7 +1051,9 @@ class TestMainSkillInvocation:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["list", "skills"])
-        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+        assert capsys.readouterr().out == (
+            f"skills: {skills_tree}\n" + _expected_skill_listing(skills_tree) + "\n"
+        )
 
     def test_removed_list_equals_form_is_rejected(
         self,
@@ -881,6 +1100,7 @@ class TestMainSkillInvocation:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
         missing = tmp_path / "absent"
         orch = Orchestrator(
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
@@ -890,5 +1110,7 @@ class TestMainSkillInvocation:
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo", "--prompt", "x"])
         captured = capsys.readouterr()
-        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.err == (
+            f"skills directory not found: tried {missing} and {tmp_path / 'SKILLS'}\n"
+        )
         assert captured.out == ""

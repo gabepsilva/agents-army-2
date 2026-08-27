@@ -40,6 +40,7 @@ from .skills import (
     format_skill_listing,
     index_skills,
     parse_skill_names,
+    resolve_catalog_dir,
     resolve_skills,
 )
 

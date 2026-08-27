@@ -92,12 +92,14 @@ def test_package_and_console_entry_point_resolve_to_cli_main() -> None:
     import orchestrator.cli as cli
 
     assert orchestrator.main is cli.main
-    entry_point = next(
-        entry_point
+    console_scripts = {
+        entry_point.name: entry_point
         for entry_point in importlib.metadata.entry_points(group="console_scripts")
-        if entry_point.name == "orchestrator"
-    )
-    assert entry_point.load() is cli.main
+    }
+    # `aarmy` is an alias, not a rename: all three names stay installed and
+    # load the same main.
+    for name in ("agents-army", "orchestrator", "aarmy"):
+        assert console_scripts[name].load() is cli.main
 
 
 def test_package_surface_reexports_supported_objects_without_shrinking() -> None:
@@ -146,6 +148,7 @@ def test_package_surface_reexports_supported_objects_without_shrinking() -> None
         "main",
         "parse_skill_names",
         "paths",
+        "resolve_catalog_dir",
         "resolve_skills",
         "schema",
         "skills",
@@ -497,6 +500,8 @@ def test_missing_skills_directory_has_one_stderr_line(
         cli.main(["list", "skills"])
     captured = capsys.readouterr()
     assert excinfo.value.code == 1
+    # An explicit catalog never falls back, so no AGENTS_ARMY_ROOT pin is
+    # needed here: a real ~/.agents-army/SKILLS cannot answer instead.
     assert captured.err == f"skills directory not found: {tmp_path / 'missing'}\n"
     assert captured.out == ""
 

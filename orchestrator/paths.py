@@ -72,6 +72,11 @@ class RuntimePaths:
             # Agents run their CLI sessions from a single shared working
             # directory, which is `home` itself.
             workdir=home,
+            # The *configured* catalog, not necessarily the one indexed: if
+            # it does not exist on disk the runtime falls back to
+            # `<root>/SKILLS`. That rung needs the filesystem, so it lives in
+            # `skills.resolve_catalog_dir`; the whole ladder is documented in
+            # docs/configuration.md.
             skills_dir=Path(env.get("AGENTS_ARMY_SKILLS", home / SKILLS_DIRNAME)),
             # Team roots: `<teams_dir>/<team>/{agents/,worktree/}` — state
             # and workspace as siblings, never nested. No default: see
@@ -96,6 +101,8 @@ class RuntimePaths:
             state_file=team_root / "agents" / STATE_FILENAME,
             workdir=worktree,
             # An explicit catalog still wins for a team, the same way it does
-            # outside one; the default follows the team's worktree.
+            # outside one; the default follows the team's worktree. As above,
+            # this is the configured catalog and not the last word — see
+            # `skills.resolve_catalog_dir`.
             skills_dir=Path(env.get("AGENTS_ARMY_SKILLS", worktree / SKILLS_DIRNAME)),
         )

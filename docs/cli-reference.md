@@ -73,7 +73,7 @@ possibly-new agent without a separate `create` step.
 | `-b`, `--backend` | must match the agent's existing backend if already created |
 | `-m`, `--model` | must match the agent's existing model if already created |
 | `-e`, `--reasoning-effort` | must match the agent's existing reasoning effort if already created |
-| `-s`, `--skill NAMES` | comma-separated skill name(s), resolved under `SKILLS/` and prepended to the prompt |
+| `-s`, `--skill NAMES` | comma-separated skill name(s), resolved under the skills catalog (`SKILLS/` here, else `$AGENTS_ARMY_ROOT/SKILLS` — see [Configuration](configuration.md#environment-variables)) and prepended to the prompt |
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
@@ -246,13 +246,14 @@ orchestrator list [agents|skills|teams] [--team NAME]
 
 Defaults to `agents` when no target is given. `--team NAME` reads that
 team's registry (`list agents`) or indexes its worktree's `SKILLS/`
-(`list skills`) instead of the teamless layout; it is rejected (exit 2) on
+(`list skills`, falling back to `$AGENTS_ARMY_ROOT/SKILLS` when the worktree
+has none) instead of the teamless layout; it is rejected (exit 2) on
 `list teams`, which reads every team's registry, not one.
 
 ```sh
 uv run orchestrator list           # same as: list agents
 uv run orchestrator list agents    # registry path, then every agent's full state
-uv run orchestrator list skills    # the SKILLS/ catalog
+uv run orchestrator list skills    # the skills catalog, its directory first
 uv run orchestrator list agents --team issue-73   # only that team's agents
 uv run orchestrator list teams     # every team under AGENTS_ARMY_ROOT
 ```
@@ -266,6 +267,10 @@ registry knows about it: `model=-`/`effort=-` mean no `--model`/
 agent predates this field and there is nothing truthful to show, and `busy`
 appears (in a fixed-width column, so `session=` still lines up) only while a
 turn is actually in flight.
+
+`list skills` prints the catalog directory it indexed first, for the same
+reason: with the cwd catalog shadowing `$AGENTS_ARMY_ROOT/SKILLS`, which one
+answered is part of the answer.
 
 ```sh
 uv run orchestrator list agents
