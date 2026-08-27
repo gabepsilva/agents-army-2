@@ -8,6 +8,9 @@ dependencies = [
 ]
 
 [project.scripts]
+# `aarmy` is a short alias for the same entry point; `agents-army` and
+# `orchestrator` keep working and nothing is renamed.
+aarmy = "orchestrator:main"
 agents-army = "orchestrator:main"
 orchestrator = "orchestrator:main"
 

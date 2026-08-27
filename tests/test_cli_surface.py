@@ -92,12 +92,14 @@ def test_package_and_console_entry_point_resolve_to_cli_main() -> None:
     import orchestrator.cli as cli
 
     assert orchestrator.main is cli.main
-    entry_point = next(
-        entry_point
+    console_scripts = {
+        entry_point.name: entry_point
         for entry_point in importlib.metadata.entry_points(group="console_scripts")
-        if entry_point.name == "orchestrator"
-    )
-    assert entry_point.load() is cli.main
+    }
+    # `aarmy` is an alias, not a rename: all three names stay installed and
+    # load the same main.
+    for name in ("agents-army", "orchestrator", "aarmy"):
+        assert console_scripts[name].load() is cli.main
 
 
 def test_package_surface_reexports_supported_objects_without_shrinking() -> None:
