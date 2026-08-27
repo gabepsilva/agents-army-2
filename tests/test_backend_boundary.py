@@ -53,18 +53,16 @@ from tests.backend_helpers import (
 
 @dataclass(frozen=True)
 class BackendRow:
-    """One shipped adapter's enrollment in the shared backend contracts.
+    """One shipped adapter's enrollment in the shared subprocess contract.
 
-    Every expectation below is a literal written here, never a value read off
-    the class under test: a row that asks the object what it declares would
-    pass against a corrupted declaration and assert nothing.
+    Every expectation is a literal written here, never a value read off the
+    class under test: a row that asks the object what it does would pass
+    against a broken adapter and assert nothing.
     """
 
+    # Doubles as the pytest id, so a failure names the backend.
     module: str
     backend_cls: type[AgentBackend]
-    expected_name: str
-    expected_enforces_schema: bool
-    expected_supports_fork: bool
     expected_error: type[TurnError]
     # The smallest stdout that reaches this adapter's normal result path,
     # in that CLI's own envelope dialect. Each was checked against the real
@@ -79,50 +77,34 @@ BACKENDS = [
     BackendRow(
         module="claude",
         backend_cls=ClaudeBackend,
-        expected_name="claude",
-        expected_enforces_schema=True,
-        expected_supports_fork=True,
         expected_error=ClaudeTurnError,
         stdout='{"session_id": "s1", "result": "ok"}',
     ),
     BackendRow(
         module="codex",
         backend_cls=CodexBackend,
-        expected_name="codex",
-        expected_enforces_schema=True,
-        expected_supports_fork=True,
         expected_error=CodexTurnError,
         stdout='{"type": "thread.started", "thread_id": "s1"}',
     ),
     BackendRow(
         module="grok",
         backend_cls=GrokBackend,
-        expected_name="grok",
-        expected_enforces_schema=True,
-        expected_supports_fork=True,
         expected_error=GrokTurnError,
         stdout='{"sessionId": "s1", "text": "ok"}',
     ),
     BackendRow(
         module="opencode",
         backend_cls=OpenCodeBackend,
-        expected_name="opencode",
-        expected_enforces_schema=False,
-        expected_supports_fork=True,
         expected_error=OpenCodeTurnError,
         stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
         prompt_on_stdin=True,
     ),
 ]
 
-# pytest ids come from the row's own module name, so a failure names the
-# backend rather than "backends2".
 BACKEND_ROWS = pytest.mark.parametrize(
     "row", BACKENDS, ids=[row.module for row in BACKENDS]
 )
 
-# Distinctive enough that finding it in argv or a log line is never a
-# coincidence.
 PROMPT = "sequoia rutabaga"
 
 
@@ -145,8 +127,15 @@ class TestSharedSubprocessBoundary:
         """Drive the row's real ``run_turn`` and return the subprocess kwargs."""
         fake_run, calls = _subprocess_recorder(_completed(returncode, row.stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
-        args = (PROMPT, None, cwd) if timeout is None else (PROMPT, None, cwd, timeout)
-        row.backend_cls().run_turn(*args)
+        backend = row.backend_cls()
+        # Spelled out rather than splatted: omitting the argument is what
+        # distinguishes an adapter that forwards the shared default from one
+        # that hard-codes a number, and a splatted mapping leaves the type
+        # checker no keyword-only signature to match.
+        if timeout is None:
+            backend.run_turn(PROMPT, None, cwd)
+        else:
+            backend.run_turn(PROMPT, None, cwd, timeout)
         return calls[0][1]
 
     @BACKEND_ROWS
@@ -166,7 +155,12 @@ class TestSharedSubprocessBoundary:
     def test_stdin_is_closed_unless_the_prompt_goes_there(
         self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A CLI left reading an inherited pipe blocks until it is killed."""
+        """Exactly one stdin arm fires, never both.
+
+        A CLI left reading an inherited pipe blocks until it is killed, and
+        the shared helper checks only the arm a row declares. These are the
+        negative halves: the arm the row did not declare is absent entirely.
+        """
         kwargs = self._run(row, monkeypatch, tmp_path)
 
         if row.prompt_on_stdin:
@@ -194,6 +188,12 @@ class TestSharedSubprocessBoundary:
     def test_a_non_zero_exit_raises_that_backends_own_error(
         self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The exit code alone is the trigger.
+
+        Stdout is the row's own good envelope, so an adapter that reached its
+        parser instead of raising would return a result rather than fail here
+        for the wrong reason.
+        """
         with pytest.raises(row.expected_error):
             self._run(row, monkeypatch, tmp_path, returncode=1)
 
