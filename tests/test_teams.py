@@ -1080,6 +1080,9 @@ def test_list_teams_namespaced_root_and_flat_root_in_same_walk(
 def test_list_teams_directory_without_agents_dir_is_not_a_team(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """`worktree/` alone does not make a directory a team, so the walk finds
+    nothing and the report is the same one an empty root produces — a
+    `not-a-team` line anywhere in it could not leave the output at that."""
     root = tmp_path / "root"
     (root / "not-a-team" / "worktree").mkdir(parents=True)
     monkeypatch.setattr(orchestrator, "ROOT", root)
