@@ -26,6 +26,7 @@ def sh(*cmd):
 
 def talk(agent, text, *flags):
     """One agent turn; the transcript appends to the agent's log file."""
+    started = time.monotonic()
     with open(LOG_DIR / f"{agent}.log", "ab") as log:
         subprocess.run(
             [
@@ -47,6 +48,7 @@ def talk(agent, text, *flags):
             stderr=log,
             check=True,
         )
+    print(f"  {agent} worked for {time.monotonic() - started:.0f} seconds")
 
 
 def prompt(name, **subs):
@@ -70,16 +72,34 @@ LOG_DIR = TEAMS_DIR / "logs" / f"issue-{ISSUE_NUMBER}" / time.strftime("%Y%m%d-%
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 os.environ["AGENTS_ARMY_TEAMS_DIR"] = str(TEAMS_DIR)
 
-BACKEND = [
-    "-b",
-    "claude",
-    "-m",
-    "opus",
-]  # an agent's first talk carries these, never again
-EFFORT = {"owen": "medium", "spectacle": "low", "doku": "medium"}
+# One dict per agent - the flags its FIRST talk carries, never again. Edit a
+# line here to move that agent to another backend, model, or effort.
+PRIMER = {"backend": "claude", "model": "opus", "effort": "medium"}
+OWEN = {"backend": "claude", "model": "opus", "effort": "medium"}
+SPECTACLE = {"backend": "claude", "model": "luna", "effort": "max"}
+DEVIN = {"backend": "claude", "model": "luna", "effort": "max"}
+CODE_REVIEWER = {"backend": "claude", "model": "opus", "effort": "high"}
+# DOKU = {"backend": "claude", "model": "opus", "effort": "medium"}
+DOKU = {
+    "backend": "opencode",
+    "model": "opencode/muse-spark-1.2-contributor-free",
+    "effort": "medium",
+}
+ROLES = {"owen": OWEN, "spectacle": SPECTACLE, "doku": DOKU}  # the forkable roles
 TIMEOUT = "10800"
 PLAN_CAP = 12
 OWEN_VERDICTS = {"owens-is-happy", "owens-rejects", "owens-is-blocked", "owens-split"}
+
+
+def flags_for(agent):
+    """The backend flags an agent's first talk carries."""
+    return ["-b", agent["backend"], "-m", agent["model"], "-e", agent["effort"]]
+
+
+def conf(agent):
+    """The agent's dict, printed on the line that announces its first talk."""
+    return json.dumps(agent)
+
 
 PRIMER_PROMPT = (
     "You are a primer session: study this repository so that agents forked from "
@@ -147,8 +167,8 @@ def cleanup():  # Y - the team and worktree die with the run; logs are kept
 
 
 def prime():  # PRIME - one role-neutral session reads the repo, once per run
-    print("Priming: one role-neutral session reads the repo.")
-    talk("primer", PRIMER_PROMPT, *BACKEND, "-e", "medium")
+    print(f"Priming: one role-neutral session reads the repo. {conf(PRIMER)}")
+    talk("primer", PRIMER_PROMPT, *flags_for(PRIMER))
 
 
 def fork_primer(role, url):
@@ -164,13 +184,15 @@ def fork_primer(role, url):
     if FORK_WORKS:
         try:
             sh("uv", "run", "orchestrator", "fork", "primer", name, "--team", TEAM)
+            print(f"  {name} forks the primer, inheriting {conf(PRIMER)}")
             return name, []
         except subprocess.CalledProcessError:
             FORK_WORKS = False
             print(
                 "The fork verb is unavailable - falling back to fresh agents per issue."
             )
-    return name, [*BACKEND, "-e", EFFORT[role]]
+    print(f"  {name} is a fresh agent. {conf(ROLES[role])}")
+    return name, flags_for(ROLES[role])
 
 
 def triage(url):  # TRI - owen: proceed / reshape / reject / split
@@ -313,13 +335,11 @@ def reuse_or_open_draft_pr():  # BUILD0 - never create a second PR when one exis
     if pr:
         print(f"Reusing the existing draft PR {pr[0]}.")
     else:
-        print("Spectacle: opening the draft PR.")
+        print(f"Spectacle: opening the draft PR. {conf(SPECTACLE)}")
         talk(
             "spectacle",
             prompt("spectacle-draft-pr", issue_url=ISSUE_URL),
-            *BACKEND,
-            "-e",
-            "low",
+            *flags_for(SPECTACLE),
         )
         for _ in range(6):
             if pr := find_draft_pr():
@@ -340,13 +360,11 @@ def reuse_or_open_draft_pr():  # BUILD0 - never create a second PR when one exis
 
 
 def implement(pr_url):  # Q - the PR description is the whole spec
-    print("Devin: implementing the PR description.")
+    print(f"Devin: implementing the PR description. {conf(DEVIN)}")
     talk(
         "devin",
         prompt("devin-implement", pr_url=pr_url),
-        *BACKEND,
-        "-e",
-        "low",
+        *flags_for(DEVIN),
         "-s",
         "implement,tdd,code-review-and-quality",
     )
@@ -410,9 +428,12 @@ def reviewer_approves(pr_url):  # W - the label is the verdict, not the review t
 
 
 def review_rounds(pr_url):  # U -> blockers -> V -> (new commit -> S | pushback -> U)
-    flags = [*BACKEND, "-e", "high", "-s", "code-review-and-quality"]
+    flags = [*flags_for(CODE_REVIEWER), "-s", "code-review-and-quality"]
     for review_round in (1, 2, 3):
-        print(f"Review round {review_round} of 3. Code reviewer: reviewing the diff.")
+        print(
+            f"Review round {review_round} of 3. Code reviewer: reviewing the diff."
+            + (f" {conf(CODE_REVIEWER)}" if flags else "")
+        )
         talk(
             "code-reviewer",
             prompt(
@@ -440,8 +461,8 @@ def review_rounds(pr_url):  # U -> blockers -> V -> (new commit -> S | pushback 
 
 
 def user_note(pr_url):  # X - doku's user-facing note on the PR
-    print("Doku: writing the user-facing note on the PR.")
-    talk("doku", prompt("doku-user-note", pr_url=pr_url), *BACKEND, "-e", "medium")
+    print(f"Doku: writing the user-facing note on the PR. {conf(DOKU)}")
+    talk("doku", prompt("doku-user-note", pr_url=pr_url), *flags_for(DOKU))
 
 
 def build():  # Invocation B - one converged leaf to an approved PR
