@@ -648,6 +648,9 @@ class TestListCommand:
     def test_list_skills_missing_dir(
         self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # `main` reads provenance from the real environment, so an exported
+        # AGENTS_ARMY_SKILLS would answer rung 1 for the faked paths below.
+        monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
         missing = tmp_path / "absent"
         orch = Orchestrator(
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
@@ -1097,6 +1100,7 @@ class TestMainSkillInvocation:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
         missing = tmp_path / "absent"
         orch = Orchestrator(
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)

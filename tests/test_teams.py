@@ -320,6 +320,9 @@ def test_state_file_and_skills_dir_resolve_under_the_team_root(
     worktree = teams_dir / "t1" / "worktree"
     worktree.mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
+    # The worktree default is what this asserts; an exported catalog replaces
+    # it (see the test below, which sets one deliberately).
+    monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
 
     resolved = _resolved_paths(["create", "a", "--team", "t1", "-b", "recording"])
 
@@ -357,14 +360,26 @@ def _make_catalog(directory: Path, skill: str) -> Path:
     return (directory / skill / "SKILL.md").resolve()
 
 
-def test_team_falls_back_to_the_root_catalog_when_the_worktree_has_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    teams_dir = tmp_path / "teams"
-    (teams_dir / "t1" / "worktree").mkdir(parents=True)
-    rooted = _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
+@pytest.fixture
+def team_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Team `t1`'s worktree, with the catalog ladder pinned inside `tmp_path`.
+
+    `AGENTS_ARMY_SKILLS` is cleared like every other ambient `AGENTS_ARMY_*`
+    in this file: exported by the contributor running the suite, it would win
+    rung 1 and answer for every rung these tests mean to exercise.
+    """
+    worktree = tmp_path / "teams" / "t1" / "worktree"
+    worktree.mkdir(parents=True)
+    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(tmp_path / "teams"))
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+    monkeypatch.delenv("AGENTS_ARMY_SKILLS", raising=False)
+    return worktree
+
+
+def test_team_falls_back_to_the_root_catalog_when_the_worktree_has_none(
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rooted = _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
 
     cli.main(["list", "skills", "--team", "t1"])
 
@@ -374,32 +389,26 @@ def test_team_falls_back_to_the_root_catalog_when_the_worktree_has_none(
 
 
 def test_team_worktree_catalog_shadows_the_root_catalog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    teams_dir = tmp_path / "teams"
-    worktree = teams_dir / "t1" / "worktree"
-    worktree.mkdir(parents=True)
-    local = _make_catalog(worktree / "SKILLS", "local")
+    local = _make_catalog(team_catalog / "SKILLS", "local")
     _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
 
     cli.main(["list", "skills", "--team", "t1"])
 
     assert capsys.readouterr().out == (
-        f"skills: {worktree / 'SKILLS'}\n{'local':20} {local}\n"
+        f"skills: {team_catalog / 'SKILLS'}\n{'local':20} {local}\n"
     )
 
 
 def test_explicit_catalog_wins_over_the_root_catalog_under_team(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    team_catalog: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    teams_dir = tmp_path / "teams"
-    (teams_dir / "t1" / "worktree").mkdir(parents=True)
     chosen = _make_catalog(tmp_path / "custom", "chosen")
     _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "custom"))
 
     cli.main(["list", "skills", "--team", "t1"])
@@ -410,14 +419,10 @@ def test_explicit_catalog_wins_over_the_root_catalog_under_team(
 
 
 def test_team_talk_attaches_a_skill_from_the_root_catalog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     register_backend("recording", _make_recording_backend([]))
-    teams_dir = tmp_path / "teams"
-    (teams_dir / "t1" / "worktree").mkdir(parents=True)
     rooted = _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
 
     cli.main(
         ["talk", "a", "--team", "t1", "-b", "recording", "--skill", "rooted", "-p", "x"]
@@ -427,13 +432,12 @@ def test_team_talk_attaches_a_skill_from_the_root_catalog(
 
 
 def test_explicit_missing_catalog_does_not_fall_back_under_team(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    team_catalog: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    teams_dir = tmp_path / "teams"
-    (teams_dir / "t1" / "worktree").mkdir(parents=True)
     _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "typo"))
 
     with pytest.raises(SystemExit, match="1"):
@@ -445,19 +449,13 @@ def test_explicit_missing_catalog_does_not_fall_back_under_team(
 
 
 def test_team_with_no_catalog_anywhere_names_both_directories(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    team_catalog: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    teams_dir = tmp_path / "teams"
-    worktree = teams_dir / "t1" / "worktree"
-    worktree.mkdir(parents=True)
-    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
-
     with pytest.raises(SystemExit, match="1"):
         cli.main(["list", "skills", "--team", "t1"])
 
     assert capsys.readouterr().err == (
-        f"skills directory not found: tried {worktree / 'SKILLS'} "
+        f"skills directory not found: tried {team_catalog / 'SKILLS'} "
         f"and {tmp_path / 'root' / 'SKILLS'}\n"
     )
 
