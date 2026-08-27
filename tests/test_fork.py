@@ -304,11 +304,9 @@ def test_a_rejected_fork_says_why_and_leaves_the_registry_alone(
     assert state_file.read_text(encoding="utf-8") == before
 
 
-@pytest.mark.parametrize("backend", ["codex", "opencode"])
-def test_the_shipped_backends_without_fork_are_refused(
-    tmp_path: Path, backend: str
-) -> None:
-    """Not the double: the refusal must follow the real backend classes."""
+@pytest.mark.parametrize("backend", ["claude", "codex", "grok", "opencode"])
+def test_every_shipped_backend_can_be_forked(tmp_path: Path, backend: str) -> None:
+    """Not the double: the answer must follow the real backend classes."""
     state_file = tmp_path / "state.json"
     state_file.write_text(
         json.dumps({"source": {"backend": backend, "session_id": "s1"}}),
@@ -316,12 +314,11 @@ def test_the_shipped_backends_without_fork_are_refused(
     )
     orch = Orchestrator(state_file=state_file)
 
-    with pytest.raises(OrchestratorError) as excinfo:
-        orch.fork("source", "copy")
+    orch.fork("source", "copy")
 
-    assert excinfo.value.args[0] == (
-        f"agent 'source' runs on backend '{backend}', which cannot fork"
-    )
+    copy = json.loads(state_file.read_text(encoding="utf-8"))["copy"]
+    assert copy["backend"] == backend
+    assert copy["pending_fork_from"] == "s1"
 
 
 def test_the_cli_forks_and_reports_the_new_agent(

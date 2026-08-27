@@ -137,17 +137,6 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     return proc
 
 
-def unsupported_fork_message(name: str) -> str:
-    """The one wording for a fork a backend cannot do.
-
-    Shared so the two adapters that refuse say the same thing: "not yet",
-    because both CLIs do have a fork of their own (`codex exec fork`,
-    `opencode run --fork`) in a shape this interface does not speak yet —
-    see issue #131 — rather than because forking is impossible there.
-    """
-    return f"fork is not yet implemented for the {name} backend"
-
-
 def stdout_for_error(stdout: str) -> str:
     """Keep both ends of a long dump: the parse error is at char 0, the
     envelope is usually at the tail."""
@@ -257,9 +246,9 @@ class AgentBackend(ABC):
 
     # Whether this CLI can resume a session into a *copy* of it, leaving the
     # original untouched. Declared on the class, like `enforces_schema`, so
-    # `fork` can refuse before it creates anything; the adapters that answer
-    # False also raise if `resume_as_fork` reaches them anyway, so the
-    # capability and the argv it stands for cannot drift apart.
+    # `fork` can refuse before it creates anything. Every shipped backend
+    # answers True; the default stays False so a third-party backend has to
+    # opt in once it can emit a fork of its own.
     supports_fork: bool = False
 
     def __init__(
@@ -303,8 +292,9 @@ class AgentBackend(ABC):
         that conversation but lands in a new session, whose id the result
         reports, and the session named by `session_id` is left as it was. It
         is keyword-only and defaults off so the ordinary turn — every call
-        site but the first turn of a forked agent — reads unchanged. A
-        backend whose `supports_fork` is False raises its own `TurnError`
-        rather than silently running an unforked turn.
+        site but the first turn of a forked agent — reads unchanged. Every
+        shipped backend forks; a third-party backend that leaves
+        `supports_fork` False owes callers its own `TurnError` here rather
+        than a silently unforked turn.
         """
         ...

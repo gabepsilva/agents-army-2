@@ -15,7 +15,6 @@ from backends.base import (
     json_objects,
     run_cli_turn,
     structured_reply,
-    unsupported_fork_message,
 )
 
 log = logging.getLogger(__name__)
@@ -28,6 +27,12 @@ class CodexTurnError(TurnError):
 # Takes a *path* to the schema document, not the document itself — one of the
 # places these CLIs disagree about more than a flag name.
 SCHEMA_FLAG = "--output-schema"
+
+# `codex exec resume <id> <prompt>` and `codex exec fork <id> <prompt>` take
+# the same slot and the same trailing flags, so a forked turn is the ordinary
+# resume argv with this token in place of the other.
+RESUME_COMMAND = "resume"
+FORK_COMMAND = "fork"
 
 # The events a failed turn arrives as, on stdout. `error` carries the message
 # directly; `turn.failed` nests it under `error`.
@@ -75,6 +80,7 @@ class CodexBackend(AgentBackend):
     """Backend for OpenAI's Codex CLI (`codex`)."""
 
     name = "codex"
+    supports_fork = True
 
     def run_turn(
         self,
@@ -86,15 +92,13 @@ class CodexBackend(AgentBackend):
         *,
         resume_as_fork: bool = False,
     ) -> TurnResult:
-        if resume_as_fork:
-            raise CodexTurnError(unsupported_fork_message(self.name))
         args = ["codex", "exec"]
         if self.model is not None:
             args += ["--model", self.model]
         if self.reasoning_effort is not None:
             args += ["--config", f'model_reasoning_effort="{self.reasoning_effort}"']
         if session_id:
-            args += ["resume", session_id]
+            args += [FORK_COMMAND if resume_as_fork else RESUME_COMMAND, session_id]
         args += [prompt, "--json", "--skip-git-repo-check"]
         if schema is not None:
             args += [SCHEMA_FLAG, str(schema.path)]
