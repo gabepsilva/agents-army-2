@@ -22,6 +22,7 @@ from backends.base import (
 )
 from backends.registry import UnknownBackendError, register_backend
 from orchestrator import Orchestrator, StateError
+from tests.path_helpers import runtime_paths
 
 
 class RecordingBackend(AgentBackend):
@@ -105,7 +106,7 @@ def test_a_registry_is_rewritten_byte_for_byte(tmp_path: Path, registry: str) ->
     state_file = tmp_path / "state.json"
     state_file.write_text(registry, encoding="utf-8")
 
-    orch = Orchestrator(state_file=state_file)
+    orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
     orch._persist()
 
     assert state_file.read_text(encoding="utf-8") == registry
@@ -118,7 +119,7 @@ def test_a_freshly_spawned_agent_is_written_with_every_field_it_has(
     a `created_at` stamp and `turns: 0`, and carry the null session id the
     agent has before its first turn."""
     state_file = tmp_path / "state.json"
-    orch = Orchestrator(state_file=state_file)
+    orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
     orch.spawn("a", "recording", model="m", reasoning_effort="low")
 
     entry = json.loads(state_file.read_text(encoding="utf-8"))["a"]
@@ -139,7 +140,7 @@ def test_an_entry_without_a_backend_is_rejected(tmp_path: Path) -> None:
     state_file.write_text(json.dumps({"a": {"session_id": None}}), encoding="utf-8")
 
     with pytest.raises(StateError, match="agent 'a' has no backend"):
-        Orchestrator(state_file=state_file)
+        Orchestrator(runtime_paths(tmp_path, state_file=state_file))
 
 
 def test_an_unknown_backend_name_surfaces_from_the_registry(tmp_path: Path) -> None:
@@ -149,4 +150,4 @@ def test_an_unknown_backend_name_surfaces_from_the_registry(tmp_path: Path) -> N
     state_file.write_text(json.dumps({"a": {"backend": "gone"}}), encoding="utf-8")
 
     with pytest.raises(UnknownBackendError):
-        Orchestrator(state_file=state_file)
+        Orchestrator(runtime_paths(tmp_path, state_file=state_file))

@@ -36,6 +36,7 @@ from orchestrator.schema import (
     repair_prompt,
     validate_reply,
 )
+from tests.path_helpers import runtime_paths
 
 
 def test_load_document_requires_utf8_text(
@@ -595,7 +596,7 @@ class TestPrompts:
 class TestValidatedTalk:
     @pytest.fixture
     def orch(self, tmp_path: Path) -> Orchestrator:
-        return Orchestrator(state_file=tmp_path / "state.json")
+        return Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
 
     def test_a_conforming_reply_takes_one_turn(
         self, orch: Orchestrator, strict_schema: OutputSchema
@@ -749,7 +750,7 @@ class TestValidationLogging:
 
     @pytest.fixture
     def orch(self, tmp_path: Path) -> Orchestrator:
-        return Orchestrator(state_file=tmp_path / "state.json")
+        return Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
 
     def test_the_validated_object_is_logged_at_trace(
         self,
@@ -823,7 +824,7 @@ class TestTalkSchema:
         # state file on every talk, so the later registration is the one that
         # answers.
         _scripted([])
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("a", "scripted")
         return orch
 

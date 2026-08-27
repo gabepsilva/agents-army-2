@@ -83,6 +83,7 @@ from orchestrator import (
     cmd_talk as _cmd_talk,
 )
 from orchestrator.schema import compose_schema_prompt
+from tests.path_helpers import runtime_paths
 
 
 def _talk_options(argv: list[str]) -> argparse.Namespace:
@@ -2619,7 +2620,7 @@ class TestOrchestrator:
                 )
 
         register_backend("advisory", AdvisoryBackend)
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("agent", "advisory")
 
         with caplog.at_level(logging.WARNING, logger="orchestrator"):
@@ -2655,7 +2656,7 @@ class TestOrchestrator:
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
 
         register_backend("advisory-prompt", AdvisoryBackend)
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("agent", "advisory-prompt")
         orch.talk("agent", "hello", schema=SCHEMA, retries=0)
 
@@ -2684,7 +2685,7 @@ class TestOrchestrator:
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
 
         register_backend("enforcing-prompt", EnforcingBackend)
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("agent", "enforcing-prompt")
         orch.talk("agent", "hello", schema=SCHEMA, retries=0)
 
@@ -2715,7 +2716,7 @@ class TestOrchestrator:
                 )
 
         register_backend("enforcing", EnforcingBackend)
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("echo", "enforcing")
 
         with caplog.at_level(logging.WARNING, logger="orchestrator"):
@@ -2730,7 +2731,6 @@ class TestOrchestrator:
         # A literal, not orchestrator.WORKDIR: comparing the module constant
         # against itself would pass whatever it happened to be set to.
         workdir = tmp_path / "workdir"
-        monkeypatch.setattr(orchestrator, "WORKDIR", workdir)
 
         def fake_backend_run(args, **kwargs):
             _assert_subprocess_kwargs(kwargs, workdir)
@@ -2763,12 +2763,13 @@ class TestOrchestrator:
 
         register_backend("recording", RecordingBackend)
         monkeypatch.setattr(subprocess, "run", fake_backend_run)
+        path_snapshot = runtime_paths(tmp_path, state_file=state_file, workdir=workdir)
 
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(path_snapshot)
         agent = orch.spawn("a1", "claude")
         assert agent.session_id is None
 
-        orch2 = Orchestrator(state_file=state_file)
+        orch2 = Orchestrator(path_snapshot)
         agent2 = orch2.spawn("a2", "recording")
         assert agent2.name == "a2"
         orch2.talk("a2", "first")
@@ -2779,7 +2780,7 @@ class TestOrchestrator:
         assert result.reply == "reply"
         assert orch.agents["a1"].session_id == "persist-me"
 
-        orch3 = Orchestrator(state_file=state_file)
+        orch3 = Orchestrator(path_snapshot)
         assert "a1" in orch3.agents
         assert orch3.agents["a1"].name == "a1"
         assert orch3.agents["a1"].session_id == "persist-me"
@@ -2790,7 +2791,7 @@ class TestOrchestrator:
     ) -> None:
         state_file = tmp_path / "state.json"
         monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("b", "codex")
         orch.spawn("a", "claude")
         assert state_file.read_text(encoding="utf-8") == (
@@ -2811,22 +2812,22 @@ class TestOrchestrator:
         )
 
     def test_spawn_defaults_to_claude_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         agent = orch.spawn("a1")
         assert agent.backend.name == "claude"
 
     def test_spawn_persists_a_grok_agent(self, tmp_path: Path) -> None:
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent = orch.spawn("g", "grok")
         assert agent.backend.name == "grok"
-        loaded = Orchestrator(state_file=state_file)
+        loaded = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert loaded.agents["g"].backend.name == "grok"
         assert loaded.agents["g"].session_id is None
 
     def test_spawn_persists_model_and_reasoning_effort(self, tmp_path: Path) -> None:
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent = orch.spawn(
             "configured",
             "codex",
@@ -2836,35 +2837,41 @@ class TestOrchestrator:
         assert agent.backend.model == "gpt-test"
         assert agent.backend.reasoning_effort == "high"
 
-        loaded = Orchestrator(state_file=state_file).agents["configured"].backend
+        loaded = (
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file))
+            .agents["configured"]
+            .backend
+        )
         assert loaded.name == "codex"
         assert loaded.model == "gpt-test"
         assert loaded.reasoning_effort == "high"
 
     def test_spawn_duplicate_raises(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a1", "claude")
         with pytest.raises(ValueError, match="already exists"):
             orch.spawn("a1", "claude")
 
     def test_ensure_creates_a_missing_agent(self, tmp_path: Path) -> None:
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent, created = orch.ensure("fresh", "echo")
         assert created is True
         assert agent.name == "fresh"
         assert agent.backend.name == "echo"
-        assert Orchestrator(state_file=state_file).list_agents() == ["fresh"]
+        assert Orchestrator(
+            runtime_paths(tmp_path, state_file=state_file)
+        ).list_agents() == ["fresh"]
 
     def test_ensure_defaults_to_the_default_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         agent, _created = orch.ensure("fresh")
         assert agent.backend.name == orchestrator.DEFAULT_BACKEND
 
     def test_ensure_returns_an_existing_agent_untouched(self, tmp_path: Path) -> None:
         """An existing agent keeps its backend and its session, not a new one."""
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         orch.talk("a", "hi")
         agent, created = orch.ensure("a", "codex")
@@ -2882,12 +2889,14 @@ class TestOrchestrator:
             seen.append(op)
 
         monkeypatch.setattr(fcntl, "flock", fake_flock)
-        Orchestrator(state_file=tmp_path / "s.json").ensure("a", "echo")
+        Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json")).ensure(
+            "a", "echo"
+        )
         assert fcntl.LOCK_EX in seen
         assert fcntl.LOCK_UN in seen
 
     def test_talk_unknown_raises(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         with pytest.raises(KeyError, match="no agent named"):
             orch.talk("nope", "hi")
 
@@ -2918,7 +2927,7 @@ class TestOrchestrator:
                 raise AssertionError("chat test must not run a headless turn")
 
         register_backend("chat-backend", ChatBackend)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent = orch.spawn("a", "chat-backend")
         agent.session_id = "session-1"
         calls: list[tuple[list[str], dict]] = []
@@ -2958,7 +2967,7 @@ class TestOrchestrator:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         monkeypatch.setattr(
             orchestrator.subprocess,
             "run",
@@ -2980,7 +2989,7 @@ class TestOrchestrator:
     def test_chat_refuses_an_agent_without_a_materialized_session(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("a", "echo")
         monkeypatch.setattr(
             orchestrator.subprocess,
@@ -2999,7 +3008,7 @@ class TestOrchestrator:
     def test_chat_refuses_a_pending_fork_before_launching_cli(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         agent = orch.spawn("a", "echo")
         agent.pending_fork_from = "source-session"
         orch.state_file.write_text(
@@ -3030,7 +3039,7 @@ class TestOrchestrator:
     def test_chat_refuses_a_backend_without_interactive_support(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         agent = orch.spawn("a", "echo")
         agent.session_id = "session-1"
         orch.state_file.write_text(
@@ -3054,7 +3063,7 @@ class TestOrchestrator:
     def test_chat_refuses_a_busy_agent_without_waiting_or_launching_cli(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         agent = orch.spawn("a", "echo")
         agent.session_id = "session-1"
         monkeypatch.setattr(
@@ -3075,7 +3084,7 @@ class TestOrchestrator:
             orch.chat("a")
 
     def test_list_agents(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("b", "codex")
         orch.spawn("a", "claude")
         assert orch.list_agents() == ["a", "b"]
@@ -3085,7 +3094,6 @@ class TestOrchestrator:
         # A literal, not orchestrator.WORKDIR: comparing the module constant
         # against itself would pass whatever it happened to be set to.
         workdir = tmp_path / "workdir"
-        monkeypatch.setattr(orchestrator, "WORKDIR", workdir)
 
         def fake_backend_run(args, **kwargs):
             _assert_subprocess_kwargs(kwargs, workdir)
@@ -3100,24 +3108,27 @@ class TestOrchestrator:
 
         monkeypatch.setattr(subprocess, "run", fake_backend_run)
 
-        orch = Orchestrator(state_file=state_file)
+        path_snapshot = runtime_paths(tmp_path, state_file=state_file, workdir=workdir)
+        orch = Orchestrator(path_snapshot)
         orch.spawn("a", "claude")
         orch.spawn("b", "codex")
         orch.delete("a")
         assert orch.list_agents() == ["b"]
 
-        orch2 = Orchestrator(state_file=state_file)
+        orch2 = Orchestrator(path_snapshot)
         assert orch2.list_agents() == ["b"]
 
     def test_delete_unknown_raises(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         with pytest.raises(KeyError, match="no agent named"):
             orch.delete("nope")
 
     def test_reloaded_agent_keeps_the_name_from_state(self, tmp_path: Path) -> None:
         state_file = tmp_path / "s.json"
-        Orchestrator(state_file=state_file).spawn("named", "echo")
-        loaded = Orchestrator(state_file=state_file)
+        Orchestrator(runtime_paths(tmp_path, state_file=state_file)).spawn(
+            "named", "echo"
+        )
+        loaded = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert loaded.agents["named"].name == "named"
 
     def test_agent_talk_resumes_on_the_same_instance(self, tmp_path: Path) -> None:
@@ -3142,7 +3153,7 @@ class TestOrchestrator:
                 return TurnResult(session_id="sid", reply="r", raw="")
 
         register_backend("rec", Rec)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "rec")
         agent = orch.agents["a"]
         agent.talk("one")
@@ -3158,7 +3169,9 @@ class TestOrchestrator:
             seen.append(op)
 
         monkeypatch.setattr(fcntl, "flock", fake_flock)
-        Orchestrator(state_file=tmp_path / "s.json").spawn("a", "echo")
+        Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json")).spawn(
+            "a", "echo"
+        )
         assert fcntl.LOCK_EX in seen
         assert fcntl.LOCK_UN in seen
         assert (tmp_path / "s.json.lock").is_file()
@@ -3182,14 +3195,16 @@ class TestOrchestrator:
                 *,
                 resume_as_fork: bool = False,
             ) -> TurnResult:
-                Orchestrator(state_file=state_file).spawn("b", "echo")
+                Orchestrator(runtime_paths(tmp_path, state_file=state_file)).spawn(
+                    "b", "echo"
+                )
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
         register_backend("midturn", MidTurnSpawn)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "midturn")
         orch.talk("a", "hi")
-        reloaded = Orchestrator(state_file=state_file)
+        reloaded = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert reloaded.list_agents() == ["a", "b"]
         assert reloaded.agents["a"].session_id == "s1"
 
@@ -3215,7 +3230,7 @@ class TestOrchestrator:
                 *,
                 resume_as_fork: bool = False,
             ) -> TurnResult:
-                probe = Orchestrator(state_file=state_file)
+                probe = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
                 held.append(
                     (
                         _flock_is_held(probe._agent_lock_path("a")),
@@ -3225,7 +3240,7 @@ class TestOrchestrator:
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
         register_backend("probelock", ProbeLock)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "probelock")
         orch.talk("a", "hi")
         # Locked for this agent only, and released once the turn is over.
@@ -3233,7 +3248,7 @@ class TestOrchestrator:
         assert _flock_is_held(orch._agent_lock_path("a")) is False
 
     def test_agent_lock_paths_sit_in_the_locks_dir(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         first = orch._agent_lock_path("a")
         assert first.parent == tmp_path / "state.json.locks"
         assert first.name == hashlib.sha256(b"a").hexdigest()
@@ -3265,32 +3280,37 @@ class TestOrchestrator:
                 return next(replies)
 
         register_backend("forgetful", Forgetful)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "forgetful")
         orch.talk("a", "one")
         assert orch.talk("a", "two").reply == "second"
         assert orch.agents["a"].session_id == "s1"
-        assert Orchestrator(state_file=state_file).agents["a"].session_id == "s1"
+        assert (
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file))
+            .agents["a"]
+            .session_id
+            == "s1"
+        )
 
     def test_corrupt_state_names_the_file(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
         state_file.write_text("{", encoding="utf-8")
         with pytest.raises(orchestrator.StateError) as excinfo:
-            Orchestrator(state_file=state_file)
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert str(excinfo.value).startswith(f"{state_file} is not valid JSON: ")
 
     def test_state_entry_without_a_backend_is_reported(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
         state_file.write_text('{"a": {"session_id": "s1"}}', encoding="utf-8")
         with pytest.raises(orchestrator.StateError) as excinfo:
-            Orchestrator(state_file=state_file)
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert excinfo.value.args[0] == f"{state_file}: agent 'a' has no backend"
 
     def test_state_naming_an_unknown_backend_is_reported(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
         state_file.write_text('{"a": {"backend": "ghost"}}', encoding="utf-8")
         with pytest.raises(UnknownBackendError, match="Unknown backend 'ghost'"):
-            Orchestrator(state_file=state_file)
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file))
 
     def test_talk_fails_if_the_agent_is_deleted_during_the_turn(
         self, tmp_path: Path
@@ -3312,21 +3332,24 @@ class TestOrchestrator:
                 *,
                 resume_as_fork: bool = False,
             ) -> TurnResult:
-                Orchestrator(state_file=state_file).delete("a")
+                Orchestrator(runtime_paths(tmp_path, state_file=state_file)).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
         register_backend("delduring", DeleteDuring)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "delduring")
         with pytest.raises(KeyError, match="no agent named 'a'"):
             orch.talk("a", "hi")
-        assert Orchestrator(state_file=state_file).list_agents() == []
+        assert (
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file)).list_agents()
+            == []
+        )
 
     def test_delete_on_an_idle_agent_unlinks_its_lock_file(
         self, tmp_path: Path
     ) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         orch.talk("a", "hi")
         lock_path = orch._agent_lock_path("a")
@@ -3343,7 +3366,7 @@ class TestOrchestrator:
         release = threading.Event()
 
         register_backend("gate-self", _gate_backend("gate-self", entered, release))
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "gate-self")
 
         def run_turn() -> None:
@@ -3423,7 +3446,9 @@ class TestOrchestrator:
                 # file is left for talk()'s AgentNotFoundError handler to
                 # clean up.
                 delete_thread = threading.Thread(
-                    target=lambda: Orchestrator(state_file=state_file).delete("a"),
+                    target=lambda: Orchestrator(
+                        runtime_paths(tmp_path, state_file=state_file)
+                    ).delete("a"),
                     daemon=True,
                 )
                 delete_thread.start()
@@ -3434,7 +3459,7 @@ class TestOrchestrator:
                 return TurnResult(session_id="s1", reply="ok", raw="")
 
         register_backend("delduring-reclaim", DeleteDuring)
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "delduring-reclaim")
         with (
             caplog.at_level("DEBUG", logger="orchestrator"),
@@ -3460,7 +3485,7 @@ class TestOrchestrator:
         register_backend(
             "gate-sibling", _gate_backend("gate-sibling", entered, release)
         )
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("bob", "gate-sibling")
         orch.spawn("alice", "echo")
         orch.talk("alice", "warm up")
@@ -3498,7 +3523,7 @@ class TestOrchestrator:
         nothing about a bare `_flock` call reproduces the probe's own
         open()-then-flock() window.
         """
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         lock_path = orch._agent_lock_path("bob")
         record, state = _overlap_recorder(lock_path)
 
@@ -3567,7 +3592,7 @@ class TestOrchestrator:
         dead lock; disabling `revalidate`, or making `_is_live` treat a
         vanished path as still live, both make this test fail.
         """
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         lock_path = orch._agent_lock_path("bob")
         record, state = _overlap_recorder(lock_path)
 
@@ -3609,14 +3634,14 @@ class TestOrchestrator:
         """Written against `Orchestrator.talk` directly: `cmd_talk` creates
         the agent first, so `main(["talk", ...])` would assert something
         false here."""
-        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         with pytest.raises(orchestrator.AgentNotFoundError):
             orch.talk("ghost", "hi")
         assert list(orch._locks_dir().iterdir()) == []
 
     def test_locks_dir_holds_one_file_per_live_agent(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         orch.spawn("b", "echo")
         orch.talk("a", "hi")
@@ -3639,7 +3664,7 @@ class TestCLI:
     def test_cmd_create_prints_confirmation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(
             orch,
             _options(
@@ -3660,7 +3685,7 @@ class TestCLI:
         assert orch.agents["a"].backend.reasoning_effort == "high"
 
     def test_cmd_create_defaults_to_claude_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(orch, _options(["create", "a"]))
         assert orch.agents["a"].backend.name == "claude"
 
@@ -3673,19 +3698,19 @@ class TestCLI:
         that constant changed, so the two would silently disagree.
         """
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "codex")
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(orch, _options(["create", "a"]))
         assert orch.agents["a"].backend.name == "codex"
 
     def test_cmd_create_rejects_unknown_backend(self, tmp_path: Path) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         with pytest.raises(SystemExit, match="2"):
             _cmd_create(orch, _options(["create", "a", "-b", "not-a-backend"]))
 
     def test_cmd_create_missing_name_reports_its_own_prog(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         with pytest.raises(SystemExit, match="2"):
             _cmd_create(orch, _options(["create"]))
         assert capsys.readouterr().err.startswith("usage: orchestrator create ")
@@ -3693,7 +3718,7 @@ class TestCLI:
     def test_cmd_talk_prints_reply(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         _cmd_talk(orch, _talk_options(["talk", "a", "--", "hello", "there"]))
         out = capsys.readouterr().out
@@ -3761,17 +3786,19 @@ class TestCLI:
         """Talking to a name that does not exist spawns it and runs the turn."""
         monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         _cmd_talk(orch, _talk_options(["talk", "fresh", "--", "hello"]))
         captured = capsys.readouterr()
         assert captured.err == "created agent 'fresh' backend=echo\n"
         assert "echo:hello" in captured.out
-        assert Orchestrator(state_file=state_file).list_agents() == ["fresh"]
+        assert Orchestrator(
+            runtime_paths(tmp_path, state_file=state_file)
+        ).list_agents() == ["fresh"]
 
     def test_cmd_talk_says_nothing_extra_for_an_existing_agent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         _cmd_talk(orch, _talk_options(["talk", "a", "--", "hello"]))
         assert capsys.readouterr().err == ""
@@ -3779,7 +3806,7 @@ class TestCLI:
     def test_cmd_talk_flags_create_exact_configuration(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_talk(
             orch,
             _talk_options(
@@ -3803,7 +3830,7 @@ class TestCLI:
     def test_cmd_talk_matching_flags_reuse_silently(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="m", reasoning_effort="high")
         _cmd_talk(
             orch,
@@ -3827,7 +3854,7 @@ class TestCLI:
     def test_cmd_talk_mismatch_reports_the_exact_configuration_tuple(
         self, tmp_path: Path
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="first", reasoning_effort="high")
         with pytest.raises(
             orchestrator.OrchestratorError,
@@ -3838,7 +3865,7 @@ class TestCLI:
     def test_cmd_talk_omitting_model_still_asserts_the_exact_tuple(
         self, tmp_path: Path
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="stored")
         with pytest.raises(
             orchestrator.OrchestratorError,
@@ -3849,7 +3876,7 @@ class TestCLI:
     def test_cmd_talk_without_config_flags_reuses_any_stored_config(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo", model="stored", reasoning_effort="high")
         _cmd_talk(orch, _talk_options(["talk", "a", "--", "hi"]))
         assert capsys.readouterr().err == ""
@@ -3883,13 +3910,16 @@ class TestCLI:
         state_file = tmp_path / "s.json"
         with pytest.raises(SystemExit, match="2"):
             _talk_options(["talk", "fresh", "-p", "   "])
-        assert Orchestrator(state_file=state_file).list_agents() == []
+        assert (
+            Orchestrator(runtime_paths(tmp_path, state_file=state_file)).list_agents()
+            == []
+        )
 
     def test_cmd_talk_empty_prompt_exits_nonzero(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Exit 0 here reads as a turn that ran to a caller under `set -e`."""
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         with pytest.raises(SystemExit, match="2"):
             _talk_options(["talk", "a", "-p", "   "])
@@ -3929,7 +3959,7 @@ class TestCLI:
                 raise ClaudeTurnError("claude output was not JSON")
 
         register_backend("boom", BoomBackend)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("b", "boom")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
@@ -3962,7 +3992,7 @@ class TestCLI:
                 raise CodexTurnError("codex did not report a thread_id")
 
         register_backend("boomcodex", BoomCodex)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("c", "boomcodex")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
@@ -3995,7 +4025,7 @@ class TestCLI:
                 raise TurnError("cli failed")
 
         register_backend("boomany", BoomAny)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("d", "boomany")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
@@ -4041,7 +4071,7 @@ class TestCLI:
                 raise incidental(message)
 
         register_backend("incidental", IncidentalBackend)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("i", "incidental")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(incidental, match=message):
@@ -4072,7 +4102,7 @@ class TestCLI:
                 raise GrokTurnError("grok did not report a sessionId")
 
         register_backend("boomgrok", BoomGrok)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("g", "boomgrok")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
@@ -4082,7 +4112,7 @@ class TestCLI:
     def test_cmd_create_accepts_grok(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(orch, _options(["create", "a", "-b", "grok"]))
         assert capsys.readouterr().out == "created agent 'a' backend=grok\n"
         assert orch.agents["a"].backend.name == "grok"
@@ -4091,14 +4121,14 @@ class TestCLI:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         state_file = tmp_path / "s.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         _cmd_list(orch, _options(["list"]))
         assert capsys.readouterr().out == f"registry: {state_file}\nno agents\n"
 
     def test_cmd_list_prints_each_agent(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         _cmd_list(orch, _options(["list"]))
         out = capsys.readouterr().out
@@ -4116,7 +4146,7 @@ class TestCLI:
     def test_cmd_delete_prints_confirmation(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         _cmd_delete(orch, _options(["delete", "a"]))
         assert "deleted agent 'a' backend=echo" in capsys.readouterr().out
@@ -4556,7 +4586,9 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(
+                runtime_paths(tmp_path, state_file=tmp_path / "s.json")
+            ),
         )
         main()
         assert "created agent 'a' backend=echo" in capsys.readouterr().out
@@ -4571,7 +4603,9 @@ class TestCLI:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(
+                runtime_paths(tmp_path, state_file=tmp_path / "s.json")
+            ),
         )
         main(["create", "a", "-b", "echo"])
         assert "created agent 'a' backend=echo" in capsys.readouterr().out
@@ -4756,7 +4790,9 @@ class TestVerboseFlag:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(
+                runtime_paths(tmp_path, state_file=tmp_path / "s.json")
+            ),
         )
         for name in ("orchestrator", "backends", "third_party"):
             logging.getLogger(name).setLevel(logging.NOTSET)
@@ -4818,7 +4854,7 @@ class TestVerboseFlag:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         main(["talk", "a", "--", "add", "-v", "please"])
@@ -4831,7 +4867,7 @@ class TestVerboseFlag:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         main(["-v", "talk", "a", "--", "add", "-v", "please"])
@@ -4845,7 +4881,7 @@ class TestStepLogging:
     ) -> None:
         state_file = tmp_path / "s.json"
         with caplog.at_level("DEBUG", logger="orchestrator"):
-            orch = Orchestrator(state_file=state_file)
+            orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
             orch.spawn("a", "echo")
         messages = _messages(caplog)
         assert f"state: loaded 0 agent(s) from {state_file}" in messages
@@ -4854,7 +4890,7 @@ class TestStepLogging:
     def test_turn_start_and_duration_are_logged(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         with caplog.at_level("DEBUG", logger="orchestrator"):
             orch.talk("a", "hi")
@@ -4871,7 +4907,7 @@ class TestStepLogging:
     def test_prompt_and_reply_are_logged_in_full_at_trace(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         prompt = "line one\nline two"
         with caplog.at_level(orchestrator.TRACE, logger="orchestrator"):
@@ -4886,7 +4922,7 @@ class TestStepLogging:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """-v is the level meant to be readable and safe to paste."""
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         with caplog.at_level(logging.DEBUG, logger="orchestrator"):
             orch.talk("a", "secret prompt")
@@ -4896,7 +4932,7 @@ class TestStepLogging:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """resume= must reflect the session, not be hardcoded by either turn."""
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         orch.spawn("a", "echo")
         orch.talk("a", "first")
         with caplog.at_level("DEBUG", logger="orchestrator"):
@@ -4914,7 +4950,9 @@ class TestStepLogging:
         monkeypatch.setattr(
             orchestrator,
             "Orchestrator",
-            lambda *_: Orchestrator(state_file=tmp_path / "s.json"),
+            lambda *_: Orchestrator(
+                runtime_paths(tmp_path, state_file=tmp_path / "s.json")
+            ),
         )
         with caplog.at_level("DEBUG", logger="orchestrator"):
             main(["-v", "create", "a", "-b", "echo"])
