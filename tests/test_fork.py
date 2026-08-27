@@ -169,6 +169,54 @@ def test_the_recorded_fork_survives_a_reload_before_the_first_turn(
     assert ForkingBackend.turns == [("first", "fresh-sid", True)]
 
 
+def test_a_fork_the_cli_did_not_perform_is_refused_instead_of_aliased(
+    tmp_path: Path,
+) -> None:
+    """A forked resume that comes back with the *source's* id did not fork.
+
+    Storing it would leave two agents pointing at one session under different
+    names — the exact overlap the per-agent lock exists to prevent, and one
+    it cannot prevent here because the names differ.
+    """
+    state_file = tmp_path / "state.json"
+    orch = _primed(state_file)
+    orch.fork("source", "copy")
+
+    class Unforking(ForkingBackend):
+        name = "forking"
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = DEFAULT_TURN_TIMEOUT,
+            schema: OutputSchema | None = None,
+            *,
+            resume_as_fork: bool = False,
+        ) -> TurnResult:
+            super().run_turn(
+                prompt, session_id, cwd, timeout, schema, resume_as_fork=resume_as_fork
+            )
+            # The failure mode under test: the CLI ignored the fork flag and
+            # continued the source's session instead of copying it.
+            return TurnResult(session_id=session_id, reply="ok", raw="")
+
+    register_backend("forking", Unforking)
+    before = state_file.read_text(encoding="utf-8")
+
+    with pytest.raises(OrchestratorError) as excinfo:
+        orch.talk("copy", "first")
+
+    assert excinfo.value.args[0] == (
+        "agent 'copy': forking reported the source's own session id "
+        "('fresh-sid'), so the fork did not happen; refusing to point two "
+        "agents at one session"
+    )
+    # Nothing was written: the fork is still pending and can be retried.
+    assert state_file.read_text(encoding="utf-8") == before
+
+
 def test_a_failed_first_turn_leaves_the_fork_pending(tmp_path: Path) -> None:
     """A fork that never produced a session id has not happened yet, so the
     next turn must fork again rather than start a fresh conversation."""

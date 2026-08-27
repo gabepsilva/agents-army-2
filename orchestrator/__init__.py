@@ -239,6 +239,19 @@ class Agent:
         # it has failed to name it. Keeping the previous id lets the next turn
         # resume the session instead of silently starting a fresh one.
         if result.session_id is not None:
+            # A forked resume that reports the id it was handed did not fork:
+            # the CLI continued the source's session instead of copying it.
+            # Storing that id would leave two agents resuming one session
+            # under different names — the overlap `_agent_lock` exists to
+            # prevent, and the one case it cannot, since it keys on the name.
+            # Raising here keeps the marker pending and writes nothing.
+            if result.session_id == self.pending_fork_from:
+                raise OrchestratorError(
+                    f"agent '{self.name}': {self.backend.name} reported the "
+                    f"source's own session id ('{result.session_id}'), so the "
+                    f"fork did not happen; refusing to point two agents at "
+                    f"one session"
+                )
             self.session_id = result.session_id
             # Only now has the fork happened. A turn that reported no id
             # leaves the marker in place, so the next turn forks the source
@@ -1697,7 +1710,7 @@ def _resolve_team(
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
-    already does — except for every verb but `create`/`talk` (`list`,
+    already does — except for every verb but `create`/`talk`/`fork` (`list`,
     `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.

@@ -359,8 +359,9 @@ it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
 `AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
 
 The orchestrator never runs `git` itself — you create the worktree, and
-`--team` refuses to run `create`/`talk` against a team whose `worktree/`
-doesn't exist yet, since those launch a backend into it. `list agents --team`
+`--team` refuses to run `create`/`talk`/`fork` against a team whose
+`worktree/` doesn't exist yet, since those bind an agent to it as its
+working directory. `list agents --team`
 and `delete NAME --team` only read and edit the registry, so they work even
 with `worktree/` missing or not yet created:
 
@@ -435,7 +436,7 @@ backends/          # AgentBackend interface + implementations
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator/      # the orchestrator CLI (create / talk / list / delete)
+orchestrator/      # the orchestrator CLI (create / talk / fork / list / delete)
   schema.py        # --schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
