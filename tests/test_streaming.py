@@ -83,6 +83,186 @@ class _TrackingStderr(io.StringIO):
         return super().write(text)
 
 
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "thinking", "thinking": "private plan"}]
+                },
+            },
+            "Thinking...",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "private plan"},
+                        {"type": "text", "text": "visible"},
+                    ]
+                },
+            },
+            "Thinking... | Assistant: visible",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        None,
+                        {"type": "text", "text": "after malformed block"},
+                    ]
+                },
+            },
+            "Assistant: after malformed block",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {
+                                "command": "printf tool-check",
+                                "description": "Print tool-check",
+                            },
+                        }
+                    ]
+                },
+            },
+            'Tool call: Bash {"command":"printf tool-check","description":"Print tool-check"}',
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Lookup",
+                            "input": {"query": "café"},
+                        }
+                    ]
+                },
+            },
+            'Tool call: Lookup {"query":"café"}',
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "NoInput"}]},
+            },
+            "Tool call: NoInput {}",
+        ),
+        (
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "tool-check",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+            "Tool result: tool-check",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "DONE"}]},
+            },
+            "Assistant: DONE",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__github__get_issue",
+                            "input": {"issue": 138},
+                        }
+                    ]
+                },
+            },
+            'MCP call: mcp__github__get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "permission denied",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            },
+            "Tool result (error): permission denied",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first\nsecond"}]},
+            },
+            r"Assistant: first\nsecond",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first\r\nsecond"}]},
+            },
+            r"Assistant: first\r\nsecond",
+        ),
+        (
+            {"type": "result", "is_error": True, "result": "credit exhausted"},
+            "Error: credit exhausted",
+        ),
+        ({"type": "error", "message": "transport failed"}, "Error: transport failed"),
+        (
+            {
+                "type": "result",
+                "is_error": True,
+                "result": {"unexpected": True},
+                "message": "fallback result",
+            },
+            "Error: fallback result",
+        ),
+        (
+            {
+                "type": "result",
+                "is_error": True,
+                "result": None,
+                "message": {"unexpected": True},
+                "error": "fallback error",
+            },
+            "Error: fallback error",
+        ),
+        ({"type": "error"}, "Error: Claude reported an error"),
+        ({"type": "rate_limit_event"}, None),
+        ({"type": "assistant", "is_error": True}, None),
+        ({"type": "unknown", "is_error": True}, None),
+        ({"type": "assistant", "message": {"content": [{"type": "unknown"}]}}, None),
+        ({"type": "assistant", "message": {"content": "not blocks"}}, None),
+    ],
+)
+def test_claude_stream_formatter_returns_exact_lines(
+    event: dict, expected: str | None
+) -> None:
+    assert claude.format_event(event) == expected
+
+
 def test_streaming_runner_formats_complete_json_lines_before_child_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -45,6 +45,9 @@ from backends.claude import (
     parse_claude_stdout,
 )
 from backends.claude import SCHEMA_FLAG as CLAUDE_SCHEMA_FLAG
+from backends.claude import (
+    format_event as claude_format_event,
+)
 from backends.codex import FORK_COMMAND as CODEX_FORK_COMMAND
 from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
 from backends.codex import YOLO_FLAG as CODEX_YOLO_FLAG
@@ -646,6 +649,56 @@ class TestClaudeRunTurn:
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("work", None, tmp_path).reply == "done"
+
+    def test_streaming_turn_uses_stream_json_and_keeps_result_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = ClaudeBackend(model="sonnet", reasoning_effort="high")
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init"}),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "session_id": "s1",
+                        "result": '{"verdict":"pass"}',
+                        "structured_output": {"verdict": "pass"},
+                    }
+                ),
+                json.dumps({"type": "system", "subtype": "after_result"}),
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "claude"
+            assert args == [
+                "claude",
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--permission-mode",
+                PERMISSION_MODE,
+                "--model",
+                "sonnet",
+                "--effort",
+                "high",
+                "--json-schema",
+                SCHEMA.text,
+                "-p",
+                "work",
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is claude_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.claude.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, schema=SCHEMA, stream=True)
+
+        assert result.session_id == "s1"
+        assert result.reply == '{"verdict":"pass"}'
+        assert result.raw == stdout
+        assert result.structured == {"verdict": "pass"}
 
     def test_new_turn_parses_session_and_result(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
