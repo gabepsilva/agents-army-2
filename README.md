@@ -18,9 +18,70 @@ session every time.
 
 ## Setup
 
+To work on this repository:
+
 ```sh
 uv sync --all-groups   # install project + dev tools
 uv run pytest          # run the test suite
+```
+
+### Install the CLI
+
+To use the CLI from any directory, without a `uv run` prefix, run the
+installer from a checkout:
+
+```sh
+./install.sh
+```
+
+It states what it will change before changing it, then does three things:
+
+1. `uv tool install` this checkout, so `aarmy`, `agents-army` and
+   `orchestrator` land in uv's bin directory. The install is not editable —
+   the installed CLI does not depend on the checkout staying put.
+2. Copies this checkout's `SKILLS/` to `$AGENTS_ARMY_ROOT/SKILLS`
+   (`~/.agents-army/SKILLS` unless overridden), so a run from any repository
+   finds the catalog with nothing exported.
+3. Appends one delimited block to your login shell's rc file (`~/.zshrc` for
+   zsh; `~/.bashrc` for bash on Linux, `~/.bash_profile` on macOS) putting
+   `~/.local/bin` on `PATH`. Nothing else goes in the block.
+
+Open a new shell afterwards, then `aarmy --help`.
+
+Note that the installer reads `AGENTS_ARMY_ROOT` from the shell you run it
+in, while the CLI reads it from the shell you later run `aarmy` in. Setting
+it for the install alone would put the catalog where nothing looks for it —
+the installer prints the resolved path so you can check.
+
+Non-interactive callers — cron, CI, a script in another repository — inherit
+no rc file and so never see that `PATH` block. Invoke `~/.local/bin/aarmy` by
+absolute path there.
+
+Vendored skill names are reserved: the catalog index rejects a name claimed
+by two paths, so a skill of your own named after a vendored one becomes a
+hard error once both live under `$AGENTS_ARMY_ROOT/SKILLS`.
+
+### Upgrade
+
+Re-run `./install.sh` from an updated checkout. It upgrades the installed
+tool in place, refreshes each vendored entry of the catalog, and leaves
+exactly one rc block. Skills of your own sitting beside the vendored entries
+are left alone; a vendored entry deleted upstream is never visited, so
+remove it by hand if you want it gone.
+
+### Uninstall
+
+There is no `--uninstall` flag; the installer only ever installs and
+upgrades. Removal is three steps, and the delimited rc block is what makes
+the second one safe:
+
+```sh
+uv tool uninstall agents-army          # removes aarmy, agents-army, orchestrator
+                                       # then delete the block between the
+                                       # `# >>> agents-army install.sh >>>` and
+                                       # `# <<< agents-army install.sh <<<`
+                                       # markers in your rc file
+rm -rf ~/.agents-army/SKILLS           # the installed catalog
 ```
 
 ## The orchestrator CLI

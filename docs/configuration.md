@@ -28,6 +28,13 @@ The skills catalog resolves in this order:
    exists on disk**.
 3. Otherwise `$AGENTS_ARMY_ROOT/SKILLS`.
 
+That last rung is where the repository's `install.sh` puts the vendored
+catalog: it copies a checkout's `SKILLS/` to `$AGENTS_ARMY_ROOT/SKILLS`, one
+top-level entry at a time, so skills of your own kept beside the vendored
+ones survive an upgrade. See [Install the CLI](../README.md#install-the-cli).
+The installer resolves `AGENTS_ARMY_ROOT` from the shell it runs in, which is
+not necessarily the shell that later runs `aarmy`.
+
 Exactly one catalog wins; the two are never merged, so a checkout carrying
 its own `SKILLS/` shadows the root catalog entirely. This is what lets the
 driver be run from any repository, or from cron or CI, and still find the
