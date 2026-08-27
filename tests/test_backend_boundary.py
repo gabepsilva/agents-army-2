@@ -65,13 +65,13 @@ class BackendRow:
     # Doubles as the pytest id, so a failure names the backend.
     module: str
     backend_cls: type[AgentBackend]
-    expected_error: type[TurnError]
     # The declared capabilities, as literals. `get_backend(expected_name)` is
     # asserted to resolve `backend_cls`, so the name is a claim about the
     # registry too, not just about the property.
     expected_name: str
     expected_enforces_schema: bool
     expected_supports_fork: bool
+    expected_error: type[TurnError]
     # The smallest stdout that reaches this adapter's normal result path,
     # in that CLI's own envelope dialect. Each was checked against the real
     # parser rather than assumed portable between them.
@@ -84,37 +84,37 @@ class BackendRow:
 BACKENDS = [
     BackendRow(
         module="claude",
+        backend_cls=ClaudeBackend,
         expected_name="claude",
         expected_enforces_schema=True,
         expected_supports_fork=True,
-        backend_cls=ClaudeBackend,
         expected_error=ClaudeTurnError,
         stdout='{"session_id": "s1", "result": "ok"}',
     ),
     BackendRow(
         module="codex",
+        backend_cls=CodexBackend,
         expected_name="codex",
         expected_enforces_schema=True,
         expected_supports_fork=True,
-        backend_cls=CodexBackend,
         expected_error=CodexTurnError,
         stdout='{"type": "thread.started", "thread_id": "s1"}',
     ),
     BackendRow(
         module="grok",
+        backend_cls=GrokBackend,
         expected_name="grok",
         expected_enforces_schema=True,
         expected_supports_fork=True,
-        backend_cls=GrokBackend,
         expected_error=GrokTurnError,
         stdout='{"sessionId": "s1", "text": "ok"}',
     ),
     BackendRow(
         module="opencode",
+        backend_cls=OpenCodeBackend,
         expected_name="opencode",
         expected_enforces_schema=False,
         expected_supports_fork=True,
-        backend_cls=OpenCodeBackend,
         expected_error=OpenCodeTurnError,
         stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
         prompt_on_stdin=True,
@@ -175,6 +175,9 @@ class TestSharedSubprocessBoundary:
             backend.run_turn(PROMPT, None, cwd)
         else:
             backend.run_turn(PROMPT, None, cwd, timeout)
+        # One turn is one process. A second call would mean the assertions
+        # below describe only whichever invocation happened to come first.
+        assert len(calls) == 1
         return calls[0][1]
 
     @BACKEND_ROWS
@@ -266,7 +269,9 @@ class TestDeclaredCapabilities:
     def test_its_declared_name_resolves_it_through_the_registry(
         self, row: BackendRow
     ) -> None:
-        assert isinstance(get_backend(row.expected_name), row.backend_cls)
+        # Exact class, not isinstance: a registry entry pointing at some
+        # subclass of the adapter is a different backend, not this one.
+        assert type(get_backend(row.expected_name)) is row.backend_cls
 
 
 class TestRunCliTurn:
