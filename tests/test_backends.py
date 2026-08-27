@@ -194,7 +194,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -203,6 +203,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -235,7 +236,7 @@ def _gate_backend(
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
             self,
             prompt: str,
             session_id: str | None,
@@ -244,6 +245,7 @@ def _gate_backend(
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             entered.set()
             release.wait(timeout=5)
@@ -571,7 +573,7 @@ class TestAgentBackendInterface:
             def name(self) -> str:
                 return "custom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -580,6 +582,7 @@ class TestAgentBackendInterface:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(session_id="custom-sid", reply=prompt, raw="")
 
@@ -2638,7 +2641,7 @@ class TestOrchestrator:
             name = "advisory"
             enforces_schema = False
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2647,6 +2650,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2678,7 +2682,7 @@ class TestOrchestrator:
             name = "advisory-prompt"
             enforces_schema = False
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2687,6 +2691,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2707,7 +2712,7 @@ class TestOrchestrator:
         class EnforcingBackend(AgentBackend):
             name = "enforcing-prompt"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2716,6 +2721,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2734,7 +2740,7 @@ class TestOrchestrator:
         class EnforcingBackend(AgentBackend):
             name = "enforcing"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2743,6 +2749,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2784,7 +2791,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "recording"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2793,6 +2800,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen_session_ids.append(session_id)
                 return TurnResult(session_id="persist-me", reply="reply", raw="")
@@ -2950,7 +2958,7 @@ class TestOrchestrator:
                 seen_argv.append((session_id, cwd))
                 return ["chat-cli", session_id]
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2959,6 +2967,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise AssertionError("chat test must not run a headless turn")
 
@@ -3175,7 +3184,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "rec"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3184,6 +3193,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(session_id)
                 return TurnResult(session_id="sid", reply="r", raw="")
@@ -3221,7 +3231,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "midturn"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3230,6 +3240,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 Orchestrator(runtime_paths(tmp_path, state_file=state_file)).spawn(
                     "b", "echo"
@@ -3256,7 +3267,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "probelock"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3265,6 +3276,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 probe = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
                 held.append(
@@ -3303,7 +3315,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "forgetful"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3312,6 +3324,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return next(replies)
 
@@ -3358,7 +3371,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "delduring"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3367,6 +3380,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 Orchestrator(runtime_paths(tmp_path, state_file=state_file)).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -3461,7 +3475,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "delduring-reclaim"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3470,6 +3484,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 # Runs with the outer talk() holding the agent lock, so this
                 # delete's own reclaim probe backs off (BlockingIOError,
@@ -3774,7 +3789,7 @@ class TestCLI:
             def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
                 return ["chat-cli", session_id]
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3783,6 +3798,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise AssertionError("chat test must not run a headless turn")
 
@@ -3982,7 +3998,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3991,6 +4007,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 
@@ -4015,7 +4032,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomcodex"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4024,6 +4041,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise CodexTurnError("codex did not report a thread_id")
 
@@ -4048,7 +4066,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomany"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4057,6 +4075,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise TurnError("cli failed")
 
@@ -4094,7 +4113,7 @@ class TestCLI:
             def name(self) -> str:
                 return "incidental"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4103,6 +4122,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise incidental(message)
 
@@ -4125,7 +4145,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomgrok"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4134,6 +4154,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise GrokTurnError("grok did not report a sessionId")
 
@@ -4713,7 +4734,7 @@ class TestCLI:
             def name(self) -> str:
                 return "buggy"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4722,6 +4743,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise KeyError("some internal dict key")
 

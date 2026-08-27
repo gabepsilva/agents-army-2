@@ -55,6 +55,7 @@ Backend, model, and reasoning effort are fixed at creation (or at the first
 ```
 orchestrator talk NAME [-b/--backend ...] [-m/--model ...] [-e/--reasoning-effort ...]
                        [-s/--skill NAMES] [--schema PATH] [--retries N] [--timeout SECONDS]
+                       [--stream]
                        [--team NAME]
                        (-p/--prompt TEXT | --prompt-file PATH | -- PROMPT...)
 ```
@@ -76,6 +77,7 @@ possibly-new agent without a separate `create` step.
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
+| `--stream` | echo each complete child stdout line to flushed stderr while the turn runs; final output remains on stdout |
 | `--team` | run against team `NAME`'s registry and worktree instead of the teamless layout; found under `$AGENTS_ARMY_TEAMS_DIR` if set, otherwise resolved by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
@@ -106,6 +108,9 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 
 # cap the turn's wall-clock budget
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
+
+# echo complete child output lines to stderr while keeping final output on stdout
+uv run orchestrator talk reviewer --stream --prompt "show progress while you work"
 ```
 
 ### `--schema`: structured replies
@@ -132,6 +137,15 @@ one turn's `--timeout`.
 | `0` | success |
 | `1` | the agent ran but never produced a conforming reply, or the turn otherwise failed |
 | `2` | the schema file is missing, malformed, or not strict — nothing ran, no agent was created |
+
+### `--stream`: live child output
+
+`--stream` is opt-in. While the backend CLI is running, every complete line it
+writes to stdout is echoed verbatim to the orchestrator's flushed stderr. The
+captured stdout is still returned normally, so the final session header and
+reply (or structured object) remain on stdout for scripts to consume. Backend
+stderr is captured but is not echoed by this flag. Without `--stream`, the
+historical non-streaming subprocess path is used.
 
 ## `chat` — open an agent's session interactively
 

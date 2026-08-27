@@ -16,7 +16,7 @@ class RecordingBackend(AgentBackend):
     def name(self) -> str:
         return "recording"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -25,6 +25,7 @@ class RecordingBackend(AgentBackend):
         schema=None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="sid", reply=f"reply:{prompt}", raw="")
 

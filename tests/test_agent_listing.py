@@ -34,7 +34,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -43,6 +43,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -82,7 +83,7 @@ def _scripted(replies: list[str], name: str = "scripted") -> list[dict]:
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
             self,
             prompt: str,
             session_id: str | None,
@@ -91,6 +92,7 @@ def _scripted(replies: list[str], name: str = "scripted") -> list[dict]:
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             calls.append({"prompt": prompt, "session_id": session_id})
             reply = queued.pop(0)

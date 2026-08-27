@@ -118,7 +118,7 @@ class OpenCodeBackend(AgentBackend):
         log.debug("opencode chat: cwd=%s session=%s", cwd, session_id)
         return ["opencode", "--session", session_id]
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - flat backend turn arguments are the public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -127,6 +127,7 @@ class OpenCodeBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         cwd = cwd.absolute()
         # OpenCode resolves its project directory from PWD, so --dir remains
@@ -157,6 +158,7 @@ class OpenCodeBackend(AgentBackend):
             cwd=cwd,
             timeout=timeout,
             prompt_on_stdin=True,
+            stream=stream,
         )
         events = _events(proc.stdout)
         if proc.returncode != 0:
