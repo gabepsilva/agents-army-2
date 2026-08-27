@@ -195,8 +195,9 @@ unaffected. Two things worth knowing:
 line the child writes to stdout to flushed stderr as soon as it arrives. The
 same output is still accumulated for the normal `TurnResult`, and the final
 session header plus reply (or structured object) remain on stdout. Child stderr
-is captured for the result but is not echoed by `--stream`; without the flag,
-the existing non-streaming subprocess path is unchanged.
+is captured by the completed-process transport result but is not echoed by
+`--stream`; without the flag, the existing non-streaming subprocess path is
+unchanged.
 
 ### Example
 

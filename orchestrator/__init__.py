@@ -188,28 +188,15 @@ class Agent:
         # whichever CLI runs it, so every backend gets this for free.
         log.log(TRACE, "agent '%s' prompt in:\n%s", self.name, prompt)
         started = time.monotonic()
-        if stream:
-            result = self.backend.run_turn(
-                prompt,
-                resume_from,
-                self.workdir,
-                timeout,
-                schema,
-                resume_as_fork=forking,
-                stream=True,
-            )
-        else:
-            # Omit the new keyword on the default path so third-party
-            # backends written against the pre-stream interface retain their
-            # existing behavior while the ABC advertises the opt-in.
-            result = self.backend.run_turn(
-                prompt,
-                resume_from,
-                self.workdir,
-                timeout,
-                schema,
-                resume_as_fork=forking,
-            )
+        result = self.backend.run_turn(
+            prompt,
+            resume_from,
+            self.workdir,
+            timeout,
+            schema,
+            resume_as_fork=forking,
+            stream=stream,
+        )
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
         log.log(TRACE, "agent '%s' reply out:\n%s", self.name, result.reply)
