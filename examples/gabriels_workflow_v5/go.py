@@ -76,10 +76,8 @@ os.environ["AGENTS_ARMY_TEAMS_DIR"] = str(TEAMS_DIR)
 # line here to move that agent to another backend, model, or effort.
 PRIMER = {"backend": "claude", "model": "opus", "effort": "medium"}
 OWEN = {"backend": "claude", "model": "opus", "effort": "medium"}
-# SPECTACLE = {"backend": "opencode", "model": "opencode/gpt-5.6-luna", "effort": "max"}
-SPECTACLE = {"backend": "claude", "model": "opus", "effort": "max"}
-# DEVIN = {"backend": "opencode", "model": "opencode/gpt-5.6-luna", "effort": "max"}
-DEVIN = {"backend": "claude", "model": "opus", "effort": "max"}
+SPECTACLE = {"backend": "codex", "model": "gpt-5.6-luna", "effort": "max"}
+DEVIN = {"backend": "codex", "model": "gpt-5.6-luna", "effort": "max"}
 CODE_REVIEWER = {"backend": "claude", "model": "opus", "effort": "high"}
 # DOKU = {"backend": "claude", "model": "opus", "effort": "medium"}
 DOKU = {
@@ -177,13 +175,18 @@ def fork_primer(role, url):
     """TRI, DEB, and BRIEF all begin "fork primer -> <role>". Returns the agent
     name plus the backend flags its next talk must carry: none for a real fork
     (it inherits the primer's config - the fork verb has no override), the full
-    role flags when fork is unavailable and fresh agents stand in."""
+    role flags for a fresh agent.
+
+    A fork is a session copy, so it cannot cross backends: a role configured
+    for another backend than the primer would silently come out as the primer,
+    which is not what the dict asked for. Such a role starts fresh instead -
+    it reads the repo cold, but it runs on the model it was given."""
     global FORK_WORKS
     name = f"{role}-{num(url)}"
     if name in FORKS:
         return name, []
     FORKS.add(name)
-    if FORK_WORKS:
+    if FORK_WORKS and ROLES[role]["backend"] == PRIMER["backend"]:
         try:
             sh("uv", "run", "orchestrator", "fork", "primer", name, "--team", TEAM)
             print(f"  {name} forks the primer, inheriting {conf(PRIMER)}")

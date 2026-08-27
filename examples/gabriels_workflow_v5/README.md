@@ -26,7 +26,10 @@ is to study the repository, then uses `uv run orchestrator fork <src> <dst>`
 to give each issue's owen, spectacle, and doku a fresh fork of that session.
 Forks are deleted after their issue. The fork verb exists in this repository —
 read its docs and `--help` before use. If fork is unavailable at runtime, fall
-back to fresh agents per issue and print that the fallback is in effect.
+back to fresh agents per issue and print that the fallback is in effect. A role
+whose dict names another backend than the primer's is never forked either — a
+session copy cannot cross backends, so it starts fresh on the model it was
+given rather than silently coming out as the primer.
 
 ## Operational contracts (carried over from v4, all load-bearing)
 
@@ -42,12 +45,12 @@ back to fresh agents per issue and print that the fallback is in effect.
 - The first talk to an agent carries its backend flags. One dict per agent
   holds them (`{"backend": ..., "model": ..., "effort": ...}`), so a single
   line moves an agent to another model: primer/owen `claude opus medium`,
-  code-reviewer `claude opus high`, spectacle/devin `claude opus max`, doku
-  `opencode muse-spark-1.2-contributor-free medium`. The line that
-  announces a first talk prints that dict, so the run log says what each agent
-  ran on, and every turn is followed by `<agent> worked for N seconds`. Later
-  talks resume the session and must not re-send the flags.
-  Devin's first build talk also carries
+  code-reviewer `claude opus high`, spectacle/devin `codex gpt-5.6-luna max`,
+  doku `opencode muse-spark-1.2-contributor-free medium`. The line
+  that announces a first talk prints that dict, so the run log says what each
+  agent ran on, and every turn is followed by `<agent> worked for N seconds`.
+  Later talks resume the session and must not re-send the flags. Devin's first
+  build talk also carries
   `-s implement,tdd,code-review-and-quality`; the reviewer's first talk
   carries `-s code-review-and-quality`; skills are never re-sent.
 - Before relying on devin's work, verify he committed and pushed: clean

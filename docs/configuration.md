@@ -143,7 +143,7 @@ Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.
 | backend | CLI invocation | resume | chat | fork | notes |
 |---|---|---|---|---|---|
 | `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | `claude --resume <session_id>` | `--fork-session` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
-| `codex` | `codex exec` | `codex exec resume` | `codex resume <session_id>` | `codex exec fork` (in `resume`'s place) | |
+| `codex` | `codex exec --yolo` | `codex exec resume` | `codex resume <session_id>` | `codex exec fork` (in `resume`'s place) | `--yolo` is codex's alias for `--dangerously-bypass-approvals-and-sandbox`; without it a turn cannot commit in a linked worktree or reach the network |
 | `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | `grok --resume <session_id>` | `--fork-session` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
 | `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | `opencode --session <session_id>` | `--fork` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
