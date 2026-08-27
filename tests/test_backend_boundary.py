@@ -64,6 +64,12 @@ class BackendRow:
     module: str
     backend_cls: type[AgentBackend]
     expected_error: type[TurnError]
+    # The declared capabilities, as literals. `get_backend(expected_name)` is
+    # asserted to resolve `backend_cls`, so the name is a claim about the
+    # registry too, not just about the property.
+    expected_name: str
+    expected_enforces_schema: bool
+    expected_supports_fork: bool
     # The smallest stdout that reaches this adapter's normal result path,
     # in that CLI's own envelope dialect. Each was checked against the real
     # parser rather than assumed portable between them.
@@ -76,24 +82,36 @@ class BackendRow:
 BACKENDS = [
     BackendRow(
         module="claude",
+        expected_name="claude",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
         backend_cls=ClaudeBackend,
         expected_error=ClaudeTurnError,
         stdout='{"session_id": "s1", "result": "ok"}',
     ),
     BackendRow(
         module="codex",
+        expected_name="codex",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
         backend_cls=CodexBackend,
         expected_error=CodexTurnError,
         stdout='{"type": "thread.started", "thread_id": "s1"}',
     ),
     BackendRow(
         module="grok",
+        expected_name="grok",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
         backend_cls=GrokBackend,
         expected_error=GrokTurnError,
         stdout='{"sessionId": "s1", "text": "ok"}',
     ),
     BackendRow(
         module="opencode",
+        expected_name="opencode",
+        expected_enforces_schema=False,
+        expected_supports_fork=True,
         backend_cls=OpenCodeBackend,
         expected_error=OpenCodeTurnError,
         stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
@@ -198,6 +216,38 @@ class TestSharedSubprocessBoundary:
             self._run(row, monkeypatch, tmp_path, returncode=1)
 
 
+class TestDeclaredCapabilities:
+    """What each adapter tells the CLI it can do, and how it is reached.
+
+    Every expected value is a literal from the enrollment row. Reading the
+    expectation off the class under test would pass against a declaration
+    that had been corrupted to anything at all.
+    """
+
+    @BACKEND_ROWS
+    def test_declares_its_name(self, row: BackendRow) -> None:
+        assert row.backend_cls().name == row.expected_name
+
+    @BACKEND_ROWS
+    def test_declares_whether_it_enforces_the_schema(self, row: BackendRow) -> None:
+        assert row.backend_cls.enforces_schema is row.expected_enforces_schema
+
+    @BACKEND_ROWS
+    def test_declares_whether_it_supports_forking(self, row: BackendRow) -> None:
+        assert row.backend_cls.supports_fork is row.expected_supports_fork
+
+    @BACKEND_ROWS
+    def test_raises_a_turn_error_of_the_shared_family(self, row: BackendRow) -> None:
+        """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
+        assert issubclass(row.expected_error, TurnError)
+
+    @BACKEND_ROWS
+    def test_its_declared_name_resolves_it_through_the_registry(
+        self, row: BackendRow
+    ) -> None:
+        assert isinstance(get_backend(row.expected_name), row.backend_cls)
+
+
 class TestRunCliTurn:
     """The one place every backend hands its argv to the operating system."""
 
@@ -300,39 +350,9 @@ class TestRunCliTurn:
 
 
 class TestAgentBackendInterface:
-    def test_claude_name(self) -> None:
-        assert ClaudeBackend().name == "claude"
-
-    def test_codex_name(self) -> None:
-        assert CodexBackend().name == "codex"
-
-    def test_grok_name(self) -> None:
-        assert GrokBackend().name == "grok"
-
-    def test_opencode_name(self) -> None:
-        assert OpenCodeBackend().name == "opencode"
-        assert "opencode" in list_backends()
-
-    def test_backend_turn_errors_share_the_orchestrator_type(self) -> None:
-        """cmd_talk catches TurnError, not a per-CLI tuple that grows."""
-        assert issubclass(ClaudeTurnError, TurnError)
-        assert issubclass(CodexTurnError, TurnError)
-        assert issubclass(GrokTurnError, TurnError)
-        assert issubclass(OpenCodeTurnError, TurnError)
-
-    def test_schema_enforcement_defaults_and_opencode_override(self) -> None:
-        assert ClaudeBackend.enforces_schema is True
-        assert CodexBackend.enforces_schema is True
-        assert GrokBackend.enforces_schema is True
-        assert OpenCodeBackend.enforces_schema is False
-
-    def test_fork_support_is_declared_per_backend(self) -> None:
-        """The capability the CLI checks before it will fork an agent."""
+    def test_a_third_party_backend_does_not_inherit_fork_support(self) -> None:
+        """The base-class default: forking is opt-in, never assumed."""
         assert AgentBackend.supports_fork is False
-        assert ClaudeBackend.supports_fork is True
-        assert GrokBackend.supports_fork is True
-        assert CodexBackend.supports_fork is True
-        assert OpenCodeBackend.supports_fork is True
 
     def test_chat_support_is_declared_per_backend(self) -> None:
         """Interactive chat is opt-in, just like session forking."""
