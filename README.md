@@ -61,6 +61,10 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # Set the wall-clock turn limit for a flag-style invocation
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
+# Fork a primed agent: 'copy' inherits reviewer's backend/model/effort and
+# starts from its session on its own first turn (no turn is spent forking)
+uv run orchestrator fork reviewer copy
+
 # List every agent: registry path, backend, model/effort, turn count,
 # timestamps, busy status, and session id
 uv run orchestrator list
@@ -295,7 +299,7 @@ To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
 
 ### Teams
 
-`--team NAME`, accepted by `create`, `talk`, `list`, and `delete`, runs
+`--team NAME`, accepted by `create`, `talk`, `fork`, `list`, and `delete`, runs
 against a named team instead of the teamless layout above: its own registry,
 its own working directory, isolated from every other team. This is what
 lets two fleets work two different GitHub issues at once without both
@@ -355,8 +359,9 @@ it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
 `AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
 
 The orchestrator never runs `git` itself — you create the worktree, and
-`--team` refuses to run `create`/`talk` against a team whose `worktree/`
-doesn't exist yet, since those launch a backend into it. `list agents --team`
+`--team` refuses to run `create`/`talk`/`fork` against a team whose
+`worktree/` doesn't exist yet, since those bind an agent to it as its
+working directory. `list agents --team`
 and `delete NAME --team` only read and edit the registry, so they work even
 with `worktree/` missing or not yet created:
 
@@ -431,7 +436,7 @@ backends/          # AgentBackend interface + implementations
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator/      # the orchestrator CLI (create / talk / list / delete)
+orchestrator/      # the orchestrator CLI (create / talk / fork / list / delete)
   schema.py        # --schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite

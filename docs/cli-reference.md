@@ -4,7 +4,7 @@
 orchestrator [--version] [-v] <verb> ...
 ```
 
-Five verbs: `create`, `talk`, `list`, `delete`, `doctor`. Every verb also
+Six verbs: `create`, `talk`, `fork`, `list`, `delete`, `doctor`. Every verb also
 accepts `-v`/`--verbose` after its own name, so `orchestrator -v talk ...` and
 `orchestrator talk -v ...` both work. `--version` is top-level only —
 `orchestrator talk --version` exits 2 with the `talk` usage line.
@@ -133,6 +133,61 @@ one turn's `--timeout`.
 | `1` | the agent ran but never produced a conforming reply, or the turn otherwise failed |
 | `2` | the schema file is missing, malformed, or not strict — nothing ran, no agent was created |
 
+## `fork` — start a new agent from another's session
+
+```
+orchestrator fork SOURCE DEST [--team NAME]
+```
+
+| argument | meaning |
+|---|---|
+| `source` | (positional) an existing agent whose session `DEST` starts from |
+| `dest` | (positional) the new agent's name, unique in the registry |
+| `--team` | as everywhere else; both agents live in the same team |
+
+```sh
+uv run orchestrator talk primer -p "read the spec and the code, then wait"
+uv run orchestrator fork primer reviewer
+# forked agent 'primer' into 'reviewer' backend=claude
+
+uv run orchestrator talk reviewer -p "review the diff"
+```
+
+`DEST` inherits `SOURCE`'s backend, model, and reasoning effort — there is no
+`--backend` override, since a session cannot be carried across CLIs. `SOURCE`
+is never modified: both agents keep their own session ids afterwards and are
+independently talkable.
+
+**Nothing runs at fork time.** `fork` only writes the registry: `DEST` is
+created with no session of its own and a `pending_fork_from` marker holding
+`SOURCE`'s session id. `DEST`'s *first* `talk` resumes that id with the
+backend's fork flag (`--resume <source> --fork-session`), stores the new
+session id the CLI reports, and clears the marker; every later turn is an
+ordinary `--resume <dest>`. So priming one session and forking it N times
+costs N registry writes, not N model turns.
+
+**The fork is therefore lazy, and this is deliberate:** `DEST` inherits
+`SOURCE`'s context as of `DEST`'s **first turn**, not as of the `fork` call,
+so talking to `SOURCE` in between moves the fork's starting point forward.
+Precisely: the marker is a *snapshot of `SOURCE`'s session id* taken at fork
+time, and what `DEST` inherits is whatever that session holds when `DEST`
+first resumes it — which is everything `SOURCE` has said into it meanwhile,
+because claude and grok keep one session id across resumes. Were a CLI ever
+to report a new id per turn, the fork point would instead be frozen at the
+`fork` call. Either way, forking and then talking to the copy before
+continuing the source gives you the context frozen where it was.
+
+If that first turn comes back reporting `SOURCE`'s *own* session id, the
+fork did not happen — the CLI continued the source's session instead of
+copying it — and the turn fails (exit 1) with the marker left pending,
+rather than pointing both agents at one session.
+
+`fork` validates eagerly and creates nothing when it refuses — it exits 1
+with a single line for an unknown `SOURCE`, a `SOURCE` that has not had a
+turn yet (nothing to fork), a `DEST` name already taken, or a `SOURCE` on a
+backend that cannot fork (`codex`, `opencode` — see
+[Backends](configuration.md#backends)).
+
 ## `list` — show agents, the skill catalog, or every team
 
 ```
@@ -242,7 +297,7 @@ orchestrator_state.json.*.lock` when no orchestrator command is running.
 
 ## Teams
 
-`--team NAME`, on `create`/`talk`/`list`/`delete`, points the command at a
+`--team NAME`, on `create`/`talk`/`fork`/`list`/`delete`, points the command at a
 team root's `agents/orchestrator_state.json` for state and its `worktree`
 for the backend's working directory (and, unless `AGENTS_ARMY_SKILLS` is
 set, its skill catalog) instead of the teamless layout — a named group of
@@ -277,14 +332,15 @@ full path and asking for a qualified name instead of guessing. A
 set — it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
 `AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
 
-`create`/`talk --team` still require the team's `worktree` to exist, since
-they launch a backend into it; `list agents`/`delete NAME --team` only read
-and edit the registry, so they work whether or not `worktree` is there.
+`create`/`talk`/`fork --team` still require the team's `worktree` to exist,
+since they bind an agent to it as its working directory; `list agents`/`delete
+NAME --team` only read and edit the registry, so they work whether or not
+`worktree` is there.
 
 | exit code | meaning |
 |---|---|
-| `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`) the team's `worktree/` doesn't exist yet |
-| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
+| `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`/`fork`) the team's `worktree/` doesn't exist yet |
+| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk`/`fork` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
 
 See the [README's Teams section](../README.md#teams) for the full
 `agents/`/`worktree/`/`.lock` layout and the locking model, and

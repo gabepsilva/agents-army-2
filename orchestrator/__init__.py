@@ -183,6 +183,12 @@ class Agent:
         # gets; the orchestrator that builds an agent passes its own.
         self.workdir = WORKDIR if workdir is None else workdir
         self.session_id: str | None = None
+        # The session this agent was forked from, until its first turn has
+        # actually forked it. Set by `Orchestrator.fork` and cleared the
+        # moment a turn reports a session id of this agent's own, so it is
+        # both the instruction for that first turn and the record that it
+        # has not happened yet.
+        self.pending_fork_from: str | None = None
         self.created_at: str | None = None
         self.last_turn_at: str | None = None
         # Counts CLI turns, not logical `talk()` calls: `_turn` persists once
@@ -196,18 +202,28 @@ class Agent:
         schema: OutputSchema | None = None,
         timeout: int = DEFAULT_TURN_TIMEOUT,
     ) -> TurnResult:
+        # A pending fork resumes the *source's* session, in a copy: this
+        # agent has no session of its own until this turn reports one.
+        forking = self.pending_fork_from is not None
+        resume_from = self.pending_fork_from if forking else self.session_id
         log.info(
-            "agent '%s' (%s): starting turn, resume=%s",
+            "agent '%s' (%s): starting turn, resume=%s fork=%s",
             self.name,
             self.backend.name,
-            bool(self.session_id),
+            bool(resume_from),
+            forking,
         )
         # Logged here rather than per backend: the turn is the same exchange
         # whichever CLI runs it, so every backend gets this for free.
         log.log(TRACE, "agent '%s' prompt in:\n%s", self.name, prompt)
         started = time.monotonic()
         result = self.backend.run_turn(
-            prompt, self.session_id, self.workdir, timeout, schema
+            prompt,
+            resume_from,
+            self.workdir,
+            timeout,
+            schema,
+            resume_as_fork=forking,
         )
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
@@ -223,7 +239,24 @@ class Agent:
         # it has failed to name it. Keeping the previous id lets the next turn
         # resume the session instead of silently starting a fresh one.
         if result.session_id is not None:
+            # A forked resume that reports the id it was handed did not fork:
+            # the CLI continued the source's session instead of copying it.
+            # Storing that id would leave two agents resuming one session
+            # under different names — the overlap `_agent_lock` exists to
+            # prevent, and the one case it cannot, since it keys on the name.
+            # Raising here keeps the marker pending and writes nothing.
+            if result.session_id == self.pending_fork_from:
+                raise OrchestratorError(
+                    f"agent '{self.name}': {self.backend.name} reported the "
+                    f"source's own session id ('{result.session_id}'), so the "
+                    f"fork did not happen; refusing to point two agents at "
+                    f"one session"
+                )
             self.session_id = result.session_id
+            # Only now has the fork happened. A turn that reported no id
+            # leaves the marker in place, so the next turn forks the source
+            # again instead of starting a conversation from nothing.
+            self.pending_fork_from = None
         return result
 
 
@@ -299,7 +332,7 @@ class _AgentRecord(NamedTuple):
     """One agent as `orchestrator_state.json` stores it.
 
     The persisted shape lives here and nowhere else: `_reload` and `_persist`
-    both go through this type, so the seven fields are named once per
+    both go through this type, so the eight fields are named once per
     direction instead of once per call site drifting apart. A live `Agent`
     spreads them across itself and its `AgentBackend`, which is why this is a
     projection over both rather than a mirror of `Agent.__init__`.
@@ -315,6 +348,7 @@ class _AgentRecord(NamedTuple):
 
     backend: str
     session_id: str | None
+    pending_fork_from: str | None
     model: str | None
     reasoning_effort: str | None
     created_at: str | None
@@ -338,6 +372,7 @@ class _AgentRecord(NamedTuple):
         return cls(
             backend=backend,
             session_id=entry.get("session_id"),
+            pending_fork_from=entry.get("pending_fork_from"),
             model=entry.get("model"),
             reasoning_effort=entry.get("reasoning_effort"),
             created_at=entry.get("created_at"),
@@ -351,6 +386,7 @@ class _AgentRecord(NamedTuple):
         return cls(
             backend=agent.backend.name,
             session_id=agent.session_id,
+            pending_fork_from=agent.pending_fork_from,
             model=agent.backend.model,
             reasoning_effort=agent.backend.reasoning_effort,
             created_at=agent.created_at,
@@ -375,6 +411,7 @@ class _AgentRecord(NamedTuple):
             workdir,
         )
         agent.session_id = self.session_id
+        agent.pending_fork_from = self.pending_fork_from
         agent.created_at = self.created_at
         agent.last_turn_at = self.last_turn_at
         agent.turns = self.turns
@@ -393,6 +430,11 @@ class _AgentRecord(NamedTuple):
         return {
             "backend": self.backend,
             "session_id": self.session_id,
+            **(
+                {"pending_fork_from": self.pending_fork_from}
+                if self.pending_fork_from is not None
+                else {}
+            ),
             **({"model": self.model} if self.model is not None else {}),
             **(
                 {"reasoning_effort": self.reasoning_effort}
@@ -499,12 +541,50 @@ class Orchestrator:
                 return existing, False
             return self._create(name, backend, model, reasoning_effort), True
 
+    def fork(self, source: str, dest: str) -> Agent:
+        """Register `dest` as a copy of `source`, to be forked on its first turn.
+
+        Nothing runs here: the new agent inherits `source`'s backend, model
+        and reasoning effort, and remembers the session id to fork, so the
+        cost of a fork is one registry write rather than a model turn. That
+        makes the fork *lazy* — `dest` inherits `source`'s context as of
+        `dest`'s first turn, not as of this call.
+
+        Every reason to refuse is checked before anything is created, so a
+        rejected fork leaves no half-made agent behind.
+        """
+        with self._exclusive():
+            self._reload()
+            origin = self.agents.get(source)
+            if origin is None:
+                raise AgentNotFoundError(f"no agent named '{source}'")
+            if origin.session_id is None:
+                raise OrchestratorError(
+                    f"agent '{source}' has no session to fork yet; talk to it first"
+                )
+            if not origin.backend.supports_fork:
+                raise OrchestratorError(
+                    f"agent '{source}' runs on backend "
+                    f"'{origin.backend.name}', which cannot fork"
+                )
+            if dest in self.agents:
+                raise AgentExistsError(f"agent '{dest}' already exists")
+            return self._create(
+                dest,
+                origin.backend.name,
+                origin.backend.model,
+                origin.backend.reasoning_effort,
+                pending_fork_from=origin.session_id,
+            )
+
     def _create(
         self,
         name: str,
         backend: str | None,
         model: str | None,
         reasoning_effort: str | None,
+        *,
+        pending_fork_from: str | None = None,
     ) -> Agent:
         """Register and persist a new agent. The caller holds `_exclusive()`.
 
@@ -522,6 +602,7 @@ class Orchestrator:
         )
         agent.created_at = _utcnow()
         agent.turns = 0
+        agent.pending_fork_from = pending_fork_from
         self.agents[name] = agent
         self._persist()
         return agent
@@ -591,6 +672,7 @@ class Orchestrator:
             # agent.session_id, not result.session_id: the agent keeps the
             # id it already had when a backend reports none.
             entry.session_id = agent.session_id
+            entry.pending_fork_from = agent.pending_fork_from
             entry.last_turn_at = _utcnow()
             entry.turns = (entry.turns or 0) + 1
             self._persist()
@@ -840,6 +922,13 @@ def cmd_create(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
         reasoning_effort=opts.reasoning_effort,
     )
     print(f"created agent '{agent.name}' backend={agent.backend.name}")
+
+
+def cmd_fork(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+    agent = orchestrator.fork(opts.source, opts.dest)
+    print(
+        f"forked agent '{opts.source}' into '{agent.name}' backend={agent.backend.name}"
+    )
 
 
 def _ensure_agent(
@@ -1247,6 +1336,11 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument("--prompt-file")
     _add_team_option(talk)
 
+    fork = _add_verb_parser(subparsers, "fork")
+    fork.add_argument("source")
+    fork.add_argument("dest")
+    _add_team_option(fork)
+
     list_parser = _add_verb_parser(subparsers, "list")
     list_parser.add_argument(
         "target", nargs="?", choices=("agents", "skills", "teams"), default="agents"
@@ -1268,6 +1362,7 @@ def _build_parser() -> argparse.ArgumentParser:
 VERBS: dict[str, Callable[[Orchestrator, argparse.Namespace], None]] = {
     "create": cmd_create,
     "talk": cmd_talk,
+    "fork": cmd_fork,
     "list": cmd_list,
     "delete": cmd_delete,
 }
@@ -1615,7 +1710,7 @@ def _resolve_team(
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
-    already does — except for every verb but `create`/`talk` (`list`,
+    already does — except for every verb but `create`/`talk`/`fork` (`list`,
     `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.
@@ -1638,14 +1733,14 @@ def _resolve_team(
     team_root = _resolve_team_root(team, opts)
     opts._team_root = team_root
     worktree = team_root / "worktree"
-    if opts.verb in ("create", "talk"):
+    if opts.verb in ("create", "talk", "fork"):
         # Gated on the verb, not on `teardown`: `list agents --team` and
         # `delete NAME --team` never launch a backend, they read and edit a
         # JSON file, so they must work on a team whose worktree is gone (the
         # state teardown deliberately leaves behind) or not there yet.
-        # `create` keeps the gate because it stores the workdir at resolution —
-        # letting it through would only defer this same failure to `talk`
-        # with a registry already written.
+        # `create` and `fork` keep the gate because they store the workdir at
+        # resolution — letting them through would only defer this same
+        # failure to `talk` with a registry already written.
         if not worktree.is_dir():
             opts._parser.error(
                 f"team workspace {worktree} does not exist; create it first "

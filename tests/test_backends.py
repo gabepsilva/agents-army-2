@@ -34,6 +34,7 @@ from backends.base import (
     stdout_for_error,
     structured_reply,
 )
+from backends.claude import FORK_FLAG as CLAUDE_FORK_FLAG
 from backends.claude import (
     OPT_IN_REQUIRED_REASON,
     PERMISSION_MODE,
@@ -51,6 +52,7 @@ from backends.grok import (
     GrokTurnError,
     parse_grok_stdout,
 )
+from backends.grok import FORK_FLAG as GROK_FORK_FLAG
 from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
 from backends.opencode import OpenCodeBackend, OpenCodeTurnError
 from backends.registry import (
@@ -192,6 +194,8 @@ class EchoBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -231,6 +235,8 @@ def _gate_backend(
             cwd: Path,
             timeout: int = DEFAULT_TURN_TIMEOUT,
             schema: OutputSchema | None = None,
+            *,
+            resume_as_fork: bool = False,
         ) -> TurnResult:
             entered.set()
             release.wait(timeout=5)
@@ -496,6 +502,43 @@ class TestAgentBackendInterface:
         assert GrokBackend.enforces_schema is True
         assert OpenCodeBackend.enforces_schema is False
 
+    def test_fork_support_is_declared_per_backend(self) -> None:
+        """The capability the CLI checks before it will fork an agent."""
+        assert AgentBackend.supports_fork is False
+        assert ClaudeBackend.supports_fork is True
+        assert GrokBackend.supports_fork is True
+        assert CodexBackend.supports_fork is False
+        assert OpenCodeBackend.supports_fork is False
+
+    @pytest.mark.parametrize(
+        ("backend", "error"),
+        [
+            (CodexBackend(), CodexTurnError),
+            (OpenCodeBackend(), OpenCodeTurnError),
+        ],
+        ids=["codex", "opencode"],
+    )
+    def test_a_backend_without_fork_refuses_before_running_its_cli(
+        self,
+        backend: AgentBackend,
+        error: type[TurnError],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The guard lives in the adapter too, not only in the CLI's own
+        check, so a caller that reaches a backend directly cannot fork one
+        that has no fork flag to emit."""
+
+        def fail(*args, **kwargs):
+            raise AssertionError("the CLI ran for a fork it cannot do")
+
+        monkeypatch.setattr(subprocess, "run", fail)
+        with pytest.raises(error) as excinfo:
+            backend.run_turn("hi", "s1", tmp_path, resume_as_fork=True)
+        assert str(excinfo.value) == (
+            f"fork is not yet implemented for the {backend.name} backend"
+        )
+
     def test_get_backend_resolves_grok(self) -> None:
         backend = get_backend("grok", model="grok-test", reasoning_effort="high")
         assert isinstance(backend, GrokBackend)
@@ -516,6 +559,8 @@ class TestAgentBackendInterface:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 return TurnResult(session_id="custom-sid", reply=prompt, raw="")
 
@@ -665,6 +710,38 @@ class TestClaudeRunTurn:
             f"{PERMISSION_MODE} --resume s1 -p <prompt:5chars>"
         )
         assert messages[3] == "claude turn: parsed session=s1 reply_chars=10"
+
+    def test_forked_resume_adds_the_fork_flag_next_to_the_source_session(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A forked resume continues the *source's* session in a copy, so the
+        id on the command line is the source's and the flag is what makes the
+        turn land in a new one."""
+        backend = ClaudeBackend()
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "claude",
+                "--print",
+                "--output-format",
+                "json",
+                "--permission-mode",
+                PERMISSION_MODE,
+                "--resume",
+                "source-sid",
+                CLAUDE_FORK_FLAG,
+                "-p",
+                "again",
+            ]
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            payload = json.dumps(
+                {"is_error": False, "session_id": "forked-sid", "result": "hi"}
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("again", "source-sid", tmp_path, resume_as_fork=True)
+        assert result.session_id == "forked-sid"
 
     def test_error_reply_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
@@ -1454,6 +1531,30 @@ class TestGrokRunTurn:
             "--single=<prompt:5chars>"
         )
         assert messages[3] == "grok turn: parsed session=s1 reply_chars=10"
+
+    def test_forked_resume_adds_the_fork_flag_next_to_the_source_session(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        backend = GrokBackend()
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "grok",
+                "--output-format",
+                "json",
+                ALWAYS_APPROVE_FLAG,
+                "--resume",
+                "source-sid",
+                GROK_FORK_FLAG,
+                f"{PROMPT_FLAG}=again",
+            ]
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            payload = json.dumps({"sessionId": "forked-sid", "text": "hi"})
+            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("again", "source-sid", tmp_path, resume_as_fork=True)
+        assert result.session_id == "forked-sid"
 
     def test_always_approve_is_the_noninteractive_opt_in(self) -> None:
         assert ALWAYS_APPROVE_FLAG == "--always-approve"
@@ -2410,6 +2511,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2448,6 +2551,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2475,6 +2580,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2500,6 +2607,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2549,6 +2658,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 seen_session_ids.append(session_id)
                 return TurnResult(session_id="persist-me", reply="reply", raw="")
@@ -2744,6 +2855,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 seen.append(session_id)
                 return TurnResult(session_id="sid", reply="r", raw="")
@@ -2786,6 +2899,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 Orchestrator(state_file=state_file).spawn("b", "echo")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -2817,6 +2932,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 probe = Orchestrator(state_file=state_file)
                 held.append(
@@ -2862,6 +2979,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 return next(replies)
 
@@ -2910,6 +3029,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 Orchestrator(state_file=state_file).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -3008,6 +3129,8 @@ class TestOrchestrator:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 # Runs with the outer talk() holding the agent lock, so this
                 # delete's own reclaim probe backs off (BlockingIOError,
@@ -3468,6 +3591,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 
@@ -3499,6 +3624,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise CodexTurnError("codex did not report a thread_id")
 
@@ -3530,6 +3657,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise TurnError("cli failed")
 
@@ -3574,6 +3703,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise incidental(message)
 
@@ -3603,6 +3734,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise GrokTurnError("grok did not report a sessionId")
 
@@ -4187,6 +4320,8 @@ class TestCLI:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise KeyError("some internal dict key")
 
@@ -4392,7 +4527,7 @@ class TestStepLogging:
         with caplog.at_level("DEBUG", logger="orchestrator"):
             orch.talk("a", "hi")
         messages = _messages(caplog)
-        assert "agent 'a' (echo): starting turn, resume=False" in messages
+        assert "agent 'a' (echo): starting turn, resume=False fork=False" in messages
         durations = [
             _reported_seconds(m, r"agent 'a': turn finished in (\d+\.\d)s")
             for m in messages
@@ -4434,7 +4569,9 @@ class TestStepLogging:
         orch.talk("a", "first")
         with caplog.at_level("DEBUG", logger="orchestrator"):
             orch.talk("a", "second")
-        assert "agent 'a' (echo): starting turn, resume=True" in _messages(caplog)
+        assert "agent 'a' (echo): starting turn, resume=True fork=False" in _messages(
+            caplog
+        )
 
     def test_cli_argument_shape_and_dispatch_are_logged(
         self,
@@ -4507,10 +4644,18 @@ def test_parser_exposes_the_complete_new_surface() -> None:
         if isinstance(action, argparse._SubParsersAction)
     )
 
-    assert set(subparsers.choices) == {"create", "talk", "list", "delete", "doctor"}
+    assert set(subparsers.choices) == {
+        "create",
+        "talk",
+        "fork",
+        "list",
+        "delete",
+        "doctor",
+    }
     child_args = {
         "create": ["a"],
         "talk": ["a", "-p", "x"],
+        "fork": ["a", "b"],
         "list": [],
         "delete": ["a"],
         "doctor": [],

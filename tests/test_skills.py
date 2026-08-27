@@ -67,6 +67,8 @@ class EchoBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -704,6 +706,8 @@ class TestTalkSkills:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

@@ -22,6 +22,8 @@ class RecordingBackend(AgentBackend):
         cwd: Path,
         timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
         schema=None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="sid", reply=f"reply:{prompt}", raw="")
 
@@ -131,6 +133,8 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
         ["talk", "a", "--prompt-file", "unused.txt", "--", "two"],
         ["talk", "a", "-p", "x", "--prompt-file", "unused.txt", "--", "two"],
         ["create", "a", "--", "foo"],
+        ["fork", "a", "b", "--", "foo"],
+        ["fork", "a"],
         ["list", "--", "foo"],
         ["delete", "a", "--", "foo"],
         ["doctor", "--", "foo"],
@@ -196,6 +200,7 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
 VERB_INVOCATIONS = (
     ("create", ["create", "a"]),
     ("talk", ["talk", "a", "-p", "hi"]),
+    ("fork", ["fork", "a", "b"]),
     ("list", ["list"]),
     ("delete", ["delete", "a"]),
     ("doctor", ["doctor"]),

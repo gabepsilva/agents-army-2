@@ -137,6 +137,17 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     return proc
 
 
+def unsupported_fork_message(name: str) -> str:
+    """The one wording for a fork a backend cannot do.
+
+    Shared so the two adapters that refuse say the same thing: "not yet",
+    because both CLIs do have a fork of their own (`codex exec fork`,
+    `opencode run --fork`) in a shape this interface does not speak yet —
+    see issue #131 — rather than because forking is impossible there.
+    """
+    return f"fork is not yet implemented for the {name} backend"
+
+
 def stdout_for_error(stdout: str) -> str:
     """Keep both ends of a long dump: the parse error is at char 0, the
     envelope is usually at the tail."""
@@ -244,6 +255,13 @@ class AgentBackend(ABC):
 
     enforces_schema: bool = True
 
+    # Whether this CLI can resume a session into a *copy* of it, leaving the
+    # original untouched. Declared on the class, like `enforces_schema`, so
+    # `fork` can refuse before it creates anything; the adapters that answer
+    # False also raise if `resume_as_fork` reaches them anyway, so the
+    # capability and the argv it stands for cannot drift apart.
+    supports_fork: bool = False
+
     def __init__(
         self,
         *,
@@ -267,6 +285,8 @@ class AgentBackend(ABC):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         """Start (session_id=None) or resume (session_id set) a CLI session with
         `prompt` in directory `cwd` and return the model's text reply along with
@@ -278,5 +298,13 @@ class AgentBackend(ABC):
         omission because Liskov is only checked against a declared base
         signature. When `schema` is set the reply must be a JSON object
         satisfying it, and `TurnResult.structured` carries that object.
+
+        `resume_as_fork` resumes `session_id` into a copy: the turn continues
+        that conversation but lands in a new session, whose id the result
+        reports, and the session named by `session_id` is left as it was. It
+        is keyword-only and defaults off so the ordinary turn — every call
+        site but the first turn of a forked agent — reads unchanged. A
+        backend whose `supports_fork` is False raises its own `TurnError`
+        rather than silently running an unforked turn.
         """
         ...

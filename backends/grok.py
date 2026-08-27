@@ -35,6 +35,10 @@ ALWAYS_APPROVE_FLAG = "--always-approve"
 # prompt like "--fix the parser" fails the run before the model sees it.
 PROMPT_FLAG = "--single"
 
+# Resumes into a copy of the named session instead of continuing it. Grok
+# spells it exactly as claude does, and it is only meaningful with --resume.
+FORK_FLAG = "--fork-session"
+
 # Takes the schema document inline, as its own argument. The --single= gluing
 # above is not needed here: the value starts with "{", which no argument
 # parser reads as a flag.
@@ -104,6 +108,7 @@ class GrokBackend(AgentBackend):
     """Backend for the Grok CLI (`grok`)."""
 
     name = "grok"
+    supports_fork = True
 
     def run_turn(
         self,
@@ -112,6 +117,8 @@ class GrokBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         # --session-id names a *new* session only and errors if that id
         # already exists. Resume is --resume.
@@ -124,6 +131,8 @@ class GrokBackend(AgentBackend):
             args += [SCHEMA_FLAG, schema.text]
         if session_id:
             args += ["--resume", session_id]
+            if resume_as_fork:
+                args.append(FORK_FLAG)
         args.append(f"{PROMPT_FLAG}={prompt}")
 
         proc = run_cli_turn(

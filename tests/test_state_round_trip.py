@@ -38,6 +38,8 @@ class RecordingBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="recording-sid", reply=prompt, raw="")
 
@@ -65,6 +67,21 @@ _EVERY_OPTIONAL_KEY_PRESENT = """\
 }
 """
 
+# A fork that has been recorded but not yet taken: `pending_fork_from` is the
+# one key that appears between `create` and the agent's first turn, and it
+# must be omitted again once that turn has stored a session id of its own.
+_A_RECORDED_FORK = """\
+{
+  "copy": {
+    "backend": "recording",
+    "created_at": "2026-01-02T03:04:05Z",
+    "pending_fork_from": "source-sid",
+    "session_id": null,
+    "turns": 0
+  }
+}
+"""
+
 _EVERY_OPTIONAL_KEY_ABSENT = """\
 {
   "bare": {
@@ -77,8 +94,12 @@ _EVERY_OPTIONAL_KEY_ABSENT = """\
 
 @pytest.mark.parametrize(
     "registry",
-    [_EVERY_OPTIONAL_KEY_PRESENT, _EVERY_OPTIONAL_KEY_ABSENT],
-    ids=["every-optional-key-present", "every-optional-key-absent"],
+    [_EVERY_OPTIONAL_KEY_PRESENT, _EVERY_OPTIONAL_KEY_ABSENT, _A_RECORDED_FORK],
+    ids=[
+        "every-optional-key-present",
+        "every-optional-key-absent",
+        "a-recorded-fork",
+    ],
 )
 def test_a_registry_is_rewritten_byte_for_byte(tmp_path: Path, registry: str) -> None:
     state_file = tmp_path / "state.json"
@@ -108,6 +129,9 @@ def test_a_freshly_spawned_agent_is_written_with_every_field_it_has(
     assert entry["created_at"] == orch.agents["a"].created_at
     assert entry["session_id"] is None
     assert "last_turn_at" not in entry
+    # An agent that was created rather than forked carries no marker, so a
+    # registry written before `fork` existed round-trips unchanged.
+    assert "pending_fork_from" not in entry
 
 
 def test_an_entry_without_a_backend_is_rejected(tmp_path: Path) -> None:
