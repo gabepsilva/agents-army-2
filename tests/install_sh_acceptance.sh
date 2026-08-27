@@ -122,6 +122,54 @@ else
 fi
 drop_sandbox
 
+CASE="catalog: the vendored trees land under \$AGENTS_ARMY_ROOT/SKILLS"
+new_sandbox
+SANDBOX_ROOT="$SANDBOX/root"
+run_installer
+if [ ! -f "$SANDBOX_ROOT/SKILLS/mattpocock/skills/engineering/tdd/SKILL.md" ]; then
+	fail "the vendored catalog was not copied: $(cat "$OUT")"
+elif ! grep -q "$SANDBOX_ROOT/SKILLS" "$OUT"; then
+	fail "the preamble does not name the resolved catalog path: $(cat "$OUT")"
+else
+	ok
+fi
+unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="catalog: a re-run refreshes vendored entries and spares the user's own"
+new_sandbox
+SANDBOX_ROOT="$SANDBOX/root"
+run_installer
+mkdir -p "$SANDBOX_ROOT/SKILLS/mine"
+: > "$SANDBOX_ROOT/SKILLS/mine/SKILL.md"
+: > "$SANDBOX_ROOT/SKILLS/mattpocock/stale.md"
+run_installer
+if [ ! -f "$SANDBOX_ROOT/SKILLS/mine/SKILL.md" ]; then
+	fail "the user's own entry was destroyed by the second run"
+elif [ -e "$SANDBOX_ROOT/SKILLS/mattpocock/stale.md" ]; then
+	fail "a file that no longer exists upstream survived inside a vendored entry"
+elif [ ! -f "$SANDBOX_ROOT/SKILLS/mattpocock/skills/engineering/tdd/SKILL.md" ]; then
+	fail "the refreshed vendored entry is incomplete"
+else
+	ok
+fi
+unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="catalog: the printed rule does not overclaim about dropped entries"
+new_sandbox
+SANDBOX_ROOT="$SANDBOX/root"
+run_installer
+if ! grep -i 'left untouched' "$OUT" | grep -q "$SANDBOX_ROOT/SKILLS"; then
+	fail "the rule sentence does not name the destination it applies to: $(cat "$OUT")"
+elif ! grep -qi 'linger' "$OUT"; then
+	fail "the copy does not admit that a dropped entry lingers: $(cat "$OUT")"
+else
+	ok
+fi
+unset SANDBOX_ROOT
+drop_sandbox
+
 # --- report ----------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "$PASSED" "$FAILED"
