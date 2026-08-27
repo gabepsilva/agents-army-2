@@ -132,8 +132,14 @@ DIGEST_EXCLUSIONS: dict[str, str] = {
     ),
 }
 
-# Non-.py paths under a watched root that DO decide a verdict. Empty today.
-DIGEST_EXTRA: tuple[str, ...] = ()
+# Non-.py paths under a watched root that DO decide a verdict. Streaming
+# fixtures are loaded by tests/test_streaming.py, so changing one changes the
+# result of the selected tests and must invalidate a cached mutation run.
+DIGEST_EXTRA: tuple[str, ...] = (
+    "tests/fixtures/streaming/claude.jsonl",
+    "tests/fixtures/streaming/codex.jsonl",
+    "tests/fixtures/streaming/opencode.jsonl",
+)
 
 # pytest's own default python_files, applied when the repo's config is
 # silent on the key — as this repo's is. See _python_files_patterns.

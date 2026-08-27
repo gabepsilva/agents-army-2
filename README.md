@@ -64,7 +64,7 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # Set the wall-clock turn limit for a flag-style invocation
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
-# Echo complete child output lines to stderr while the turn runs; stdout stays parseable
+# Render backend progress to stderr while keeping final output on stdout
 uv run orchestrator talk reviewer --stream --prompt "show progress while you work"
 
 # Fork a primed agent: 'copy' inherits reviewer's backend/model/effort and
@@ -191,13 +191,24 @@ unaffected. Two things worth knowing:
   prompt is; `-vv` is the opt-in to the full transcript, so mind where stderr
   is going before turning it on.
 
-`--stream` is a separate opt-in for long-running turns. It echoes each complete
-line the child writes to stdout to flushed stderr as soon as it arrives. The
-same output is still accumulated for the normal `TurnResult`, and the final
-session header plus reply (or structured object) remain on stdout. Child stderr
-is captured by the completed-process transport result but is not echoed by
-`--stream`; without the flag, the existing non-streaming subprocess path is
-unchanged.
+`--stream` is a separate opt-in for long-running turns. Claude, Codex, and
+OpenCode parse each complete JSON event from the child and flush a readable
+progress line to stderr as soon as it arrives. Unrecognized or malformed events
+are ignored, and the raw event stream is still accumulated for the normal
+`TurnResult`. Typical lines are:
+
+```
+Thinking...
+Tool call: Bash {"command":"..."}
+Tool result: command output
+Assistant: the final response
+```
+
+Claude labels MCP tools as `MCP call`/`MCP result`; Codex and OpenCode do the
+same for their MCP event shapes. Grok has no stream formatter, so `--stream`
+produces no live progress for Grok. In every case the final session header and
+reply (or structured object) remain on stdout, child stderr is captured but not
+echoed, and omitting `--stream` preserves the historical subprocess path.
 
 ### Example
 
@@ -249,10 +260,10 @@ and receives the prompt through `input=` instead; its no-positional-message
 mode reads stdin verbatim. Interactive `chat` is the deliberate exception:
 it runs the backend's `chat_argv` with inherited terminal stdio so a person
 can drive the resumed session. Pass `--stream` to a headless `talk` to opt into
-nonblocking pipe reads: complete child stdout lines are flushed to the
-orchestrator's stderr while the full stdout/stderr capture and final result are
-preserved. It is off by default, so stdout remains exactly the normal reply
-channel unless requested.
+nonblocking pipe reads: supported backends parse complete JSON event lines and
+flush recognized progress to the orchestrator's stderr while the full
+stdout/stderr capture and final result are preserved. It is off by default, so
+stdout remains exactly the normal reply channel unless requested.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)

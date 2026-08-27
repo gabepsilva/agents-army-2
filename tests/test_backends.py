@@ -51,7 +51,13 @@ from backends.claude import (
 from backends.codex import FORK_COMMAND as CODEX_FORK_COMMAND
 from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
 from backends.codex import YOLO_FLAG as CODEX_YOLO_FLAG
-from backends.codex import CodexBackend, CodexTurnError
+from backends.codex import (
+    CodexBackend,
+    CodexTurnError,
+)
+from backends.codex import (
+    format_event as codex_format_event,
+)
 from backends.grok import (
     ALWAYS_APPROVE_FLAG,
     PROMPT_FLAG,
@@ -63,6 +69,9 @@ from backends.grok import FORK_FLAG as GROK_FORK_FLAG
 from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
 from backends.opencode import FORK_FLAG as OPENCODE_FORK_FLAG
 from backends.opencode import OpenCodeBackend, OpenCodeTurnError
+from backends.opencode import (
+    format_event as opencode_format_event,
+)
 from backends.registry import (
     UnknownBackendError,
     get_backend,
@@ -1222,6 +1231,37 @@ class TestCodexRunTurn:
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("work", None, tmp_path).reply == "done"
 
+    def test_streaming_turn_passes_formatter_and_keeps_codex_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = CodexBackend()
+        stdout = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"t1"}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}',
+                '{"type":"turn.completed","usage":{"output_tokens":5}}',
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "codex"
+            assert args == [
+                "codex",
+                "exec",
+                CODEX_YOLO_FLAG,
+                "work",
+                "--json",
+                "--skip-git-repo-check",
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is codex_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.codex.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, stream=True)
+
+        assert result == TurnResult("t1", "done", stdout)
+
     def test_new_turn_parses_thread_and_reply(
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -2069,6 +2109,43 @@ class TestParseGrokStdout:
 
 
 class TestOpenCodeRunTurn:
+    def test_streaming_turn_passes_formatter_and_keeps_opencode_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = OpenCodeBackend()
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "step_start", "sessionID": "s1"}),
+                json.dumps(
+                    {
+                        "type": "text",
+                        "sessionID": "s1",
+                        "part": {"id": "p1", "text": "done"},
+                    }
+                ),
+            ]
+        )
+
+        def fake_run(name, args, **kwargs):
+            assert name == "opencode"
+            assert args == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--auto",
+                "--dir",
+                str(tmp_path),
+            ]
+            assert kwargs["stream"] is True
+            assert kwargs["format_event"] is opencode_format_event
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr("backends.opencode.run_cli_turn", fake_run)
+        result = backend.run_turn("work", None, tmp_path, stream=True)
+
+        assert result == TurnResult("s1", "done", stdout)
+
     def test_fresh_turn_uses_exact_argv_and_verbatim_input(
         self,
         tmp_path: Path,

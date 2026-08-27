@@ -77,7 +77,7 @@ possibly-new agent without a separate `create` step.
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
-| `--stream` | echo each complete child stdout line to flushed stderr while the turn runs; final output remains on stdout |
+| `--stream` | render recognized backend events to flushed stderr while the turn runs; final output remains on stdout |
 | `--team` | run against team `NAME`'s registry and worktree instead of the teamless layout; found under `$AGENTS_ARMY_TEAMS_DIR` if set, otherwise resolved by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
@@ -109,7 +109,7 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # cap the turn's wall-clock budget
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
-# echo complete child output lines to stderr while keeping final output on stdout
+# render backend progress to stderr while keeping final output on stdout
 uv run orchestrator talk reviewer --stream --prompt "show progress while you work"
 ```
 
@@ -140,12 +140,27 @@ one turn's `--timeout`.
 
 ### `--stream`: live child output
 
-`--stream` is opt-in. While the backend CLI is running, every complete line it
-writes to stdout is echoed verbatim to the orchestrator's flushed stderr. The
-captured stdout is still returned normally, so the final session header and
-reply (or structured object) remain on stdout for scripts to consume. Backend
-stderr is captured but is not echoed by this flag. Without `--stream`, the
-historical non-streaming subprocess path is used.
+`--stream` is opt-in and backend-aware. While Claude, Codex, or OpenCode is
+running, each complete JSON event is parsed and a recognized event is rendered
+as one flushed stderr line. Unrecognized and malformed events are dropped;
+the raw stdout remains captured for normal result parsing. The live lines use
+these labels:
+
+```
+Thinking...
+Tool call: <name> <input>
+Tool result: <output>
+MCP call: <name> <input>
+MCP result: <output>
+Assistant: <text>
+Error: <message>
+```
+
+Tool calls and results are shown for Claude, Codex, and OpenCode; each backend
+also recognizes its own MCP event shape. Grok intentionally has no formatter,
+so `--stream` is silent for Grok. In all cases the final session header and
+reply (or structured object) remain on stdout, backend stderr is captured but
+not echoed, and omitting `--stream` keeps the historical non-streaming path.
 
 ## `chat` — open an agent's session interactively
 
