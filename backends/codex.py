@@ -28,6 +28,13 @@ class CodexTurnError(TurnError):
 # places these CLIs disagree about more than a flag name.
 SCHEMA_FLAG = "--output-schema"
 
+# A turn runs unattended, so codex must neither stop to ask nor sandbox what
+# it runs. `--yolo` is its alias for --dangerously-bypass-approvals-and-sandbox,
+# the counterpart to the claude backend's bypassPermissions. Without it a turn
+# cannot commit in a linked worktree - the git directory it must write sits
+# outside the sandboxed workspace - nor reach the network to push.
+YOLO_FLAG = "--yolo"
+
 # `codex exec resume <id> <prompt>` and `codex exec fork <id> <prompt>` take
 # the same slot and the same trailing flags, so a forked turn is the ordinary
 # resume argv with this token in place of the other.
@@ -92,7 +99,7 @@ class CodexBackend(AgentBackend):
         *,
         resume_as_fork: bool = False,
     ) -> TurnResult:
-        args = ["codex", "exec"]
+        args = ["codex", "exec", YOLO_FLAG]
         if self.model is not None:
             args += ["--model", self.model]
         if self.reasoning_effort is not None:

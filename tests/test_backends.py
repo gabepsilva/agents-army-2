@@ -45,6 +45,7 @@ from backends.claude import (
 from backends.claude import SCHEMA_FLAG as CLAUDE_SCHEMA_FLAG
 from backends.codex import FORK_COMMAND as CODEX_FORK_COMMAND
 from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
+from backends.codex import YOLO_FLAG as CODEX_YOLO_FLAG
 from backends.codex import CodexBackend, CodexTurnError
 from backends.grok import (
     ALWAYS_APPROVE_FLAG,
@@ -1106,6 +1107,7 @@ class TestCodexRunTurn:
             assert args == [
                 "codex",
                 "exec",
+                CODEX_YOLO_FLAG,
                 "--model",
                 "gpt-test",
                 "--config",
@@ -1125,7 +1127,14 @@ class TestCodexRunTurn:
         backend = CodexBackend()
 
         def fake_run(args, **kwargs):
-            assert args == ["codex", "exec", "hello", "--json", "--skip-git-repo-check"]
+            assert args == [
+                "codex",
+                "exec",
+                CODEX_YOLO_FLAG,
+                "hello",
+                "--json",
+                "--skip-git-repo-check",
+            ]
             _assert_subprocess_kwargs(kwargs, tmp_path)
             stdout = (
                 '{"type":"thread.started","thread_id":"t1"}\n'
@@ -1145,7 +1154,7 @@ class TestCodexRunTurn:
         # The prompt sits mid-argv for codex, so the summary must find it there.
         assert messages[1] == (
             "codex turn: invoking "
-            "codex exec <prompt:5chars> --json --skip-git-repo-check"
+            "codex exec --yolo <prompt:5chars> --json --skip-git-repo-check"
         )
         assert (
             _reported_seconds(
@@ -1165,6 +1174,7 @@ class TestCodexRunTurn:
             assert args == [
                 "codex",
                 "exec",
+                CODEX_YOLO_FLAG,
                 "resume",
                 "t1",
                 "again",
@@ -1189,7 +1199,7 @@ class TestCodexRunTurn:
         )
         assert messages[1] == (
             "codex turn: invoking "
-            "codex exec resume t1 <prompt:5chars> --json --skip-git-repo-check"
+            "codex exec --yolo resume t1 <prompt:5chars> --json --skip-git-repo-check"
         )
         assert messages[3] == "codex turn: parsed session=t1 messages=1 reply_chars=4"
 
@@ -1206,6 +1216,7 @@ class TestCodexRunTurn:
             assert args == [
                 "codex",
                 "exec",
+                CODEX_YOLO_FLAG,
                 "--model",
                 "gpt-test",
                 "--config",
@@ -1317,6 +1328,7 @@ class TestCodexRunTurn:
             assert args == [
                 "codex",
                 "exec",
+                CODEX_YOLO_FLAG,
                 "hello",
                 "--json",
                 "--skip-git-repo-check",
