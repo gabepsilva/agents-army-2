@@ -19,8 +19,9 @@ from backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Forks whatever session the same command line names; opencode rejects it on
-# its own if neither --session nor --continue is there.
+# Forks whatever session the same command line names, so it is only ever
+# emitted next to the `--session` a resume already carries; opencode itself
+# rejects it with neither `--session` nor `--continue`.
 FORK_FLAG = "--fork"
 
 
