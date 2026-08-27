@@ -97,7 +97,13 @@ def index_skills(root: Path) -> dict[str, list[Path]]:
 
 
 def resolve_skills(names: list[str], root: Path) -> list[tuple[str, Path]]:
-    """Resolve each name to exactly one file under `root`, in given order."""
+    """Resolve each name to exactly one file under `root`, in given order.
+
+    An unknown name names `root`: with two catalogs in the ladder, "which
+    directory was searched" is the answer the user needs — a checkout with
+    its own `SKILLS/` shadows the root catalog, and saying so makes that
+    self-explaining.
+    """
     catalog = index_skills(root)
     resolved: list[tuple[str, Path]] = []
     for name in names:
@@ -106,9 +112,9 @@ def resolve_skills(names: list[str], root: Path) -> list[tuple[str, Path]]:
             available = ", ".join(sorted(catalog))
             if available:
                 raise SkillError(
-                    f"unknown skill '{name}'. available skills: {available}"
+                    f"unknown skill '{name}' in {root}. available skills: {available}"
                 )
-            raise SkillError(f"unknown skill '{name}'. no skills found")
+            raise SkillError(f"unknown skill '{name}'. no skills found in {root}")
         if len(matches) > 1:
             listed = "\n".join(f"  {path}" for path in matches)
             raise SkillError(f"skill name '{name}' is not unique:\n{listed}")

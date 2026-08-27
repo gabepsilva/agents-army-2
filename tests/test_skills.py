@@ -300,7 +300,8 @@ class TestResolveSkills:
         with pytest.raises(SkillError, match="unknown skill 'nope'") as excinfo:
             resolve_skills(["nope"], skills_tree)
         assert str(excinfo.value) == (
-            "unknown skill 'nope'. available skills: bar, clash, foo, loose"
+            f"unknown skill 'nope' in {skills_tree}. "
+            "available skills: bar, clash, foo, loose"
         )
 
     def test_unknown_name_in_empty_catalog(self, tmp_path: Path) -> None:
@@ -308,7 +309,7 @@ class TestResolveSkills:
         root.mkdir()
         with pytest.raises(SkillError) as excinfo:
             resolve_skills(["nope"], root)
-        assert str(excinfo.value) == "unknown skill 'nope'. no skills found"
+        assert str(excinfo.value) == f"unknown skill 'nope'. no skills found in {root}"
 
     def test_conflict_lists_every_colliding_path(self, skills_tree: Path) -> None:
         with pytest.raises(SkillError) as excinfo:
