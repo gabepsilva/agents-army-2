@@ -6,6 +6,7 @@ tree to a decision; build (invocation B) turns one converged leaf into an
 approved PR - devin implements and self-reviews, the driver runs make ci,
 the reviewer reads the log, doku posts the user note."""
 
+import fcntl
 import json
 import os
 import re
@@ -64,11 +65,15 @@ if len(sys.argv) != 2:
 ISSUE_URL = sys.argv[1].rstrip("/")
 ISSUE_NUMBER = ISSUE_URL.rsplit("/", 1)[1]
 TEAM = f"issue-{ISSUE_NUMBER}"
-REPO = Path(
-    sh("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
-).parent.name
+MAIN_REPO = str(
+    Path(sh("git", "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
+)
+REPO = Path(MAIN_REPO).name
+ORIGIN_URL = sh("git", "remote", "get-url", "origin")
 TEAMS_DIR = Path.home() / ".agents-army" / REPO / "gdw-v5"
-WORKTREE = TEAMS_DIR / TEAM / "worktree"
+# A full clone, so concurrent runs share no git state. The path must keep the
+# name "worktree": --team resolves the agents' workdir as <team>/worktree.
+CLONE = TEAMS_DIR / TEAM / "worktree"
 LOG_DIR = TEAMS_DIR / "logs" / f"issue-{ISSUE_NUMBER}" / time.strftime("%Y%m%d-%H%M%S")
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 os.environ["AGENTS_ARMY_TEAMS_DIR"] = str(TEAMS_DIR)
@@ -137,30 +142,25 @@ def num(url):
     return url.rsplit("/", 1)[1]
 
 
-def fresh_team_and_worktree():
-    """Per issue: a fresh team and a fresh worktree from origin/master; stale
-    leftovers from a dead run are deleted before the first talk."""
-    subprocess.run(
-        ["git", "worktree", "remove", "--force", str(WORKTREE)], capture_output=True
-    )
-    sh("git", "worktree", "prune")
+def fresh_team_and_clone():
+    """Per issue: a fresh team and a fresh clone at origin/master. Cloning the
+    local repo hardlinks its objects, then origin is repointed at the real
+    remote; stale leftovers from a dead run are deleted before the first
+    talk."""
     shutil.rmtree(TEAMS_DIR / TEAM, ignore_errors=True)
-    sh("git", "fetch", "origin")
-    if subprocess.run(
-        ["git", "worktree", "add", "--detach", str(WORKTREE), "origin/master"]
-    ).returncode:
-        print(f"Could not create the worktree at {WORKTREE}.", file=sys.stderr)
+    if subprocess.run(["git", "clone", "--quiet", MAIN_REPO, str(CLONE)]).returncode:
+        print(f"Could not clone {MAIN_REPO} at {CLONE}.", file=sys.stderr)
         sys.exit(5)
+    sh("git", "-C", str(CLONE), "remote", "set-url", "origin", ORIGIN_URL)
+    sh("git", "-C", str(CLONE), "fetch", "origin")
+    sh("git", "-C", str(CLONE), "checkout", "-q", "--detach", "origin/master")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Issue {ISSUE_NUMBER} in {REPO}. Agent output goes to {LOG_DIR}")
 
 
-def cleanup():  # Y - the team and worktree die with the run; logs are kept
-    print("Cleaning up the team and worktree - logs are kept.")
+def cleanup():  # Y - the team and clone die with the run; logs are kept
+    print("Cleaning up the team and clone - logs are kept.")
     sh("uv", "run", "orchestrator", "delete", "--team", TEAM)
-    subprocess.run(
-        ["git", "worktree", "remove", "--force", str(WORKTREE)], capture_output=True
-    )
     shutil.rmtree(TEAMS_DIR / TEAM, ignore_errors=True)
 
 
@@ -277,7 +277,7 @@ def tree_summary():  # SUMM - doku's plan of record on the root, only if anythin
 
 
 def plan():  # Invocation A - BFS the tree, debate every leaf, then die
-    fresh_team_and_worktree()
+    fresh_team_and_clone()
     prime()
     queue, taken, split_any = [ISSUE_URL], 0, False  # PQ
     while queue:  # NEXT
@@ -332,7 +332,12 @@ def find_draft_pr():
             "url,body,headRefName",
         )
     )
-    hits = [pr for pr in prs if re.search(rf"(#|issues/){ISSUE_NUMBER}\b", pr["body"])]
+    hits = [
+        pr
+        for pr in prs
+        if re.search(rf"(#|issues/){ISSUE_NUMBER}\b", pr["body"])
+        or re.search(rf"\b{ISSUE_NUMBER}\b", pr["headRefName"])
+    ]
     return (hits[0]["url"], hits[0]["headRefName"]) if hits else None
 
 
@@ -356,13 +361,13 @@ def reuse_or_open_draft_pr():  # BUILD0 - never create a second PR when one exis
         sys.exit(2)
     pr_url, branch = pr
     print(f"Draft PR {pr_url} on branch {branch}")
-    sh("git", "-C", str(WORKTREE), "fetch", "origin")
+    sh("git", "-C", str(CLONE), "fetch", "origin")
     if subprocess.run(
-        ["git", "-C", str(WORKTREE), "checkout", "-q", "-B", branch, f"origin/{branch}"]
+        ["git", "-C", str(CLONE), "checkout", "-q", "-B", branch, f"origin/{branch}"]
     ).returncode:
-        print(f"Could not check out {branch} in the worktree.", file=sys.stderr)
+        print(f"Could not check out {branch} in the clone.", file=sys.stderr)
         sys.exit(5)
-    return pr_url, branch
+    return pr_url
 
 
 def implement(pr_url):  # Q - the PR description is the whole spec
@@ -382,11 +387,11 @@ def self_review(pr_url):  # R - one self-review, then mark ready
 
 
 def require_committed_and_pushed(pr_url):  # exit 8 - never rely on unpushed work
-    dirty = sh("git", "-C", str(WORKTREE), "status", "--porcelain")
+    dirty = sh("git", "-C", str(CLONE), "status", "--porcelain")
     if dirty:
-        print(f"Devin left uncommitted work in {WORKTREE}:\n{dirty}", file=sys.stderr)
+        print(f"Devin left uncommitted work in {CLONE}:\n{dirty}", file=sys.stderr)
         sys.exit(8)
-    local = sh("git", "-C", str(WORKTREE), "rev-parse", "HEAD")
+    local = sh("git", "-C", str(CLONE), "rev-parse", "HEAD")
     remote = sh(
         "gh", "pr", "view", pr_url, "--json", "headRefOid", "--jq", ".headRefOid"
     )
@@ -400,16 +405,51 @@ def require_committed_and_pushed(pr_url):  # exit 8 - never rely on unpushed wor
 
 def run_make_ci():  # S - the driver owns make ci; reviewers read the log
     ci_log = LOG_DIR / f"ci-{len(CI_RUNS) + 1}.log"
-    ci_head = sh("git", "-C", str(WORKTREE), "rev-parse", "HEAD")
+    ci_head = sh("git", "-C", str(CLONE), "rev-parse", "HEAD")
     CI_RUNS.append({"head": ci_head, "log": ci_log})
     print(f"Running 'make ci' (run {len(CI_RUNS)}) on {ci_head} - log: {ci_log}")
-    with open(ci_log, "wb") as out:
+    with open(TEAMS_DIR / "ci.lock", "w") as turn, open(ci_log, "wb") as out:
+        fcntl.flock(turn, fcntl.LOCK_EX)  # one make ci at a time machine-wide
         return (
             subprocess.run(
-                ["make", "-C", str(WORKTREE), "ci"], stdout=out, stderr=out
+                ["make", "-C", str(CLONE), "ci"], stdout=out, stderr=out
             ).returncode
             == 0
         )
+
+
+def sync_with_master(pr_url):
+    """The stale-base gate: local make ci is only authoritative when the
+    branch contains current origin/master - parallel runs move master under
+    each other. A clean merge is the driver's; conflicts are devin's. Returns
+    True when the base moved, telling the caller to re-run CI."""
+    sh("git", "-C", str(CLONE), "fetch", "origin")
+    master = sh("git", "-C", str(CLONE), "rev-parse", "origin/master")
+    is_current = [
+        "git",
+        "-C",
+        str(CLONE),
+        "merge-base",
+        "--is-ancestor",
+        master,
+        "HEAD",
+    ]
+    if not subprocess.run(is_current).returncode:
+        return False
+    print("master moved under the branch. Merging origin/master.")
+    if subprocess.run(
+        ["git", "-C", str(CLONE), "merge", "--no-edit", "origin/master"]
+    ).returncode:
+        sh("git", "-C", str(CLONE), "merge", "--abort")
+        print("The merge conflicts. Devin: merging origin/master.")
+        talk("devin", prompt("devin-master-merge", pr_url=pr_url))
+        require_committed_and_pushed(pr_url)
+        if subprocess.run(is_current).returncode:
+            print("The branch still lacks origin/master.", file=sys.stderr)
+            sys.exit(10)
+    else:
+        sh("git", "-C", str(CLONE), "push", "origin", "HEAD")
+    return True
 
 
 def ci_gate(pr_url):  # S -> fail -> T (one repair) -> S; a second failure is exit 7
@@ -457,10 +497,10 @@ def review_rounds(pr_url):  # U -> blockers -> V -> (new commit -> S | pushback 
         if review_round == 3:
             break
         print("Devin: addressing the review feedback.")
-        old_head = sh("git", "-C", str(WORKTREE), "rev-parse", "HEAD")
+        old_head = sh("git", "-C", str(CLONE), "rev-parse", "HEAD")
         talk("devin", prompt("devin-review-response", pr_url=pr_url))
         require_committed_and_pushed(pr_url)
-        if sh("git", "-C", str(WORKTREE), "rev-parse", "HEAD") != old_head:
+        if sh("git", "-C", str(CLONE), "rev-parse", "HEAD") != old_head:
             ci_gate(pr_url)  # a pushback without a commit goes straight back to U
     print("PR not approved after 3 review rounds.", file=sys.stderr)
     sys.exit(3)  # FAIL3
@@ -472,8 +512,8 @@ def user_note(pr_url):  # X - doku's user-facing note on the PR
 
 
 def build():  # Invocation B - one converged leaf to an approved PR
-    fresh_team_and_worktree()
-    pr_url, branch = reuse_or_open_draft_pr()  # BUILD0
+    fresh_team_and_clone()
+    pr_url = reuse_or_open_draft_pr()  # BUILD0
     implement(pr_url)  # Q
     self_review(pr_url)  # R
     if (
@@ -487,23 +527,28 @@ def build():  # Invocation B - one converged leaf to an approved PR
         )
         sys.exit(6)  # DR - still draft
     require_committed_and_pushed(pr_url)
+    sync_with_master(pr_url)  # SY - the spec was written against an older master
     ci_gate(pr_url)  # S and T
     review_rounds(pr_url)  # U and V, approval sets W's label
+    if sync_with_master(pr_url):  # SY2 - master moved during review: one re-gate
+        ci_gate(pr_url)
+        if sync_with_master(pr_url):
+            print("master moved again during the re-gate.", file=sys.stderr)
+            sys.exit(10)
     user_note(pr_url)  # X
     cleanup()  # Y
-    subprocess.run(["git", "branch", "-q", "-D", branch], capture_output=True)
     print(f"Done. {pr_url} is approved and ready for merge.")
     sys.exit(0)  # DONE
 
 
 # --- The story, top to bottom ------------------------------------------------
 
-dirty = sh("git", "status", "--porcelain")
-if dirty:
-    print(
-        f"Uncommitted changes in {os.getcwd()} - commit or stash them first:\n{dirty}",
-        file=sys.stderr,
-    )
+TEAMS_DIR.mkdir(parents=True, exist_ok=True)
+RUN_LOCK = (TEAMS_DIR / f"{TEAM}.lock").open("w")  # held until this process dies
+try:
+    fcntl.flock(RUN_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print(f"Issue {ISSUE_NUMBER} already has a run in flight.", file=sys.stderr)
     sys.exit(4)
 
 labels = issue_labels(ISSUE_URL)  # ROUTE - the labels decide the invocation

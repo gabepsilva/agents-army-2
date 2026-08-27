@@ -33,10 +33,21 @@ given rather than silently coming out as the primer.
 
 ## Operational contracts (carried over from v4, all load-bearing)
 
-- Refuse to start on a dirty checkout (exit 4).
-- Per issue: a fresh team and a fresh worktree from `origin/master`; delete
-  any stale team and worktree from a dead run before the first talk.
-- Run-state vs record: teams and worktrees die with the run; logs go to
+- One run per issue: a non-blocking flock on `<teams-dir>/<team>.lock`, held
+  for the process lifetime; a second run on the same issue exits 4.
+- Per issue: a fresh team and a fresh full *clone* at `origin/master`, placed
+  at `<team>/worktree` (the path `--team` resolves as the workdir) so
+  concurrent runs share no git state. Clone the local repo (hardlinked
+  objects), repoint `origin` at the real remote, fetch, detach at
+  `origin/master`; delete any stale team and clone from a dead run first.
+- The stale-base gate: before the first `make ci` and again after approval,
+  fetch and — if `origin/master` is no longer an ancestor of HEAD — merge it
+  in. The driver merges and pushes when clean; devin resolves conflicts.
+  Unresolved, or master moving again after the one post-approval re-gate, is
+  exit 10.
+- `make ci` runs under a blocking flock on `<teams-dir>/ci.lock`: one CI at a
+  time machine-wide, so parallel runs never fight for cores.
+- Run-state vs record: teams and clones die with the run; logs go to
   `~/.agents-army/<repo>/gdw-v5/logs/issue-N/<timestamp>/` — one file per
   agent, `ci-N.log` for the driver's CI runs — and are never deleted.
 - Prompts are rendered from `prompts/*.md` substituting ONLY these variables:
@@ -54,13 +65,14 @@ given rather than silently coming out as the primer.
   `-s implement,tdd,code-review-and-quality`; the reviewer's first talk
   carries `-s code-review-and-quality`; skills are never re-sent.
 - Before relying on devin's work, verify he committed and pushed: clean
-  worktree AND local HEAD == the PR's `headRefOid` (exit 8 otherwise).
+  checkout AND local HEAD == the PR's `headRefOid` (exit 8 otherwise).
 - A failed `make ci` gets exactly one devin repair pass, then one re-run.
 - A PR still in draft after the self-review is a deliberate stop (exit 6):
   devin found a false assumption and commented on the PR. Do not retry.
-- Find the PR with `gh pr list --draft` filtering bodies for the issue
-  reference; poll up to 6 × 5 s (read-after-write lag). Never create a second
-  PR when one exists.
+- Find the PR with `gh pr list --draft`, matching the issue reference in the
+  body or the issue number in the head branch name (a body edit must not
+  blind discovery); poll up to 6 × 5 s (read-after-write lag). Never create a
+  second PR when one exists.
 - Exit codes: the exact table at the bottom of flow.md.
 
 ## Coding rules (as binding as the diagram)
