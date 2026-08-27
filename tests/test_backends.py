@@ -2601,9 +2601,7 @@ class TestOrchestrator:
         with pytest.raises(TypeError, match="runtime_paths"):
             constructor()
 
-    def test_runtime_paths_are_a_construction_snapshot(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_runtime_paths_are_a_construction_snapshot(self, tmp_path: Path) -> None:
         workdir = tmp_path / "workdir"
         skills_dir = tmp_path / "skills"
         snapshot = runtime_paths(
@@ -2614,11 +2612,23 @@ class TestOrchestrator:
         )
         orch = Orchestrator(snapshot)
 
-        monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path / "other-workdir")
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "other-skills")
-
         assert orch.runtime_paths is snapshot
         assert orch.spawn("agent", "echo").workdir == workdir
+
+    def test_an_explicit_state_file_overrides_the_runtime_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        runtime_state_file = tmp_path / "runtime-state.json"
+        explicit_state_file = tmp_path / "explicit-state.json"
+        orch = Orchestrator(
+            runtime_paths(tmp_path, state_file=runtime_state_file),
+            state_file=explicit_state_file,
+        )
+
+        orch.spawn("agent", "echo")
+
+        assert explicit_state_file.is_file()
+        assert not runtime_state_file.exists()
 
     def test_validated_opencode_turn_warns_once_about_cli_schema_enforcement(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

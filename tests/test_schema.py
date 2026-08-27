@@ -1080,14 +1080,12 @@ class TestTalkSchema:
         self,
         orch: Orchestrator,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         calls = _scripted([json.dumps(CONFORMING)])
         skills = tmp_path / "SKILLS" / "tdd"
         skills.mkdir(parents=True)
         (skills / "SKILL.md").write_text("# tdd\n", encoding="utf-8")
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "SKILLS")
         _cmd_talk(
             orch,
             _talk_options(
