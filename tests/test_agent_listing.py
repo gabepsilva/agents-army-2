@@ -43,6 +43,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -91,6 +92,7 @@ def _scripted(replies: list[str], name: str = "scripted") -> list[dict]:
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             calls.append({"prompt": prompt, "session_id": session_id})
             reply = queued.pop(0)

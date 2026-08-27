@@ -41,6 +41,7 @@ class RecordingBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="recording-sid", reply=prompt, raw="")
 

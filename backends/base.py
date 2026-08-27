@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import codecs
+import io
 import json
+import locale
 import logging
+import os
+import select
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, cast
 
 # One turn's wall-clock ceiling, shared by every backend and by the
 # orchestrator that budgets a retry loop against it. A per-backend literal
@@ -25,6 +33,13 @@ from pathlib import Path
 DEFAULT_TURN_TIMEOUT = 3600
 
 log = logging.getLogger(__name__)
+
+_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+def _default_text_encoding() -> str:
+    """Return the encoding used by ``subprocess``'s implicit text mode."""
+    return "utf-8" if sys.flags.utf8_mode else locale.getencoding()
 
 
 class TurnError(RuntimeError):
@@ -61,6 +76,257 @@ def describe_command(args: list[str], prompt: str) -> str:
     return " ".join(rendered)
 
 
+class _StreamCapture:
+    """Decode one nonblocking child pipe with text-mode newline semantics."""
+
+    def __init__(self, *, echo_lines: bool) -> None:
+        decoder = codecs.getincrementaldecoder(_default_text_encoding())(
+            errors="strict"
+        )
+        self._decoder = io.IncrementalNewlineDecoder(decoder, translate=True)
+        self._echo_lines = echo_lines
+        self._raw_chunks: list[bytes] = []
+        self._chunks: list[str] = []
+        self._line_buffer = ""
+
+    def feed(self, data: bytes) -> None:
+        self._raw_chunks.append(data)
+        self._append(self._decoder.decode(data, final=False))
+
+    def finish(self) -> str:
+        self._append(self._decoder.decode(b"", final=True))
+        return self.text
+
+    @property
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+    @property
+    def raw(self) -> bytes | None:
+        """Return captured bytes in the shape used by timeout exceptions."""
+        return b"".join(self._raw_chunks) or None
+
+    def _append(self, text: str) -> None:
+        if not text:
+            return
+        self._chunks.append(text)
+        if not self._echo_lines:
+            return
+        self._line_buffer += text
+        while "\n" in self._line_buffer:
+            line, self._line_buffer = self._line_buffer.split("\n", 1)
+            sys.stderr.write(f"{line}\n")
+            sys.stderr.flush()
+
+
+def _drain_pipe(pipe: BinaryIO, capture: _StreamCapture) -> bool:
+    """Read all currently available bytes, returning whether EOF was seen."""
+    file_descriptor = pipe.fileno()
+    while True:
+        try:
+            data = os.read(file_descriptor, _STREAM_CHUNK_SIZE)
+        except BlockingIOError:
+            return False
+        except InterruptedError:
+            continue
+        if not data:
+            return True
+        capture.feed(data)
+
+
+def _reap_after_failure(proc: subprocess.Popen[bytes]) -> None:
+    """Stop a streaming child and wait for it, including after a timeout."""
+    if proc.poll() is None:
+        with suppress(ProcessLookupError):
+            proc.kill()
+    proc.wait()
+
+
+def _stream_cli_turn(
+    name: str,
+    args: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    prompt_on_stdin: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run a child while draining all pipes against one absolute deadline."""
+    return _StreamingTurn(
+        name,
+        args,
+        prompt=prompt,
+        cwd=cwd,
+        timeout=timeout,
+        prompt_on_stdin=prompt_on_stdin,
+    ).run()
+
+
+class _StreamingTurn:
+    """Own a streaming child and the state needed to pump its three pipes."""
+
+    def __init__(
+        self,
+        name: str,
+        args: list[str],
+        *,
+        prompt: str,
+        cwd: Path,
+        timeout: int,
+        prompt_on_stdin: bool,
+    ) -> None:
+        self.name = name
+        self.args = args
+        self.timeout = timeout
+        self.started = time.monotonic()
+        self.deadline = self.started + timeout
+        self.proc = subprocess.Popen(
+            args,
+            cwd=str(cwd),
+            stdin=subprocess.PIPE if prompt_on_stdin else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        stdin_pipe = self.proc.stdin
+        stdout_pipe = self.proc.stdout
+        stderr_pipe = self.proc.stderr
+        if stdout_pipe is None or stderr_pipe is None:
+            _reap_after_failure(self.proc)
+            raise RuntimeError("streaming child did not expose output pipes")
+        self.stdin_pipe: BinaryIO | None = cast(BinaryIO, stdin_pipe)
+        self.stdout_pipe: BinaryIO = cast(BinaryIO, stdout_pipe)
+        self.stderr_pipe: BinaryIO = cast(BinaryIO, stderr_pipe)
+        self.stdout_capture = _StreamCapture(echo_lines=True)
+        self.stderr_capture = _StreamCapture(echo_lines=False)
+        self.stdout_fd = self._nonblocking(self.stdout_pipe)
+        self.stderr_fd = self._nonblocking(self.stderr_pipe)
+        self.pending_input = prompt.encode(_default_text_encoding())
+        self.input_offset = 0
+        self.stdin_fd: int | None = None
+        if self.stdin_pipe is not None:
+            self.stdin_fd = self._nonblocking(self.stdin_pipe)
+            if not self.pending_input:
+                self._close_stdin()
+
+    @staticmethod
+    def _nonblocking(pipe: BinaryIO) -> int:
+        file_descriptor = pipe.fileno()
+        os.set_blocking(file_descriptor, False)
+        return file_descriptor
+
+    def run(self) -> subprocess.CompletedProcess[str]:
+        try:
+            self._pump()
+            return self._complete()
+        except BaseException:
+            _reap_after_failure(self.proc)
+            raise
+        finally:
+            for pipe in (self.stdin_pipe, self.stdout_pipe, self.stderr_pipe):
+                if pipe is not None:
+                    pipe.close()
+
+    def _pump(self) -> None:
+        while self._has_open_pipes():
+            readable, writable = self._wait_for_ready()
+            self._read_ready(readable)
+            self._write_ready(writable)
+
+    def _has_open_pipes(self) -> bool:
+        return (
+            self.stdout_fd is not None
+            or self.stderr_fd is not None
+            or self.stdin_fd is not None
+        )
+
+    def _wait_for_ready(self) -> tuple[list[int], list[int]]:
+        while True:
+            remaining = self._remaining()
+            if remaining <= 0:
+                raise self._timeout()
+            readable = [fd for fd in (self.stdout_fd, self.stderr_fd) if fd is not None]
+            writable = [self.stdin_fd] if self.stdin_fd is not None else []
+            try:
+                ready_read, ready_write, _ = select.select(
+                    readable, writable, [], remaining
+                )
+            except InterruptedError:
+                continue
+            return ready_read, ready_write
+
+    def _read_ready(self, readable: list[int]) -> None:
+        if (
+            self.stdout_fd is not None
+            and self.stdout_fd in readable
+            and _drain_pipe(self.stdout_pipe, self.stdout_capture)
+        ):
+            self._close_stdout()
+        if (
+            self.stderr_fd is not None
+            and self.stderr_fd in readable
+            and _drain_pipe(self.stderr_pipe, self.stderr_capture)
+        ):
+            self._close_stderr()
+
+    def _write_ready(self, writable: list[int]) -> None:
+        if self.stdin_fd is None or self.stdin_fd not in writable:
+            return
+        try:
+            written = os.write(self.stdin_fd, self.pending_input[self.input_offset :])
+        except (BrokenPipeError, ConnectionResetError):
+            self._close_stdin()
+            return
+        self.input_offset += written
+        if self.input_offset == len(self.pending_input):
+            self._close_stdin()
+
+    def _complete(self) -> subprocess.CompletedProcess[str]:
+        remaining = self._remaining()
+        if remaining <= 0:
+            raise self._timeout()
+        try:
+            returncode = self.proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise self._timeout() from None
+        stdout = self.stdout_capture.finish()
+        stderr = self.stderr_capture.finish()
+        log.debug(
+            "%s turn: exited %d after %.1fs with %d chars of stdout",
+            self.name,
+            returncode,
+            time.monotonic() - self.started,
+            len(stdout),
+        )
+        return subprocess.CompletedProcess(
+            self.args, returncode, stdout=stdout, stderr=stderr
+        )
+
+    def _remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def _timeout(self) -> subprocess.TimeoutExpired:
+        return subprocess.TimeoutExpired(
+            self.args,
+            self.timeout,
+            output=self.stdout_capture.raw,
+            stderr=self.stderr_capture.raw,
+        )
+
+    def _close_stdin(self) -> None:
+        if self.stdin_pipe is not None:
+            self.stdin_pipe.close()
+        self.stdin_fd = None
+
+    def _close_stdout(self) -> None:
+        self.stdout_pipe.close()
+        self.stdout_fd = None
+
+    def _close_stderr(self) -> None:
+        self.stderr_pipe.close()
+        self.stderr_fd = None
+
+
 # The argument count is the boundary's own: every value below is something
 # subprocess.run or the log line needs, and bundling them into an options
 # object would add a type for four call sites to construct and nothing else.
@@ -77,6 +343,7 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     cwd: Path,
     timeout: int,
     prompt_on_stdin: bool = False,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one backend's already-built argv and log the turn around it.
 
@@ -93,6 +360,11 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     before sending them to the model: omitting that argument makes its
     no-value fallback read stdin verbatim, preserving spaces, quotes, and
     newlines.
+
+    With `stream`, the child is drained through nonblocking pipes and complete
+    stdout lines are copied to the parent's flushed stderr as they arrive.
+    The returned text remains captured and is decoded with the same text-mode
+    newline rules as the non-streaming path.
     """
     log.debug(
         "%s turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
@@ -103,6 +375,15 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
         timeout,
     )
     log.debug("%s turn: invoking %s", name, describe_command(args, prompt))
+    if stream:
+        return _stream_cli_turn(
+            name,
+            args,
+            prompt=prompt,
+            cwd=cwd,
+            timeout=timeout,
+            prompt_on_stdin=prompt_on_stdin,
+        )
     # The two arms differ only in the stdin kwarg, spelled out at each call
     # because subprocess.run is overloaded on it and an unpacked mapping
     # leaves the type checker no overload to pick.
@@ -273,7 +554,7 @@ class AgentBackend(ABC):
         ...
 
     @abstractmethod
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - flat backend interface, see run_cli_turn
         self,
         prompt: str,
         session_id: str | None,
@@ -282,6 +563,7 @@ class AgentBackend(ABC):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         """Start (session_id=None) or resume (session_id set) a CLI session with
         `prompt` in directory `cwd` and return the model's text reply along with
@@ -302,6 +584,10 @@ class AgentBackend(ABC):
         shipped backend forks; a third-party backend that leaves
         `supports_fork` False owes callers its own `TurnError` here rather
         than a silently unforked turn.
+
+        `stream` opts into forwarding complete stdout lines to the parent
+        process's stderr while the child is still running. It defaults off so
+        the established `subprocess.run` transport remains unchanged.
         """
         ...
 

@@ -70,6 +70,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -721,6 +722,7 @@ class TestTalkSkills:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

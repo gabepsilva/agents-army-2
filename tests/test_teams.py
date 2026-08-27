@@ -40,6 +40,7 @@ def _make_recording_backend(sink: list[Path]) -> type[AgentBackend]:
             schema=None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             sink.append(cwd)
             return TurnResult(
@@ -287,6 +288,7 @@ def test_chat_uses_the_team_registry_and_worktree(
             schema=None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             raise AssertionError("team chat test must not run a headless turn")
 
@@ -606,6 +608,7 @@ def test_fork_team_writes_the_copy_into_that_teams_registry(
             schema=None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             return TurnResult(session_id="team-sid", reply="ok", raw="")
 
@@ -927,6 +930,7 @@ def _make_blocking_backend() -> type[AgentBackend]:
             schema=None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             raise BlockingIOError(
                 errno.EAGAIN, "write could not complete without blocking"
@@ -985,6 +989,7 @@ def test_a_boundary_caught_error_releases_the_team_lock(
             schema=None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             raise TurnError("cli failed")
 

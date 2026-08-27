@@ -53,6 +53,7 @@ class ForkingBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         ForkingBackend.turns.append((prompt, session_id, resume_as_fork))
         if resume_as_fork:
@@ -195,6 +196,7 @@ def test_a_fork_the_cli_did_not_perform_is_refused_instead_of_aliased(
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             super().run_turn(
                 prompt, session_id, cwd, timeout, schema, resume_as_fork=resume_as_fork

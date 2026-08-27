@@ -24,6 +24,7 @@ class RecordingBackend(AgentBackend):
         schema=None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="sid", reply=f"reply:{prompt}", raw="")
 
@@ -70,7 +71,7 @@ def test_chat_help_exposes_only_the_interactive_agent_selection(
     assert "--timeout" not in output
 
 
-def test_talk_forwards_schema_retries_timeout_and_short_options(
+def test_talk_forwards_schema_retries_timeout_stream_and_short_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -124,6 +125,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
             "2",
             "--timeout",
             "30",
+            "--stream",
             "-p",
             "question",
         ]
@@ -133,7 +135,23 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
     assert fake.calls[0][1]["schema"].path == schema_path.resolve()
     assert fake.calls[0][1]["retries"] == 2
     assert fake.calls[0][1]["timeout"] == 30
+    assert fake.calls[0][1]["stream"] is True
     assert capsys.readouterr().out.endswith('{\n  "ok": true\n}\n')
+
+
+def test_stream_flag_defaults_off_and_describes_its_stderr_contract(capsys) -> None:
+    parser = orchestrator._build_parser()
+    defaults = parser.parse_args(["talk", "a", "-p", "x"])
+    assert defaults.stream is False
+
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["talk", "--help"])
+
+    assert excinfo.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--stream" in help_text
+    assert "echo complete CLI output lines to stderr while the" in help_text
+    assert "turn runs" in help_text
 
 
 @pytest.mark.parametrize(

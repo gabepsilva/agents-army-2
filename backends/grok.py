@@ -118,7 +118,7 @@ class GrokBackend(AgentBackend):
         log.debug("grok chat: cwd=%s session=%s", cwd, session_id)
         return ["grok", "--resume", session_id]
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - mirrors AgentBackend's flat interface
         self,
         prompt: str,
         session_id: str | None,
@@ -127,6 +127,7 @@ class GrokBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         # --session-id names a *new* session only and errors if that id
         # already exists. Resume is --resume.
@@ -150,6 +151,7 @@ class GrokBackend(AgentBackend):
             session_id=session_id,
             cwd=cwd,
             timeout=timeout,
+            stream=stream,
         )
         if proc.returncode != 0:
             raise GrokTurnError(

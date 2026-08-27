@@ -75,7 +75,9 @@ max-args = 6
 [tool.ruff.lint.per-file-ignores]
 # Fakes here mirror subprocess.run's real signature (args, **kwargs); the
 # unused parameters are the point, not an oversight.
-"tests/**/*.py" = ["ARG001", "ARG002"]
+# They also mirror AgentBackend.run_turn's flat public signature, including
+# stream, so the doubles remain substitutable without hiding production lint.
+"tests/**/*.py" = ["ARG001", "ARG002", "PLR0913"]
 
 [tool.pytest.ini_options]
 # Prefer the checkout over a leftover site-packages copy so tests exercise
@@ -125,6 +127,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_schema.py",
     "tests/test_skills.py",
     "tests/test_state_round_trip.py",
+    "tests/test_streaming.py",
     "tests/test_teams.py",
 ]
 pytest_add_cli_args = ["--no-cov", "-p", "no:cacheprovider", "-n0"]

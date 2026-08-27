@@ -152,6 +152,7 @@ def _scripted(
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             calls.append(
                 {
@@ -1066,6 +1067,7 @@ class TestTalkSchema:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

@@ -202,6 +202,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -243,6 +244,7 @@ def _gate_backend(
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             entered.set()
             release.wait(timeout=5)
@@ -579,6 +581,7 @@ class TestAgentBackendInterface:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(session_id="custom-sid", reply=prompt, raw="")
 
@@ -2646,6 +2649,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2686,6 +2690,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2715,6 +2720,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(prompt)
                 return TurnResult(session_id="s1", reply="{}", raw="", structured={})
@@ -2742,6 +2748,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return TurnResult(
                     session_id="s1",
@@ -2792,6 +2799,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen_session_ids.append(session_id)
                 return TurnResult(session_id="persist-me", reply="reply", raw="")
@@ -2958,6 +2966,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise AssertionError("chat test must not run a headless turn")
 
@@ -3183,6 +3192,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 seen.append(session_id)
                 return TurnResult(session_id="sid", reply="r", raw="")
@@ -3229,6 +3239,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 Orchestrator(runtime_paths(tmp_path, state_file=state_file)).spawn(
                     "b", "echo"
@@ -3264,6 +3275,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 probe = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
                 held.append(
@@ -3311,6 +3323,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 return next(replies)
 
@@ -3366,6 +3379,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 Orchestrator(runtime_paths(tmp_path, state_file=state_file)).delete("a")
                 return TurnResult(session_id="s1", reply="ok", raw="")
@@ -3469,6 +3483,7 @@ class TestOrchestrator:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 # Runs with the outer talk() holding the agent lock, so this
                 # delete's own reclaim probe backs off (BlockingIOError,
@@ -3782,6 +3797,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise AssertionError("chat test must not run a headless turn")
 
@@ -3990,6 +4006,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 
@@ -4023,6 +4040,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise CodexTurnError("codex did not report a thread_id")
 
@@ -4056,6 +4074,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise TurnError("cli failed")
 
@@ -4102,6 +4121,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise incidental(message)
 
@@ -4133,6 +4153,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise GrokTurnError("grok did not report a sessionId")
 
@@ -4723,6 +4744,7 @@ class TestCLI:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise KeyError("some internal dict key")
 
