@@ -76,8 +76,8 @@ os.environ["AGENTS_ARMY_TEAMS_DIR"] = str(TEAMS_DIR)
 # line here to move that agent to another backend, model, or effort.
 PRIMER = {"backend": "claude", "model": "opus", "effort": "medium"}
 OWEN = {"backend": "claude", "model": "opus", "effort": "medium"}
-SPECTACLE = {"backend": "opencode", "model": "opencode/gpt-5.6-luna", "effort": "max"}
-DEVIN = {"backend": "opencode", "model": "opencode/gpt-5.6-luna", "effort": "max"}
+SPECTACLE = {"backend": "codex", "model": "gpt-5.6-luna", "effort": "max"}
+DEVIN = {"backend": "codex", "model": "gpt-5.6-luna", "effort": "max"}
 CODE_REVIEWER = {"backend": "claude", "model": "opus", "effort": "high"}
 # DOKU = {"backend": "claude", "model": "opus", "effort": "medium"}
 DOKU = {
