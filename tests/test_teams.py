@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 from backends.base import AgentBackend, TurnError, TurnResult
 from backends.registry import register_backend
 from orchestrator import paths, teams
@@ -296,7 +297,7 @@ def test_chat_uses_the_team_registry_and_worktree(
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(args, 0)
 
-    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
 
     orchestrator.main(["chat", "a", "--team", "t1"])
 

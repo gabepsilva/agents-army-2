@@ -17,10 +17,11 @@ import backends.claude as claude
 import backends.codex as codex
 import backends.grok as grok
 import backends.opencode as opencode
-import orchestrator
+import orchestrator.core as core
 from backends.base import run_cli_turn
 from backends.registry import get_backend, register_backend
-from orchestrator import Orchestrator, main
+from orchestrator import main
+from orchestrator.core import Orchestrator
 from tests.path_helpers import runtime_paths
 
 
@@ -1377,9 +1378,7 @@ def test_agent_forwards_turn_arguments_and_keeps_stream_opt_in(
     tmp_path: Path,
 ) -> None:
     calls = _scripted_backend("agent-streaming", ["reply"])
-    agent = orchestrator.Agent(
-        "agent", get_backend("agent-streaming"), workdir=tmp_path
-    )
+    agent = core.Agent("agent", get_backend("agent-streaming"), workdir=tmp_path)
     agent.pending_fork_from = "source-session"
 
     result = agent.talk("prompt", timeout=7, stream=True)
@@ -1398,9 +1397,7 @@ def test_agent_forwards_turn_arguments_and_keeps_stream_opt_in(
     ]
 
     default_calls = _scripted_backend("agent-default", ["reply"])
-    default_agent = orchestrator.Agent(
-        "agent", get_backend("agent-default"), workdir=tmp_path
-    )
+    default_agent = core.Agent("agent", get_backend("agent-default"), workdir=tmp_path)
     default_agent.talk("default prompt")
 
     assert default_calls[0]["stream"] is False
@@ -1455,7 +1452,7 @@ def test_talk_stream_flag_reaches_the_orchestrator(
             return base.TurnResult(session_id="sid", reply="reply", raw="reply")
 
     fake = FakeOrchestrator()
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: fake)
+    monkeypatch.setattr(core, "Orchestrator", lambda *_: fake)
 
     main(["talk", "agent", "--stream", "-p", "prompt"])
     main(["talk", "agent", "-p", "prompt"])

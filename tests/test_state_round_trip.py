@@ -21,7 +21,7 @@ from backends.base import (
     TurnResult,
 )
 from backends.registry import UnknownBackendError, register_backend
-from orchestrator import Orchestrator, StateError
+from orchestrator.core import Orchestrator, StateError
 from tests.path_helpers import runtime_paths
 
 
