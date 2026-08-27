@@ -61,6 +61,10 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # Set the wall-clock turn limit for a flag-style invocation
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
+# Fork a primed agent: 'copy' inherits reviewer's backend/model/effort and
+# starts from its session on its own first turn (no turn is spent forking)
+uv run orchestrator fork reviewer copy
+
 # List every agent: registry path, backend, model/effort, turn count,
 # timestamps, busy status, and session id
 uv run orchestrator list

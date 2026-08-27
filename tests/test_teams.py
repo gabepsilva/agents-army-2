@@ -438,13 +438,14 @@ def test_v4_team_with_explicit_home_exits_2_and_creates_nothing(
     )
 
 
-def test_v5_missing_worktree_exits_2_for_create_and_talk_only(
+def test_v5_missing_worktree_exits_2_for_create_talk_and_fork_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Narrowed gate: only create/talk launch a backend and need WORKDIR to
-    exist. list agents/delete NAME just read and edit a JSON file."""
+    """Narrowed gate: only create/talk/fork bind an agent to WORKDIR and so
+    need it to exist. list agents/delete NAME just read and edit a JSON
+    file."""
     teams_dir = tmp_path / "teams"
     worktree = teams_dir / "t1" / "worktree"
     monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
@@ -452,6 +453,7 @@ def test_v5_missing_worktree_exits_2_for_create_and_talk_only(
     for argv, prog in (
         (["create", "a", "--team", "t1", "-b", "claude"], "create"),
         (["talk", "a", "--team", "t1", "-b", "claude", "-p", "hi"], "talk"),
+        (["fork", "a", "b", "--team", "t1"], "fork"),
     ):
         with pytest.raises(SystemExit) as excinfo:
             orchestrator.main(argv)
@@ -527,6 +529,43 @@ def test_delete_by_name_team_succeeds_with_no_worktree(
 
     state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
     assert "dev" not in state
+
+
+def test_fork_team_writes_the_copy_into_that_teams_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`fork --team` must resolve the same registry `talk --team` does, and
+    leave the teamless one alone."""
+
+    class ForkableBackend(AgentBackend):
+        name = "forkable"
+        supports_fork = True
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
+            schema=None,
+            *,
+            resume_as_fork: bool = False,
+        ) -> TurnResult:
+            return TurnResult(session_id="team-sid", reply="ok", raw="")
+
+    register_backend("forkable", ForkableBackend)
+    teams_dir = tmp_path / "teams"
+    _make_team(teams_dir, "t1")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "teamless.json")
+    orchestrator.main(["talk", "primer", "--team", "t1", "-b", "forkable", "-p", "hi"])
+
+    orchestrator.main(["fork", "primer", "copy", "--team", "t1"])
+
+    state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
+    assert state["copy"]["backend"] == "forkable"
+    assert state["copy"]["pending_fork_from"] == "team-sid"
+    assert not (tmp_path / "teamless.json").exists()
 
 
 def test_team_help_text_names_the_layout(capsys: pytest.CaptureFixture[str]) -> None:
