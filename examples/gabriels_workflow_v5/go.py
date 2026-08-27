@@ -40,6 +40,7 @@ def talk(agent, text, *flags):
                 "-v",
                 "--timeout",
                 TIMEOUT,
+                "--stream",
                 *flags,
                 "-p",
                 text,

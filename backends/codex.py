@@ -97,7 +97,7 @@ class CodexBackend(AgentBackend):
         log.debug("codex chat: cwd=%s session=%s", cwd, session_id)
         return ["codex", "resume", session_id]
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - flat backend turn arguments are the public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -106,6 +106,7 @@ class CodexBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         args = ["codex", "exec", YOLO_FLAG]
         if self.model is not None:
@@ -125,6 +126,7 @@ class CodexBackend(AgentBackend):
             session_id=session_id,
             cwd=cwd,
             timeout=timeout,
+            stream=stream,
         )
         if proc.returncode != 0:
             raise CodexTurnError(

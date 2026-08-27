@@ -170,6 +170,8 @@ class Agent:
         prompt: str,
         schema: OutputSchema | None = None,
         timeout: int = DEFAULT_TURN_TIMEOUT,
+        *,
+        stream: bool = False,
     ) -> TurnResult:
         # A pending fork resumes the *source's* session, in a copy: this
         # agent has no session of its own until this turn reports one.
@@ -193,6 +195,7 @@ class Agent:
             timeout,
             schema,
             resume_as_fork=forking,
+            stream=stream,
         )
         elapsed = time.monotonic() - started
         log.info("agent '%s': turn finished in %.1fs", self.name, elapsed)
@@ -570,6 +573,8 @@ class Orchestrator:
         schema: OutputSchema | None = None,
         retries: int = DEFAULT_VALIDATION_RETRIES,
         timeout: int = DEFAULT_TURN_TIMEOUT,
+        *,
+        stream: bool = False,
     ) -> TurnResult:
         """Run one turn against `name`, or, with a schema, as many as it takes.
 
@@ -586,8 +591,10 @@ class Orchestrator:
                     if agent is None:
                         raise AgentNotFoundError(f"no agent named '{name}'")
                 if schema is None:
-                    return self._turn(agent, prompt, None, timeout)
-                return self._validated_turn(agent, prompt, schema, retries, timeout)
+                    return self._turn(agent, prompt, None, timeout, stream)
+                return self._validated_turn(
+                    agent, prompt, schema, retries, timeout, stream
+                )
             except AgentNotFoundError:
                 # We hold this lock and the agent provably does not exist, so
                 # no turn can be running behind it — `_is_live` is always
@@ -655,6 +662,7 @@ class Orchestrator:
         prompt: str,
         schema: OutputSchema | None,
         timeout: int,
+        stream: bool,
     ) -> TurnResult:
         """One turn, with its session id persisted before anything else runs.
 
@@ -663,7 +671,7 @@ class Orchestrator:
         is: it moved the conversation forward whether or not the last reply
         was usable, and resuming from a stale id would replay it.
         """
-        result = agent.talk(prompt, schema, timeout)
+        result = agent.talk(prompt, schema, timeout, stream=stream)
         with self._exclusive():
             self._reload()
             if agent.name not in self.agents:
@@ -689,6 +697,7 @@ class Orchestrator:
         schema: OutputSchema,
         retries: int,
         timeout: int,
+        stream: bool,
     ) -> TurnResult:
         """Talk until the reply satisfies `schema`, the retries run out, or the
         clock does.
@@ -713,7 +722,11 @@ class Orchestrator:
             attempt += 1
             remaining = deadline - time.monotonic()
             result = self._turn(
-                agent, attempt_prompt, schema, max(1, math.ceil(remaining))
+                agent,
+                attempt_prompt,
+                schema,
+                max(1, math.ceil(remaining)),
+                stream,
             )
             try:
                 result.structured = validate_reply(
@@ -1014,6 +1027,7 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
         schema=schema,
         retries=opts.retries,
         timeout=opts.timeout,
+        stream=opts.stream,
     )
     print(f"[{opts.name} session={result.session_id}]")
     if schema is None:
@@ -1352,6 +1366,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
     )
     talk.add_argument("--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT)
+    talk.add_argument(
+        "--stream",
+        action="store_true",
+        help="echo complete child stdout lines to stderr while the turn runs",
+    )
     talk.add_argument("-p", "--prompt")
     talk.add_argument("--prompt-file")
     _add_team_option(talk)
