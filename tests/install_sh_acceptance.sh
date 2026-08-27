@@ -84,16 +84,17 @@ drop_sandbox() {
 	export PATH HOME
 }
 
-# Run the installer in the sandbox with a chosen login shell. Stdout and
-# stderr land in $OUT; the exit status in $STATUS.
+# Run the installer in the sandbox with a chosen login shell -- pass an empty
+# string for an environment that has no $SHELL, as cron and CI often do.
+# Stdout and stderr land in $OUT; the exit status in $STATUS.
 run_installer() {
 	OUT="$SANDBOX/output"
 	export SANDBOX_UNAME="${SANDBOX_UNAME:-Linux}"
 	if [ -n "${SANDBOX_ROOT:-}" ]; then
-		SHELL="${1:-/bin/zsh}" AGENTS_ARMY_ROOT="$SANDBOX_ROOT" \
+		SHELL="${1-/bin/zsh}" AGENTS_ARMY_ROOT="$SANDBOX_ROOT" \
 			sh "$INSTALLER" > "$OUT" 2>&1
 	else
-		SHELL="${1:-/bin/zsh}" sh "$INSTALLER" > "$OUT" 2>&1
+		SHELL="${1-/bin/zsh}" sh "$INSTALLER" > "$OUT" 2>&1
 	fi
 	STATUS=$?
 }
@@ -295,6 +296,41 @@ else
 	ok
 fi
 unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="rc: an empty \$SHELL takes the unrecognised path, it does not abort"
+new_sandbox
+SANDBOX_ROOT="$SANDBOX/root"
+run_installer ""
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0"
+elif ! grep -q 'rc step failed' "$OUT"; then
+	fail "aborted instead of naming the rc step: $(cat "$OUT")"
+elif [ ! -x "$STUB_BIN/aarmy" ] || [ ! -d "$SANDBOX_ROOT/SKILLS/mattpocock" ]; then
+	fail "the CLI and catalog steps did not complete first: $(cat "$OUT")"
+else
+	ok
+fi
+unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="rc: a rewrite that staged nothing does not truncate the rc file"
+new_sandbox
+printf 'keep me\n%s\n%s\n' \
+	'# >>> agents-army install.sh >>>' '# <<< agents-army install.sh <<<' \
+	> "$HOME/.zshrc"
+# An awk that writes nothing stands in for a full disk or a killed pipeline.
+mkdir -p "$SANDBOX/stub"
+printf '#!/usr/bin/env sh\nexit 0\n' > "$SANDBOX/stub/awk"
+chmod +x "$SANDBOX/stub/awk"
+run_installer /bin/zsh
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0"
+elif ! grep -qx 'keep me' "$HOME/.zshrc"; then
+	fail "the rc file was truncated: $(cat "$HOME/.zshrc")"
+else
+	ok
+fi
 drop_sandbox
 
 CASE="rc: a stale block is rewritten in place, lines around it untouched"

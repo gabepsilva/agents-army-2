@@ -41,12 +41,18 @@ command -v uv > /dev/null 2>&1 || fail preflight \
 root=${AGENTS_ARMY_ROOT:-$HOME/.agents-army}
 catalog=$root/SKILLS
 
-
 # The login shell decides the rc file, from a table rather than a heuristic.
 # $SHELL is read on purpose: it names the login shell, whose rc file is the
 # one worth writing, and the shell running this script is not necessarily it.
+# ${SHELL:-} rather than $SHELL: `set -u` would otherwise abort here with
+# "unbound variable" in an environment that has no $SHELL at all -- cron and
+# CI under a /bin/sh that does not set it, which is precisely where the
+# unrecognised-shell path below needs to run.
 rc_file=""
-case "${SHELL##*/}" in
+login_shell=${SHELL:-}
+shell_label=${SHELL:-"(no \$SHELL is set)"}
+login_shell=${login_shell##*/}
+case "$login_shell" in
 	zsh) rc_file=$HOME/.zshrc ;;
 	bash)
 		case "$(uname -s)" in
@@ -64,8 +70,8 @@ printf '  the catalog:  %s\n' "$catalog"
 if [ -n "$rc_file" ]; then
 	printf '  your PATH:    one delimited block in %s\n' "$rc_file"
 else
-	printf '  your PATH:    nothing -- $SHELL (%s) is not in the rc table\n' \
-		"${SHELL:-unset}"
+	printf '  your PATH:    nothing -- %s is not in the rc table\n' \
+		"$shell_label"
 fi
 
 # --- 1. install the CLI ----------------------------------------------------
@@ -144,10 +150,10 @@ if [ -z "$rc_file" ]; then
 	# A skipped step is loud: the CLI and the catalog are installed, but
 	# nothing put them on PATH, so this exits non-zero after saying exactly
 	# what to paste and where.
-	printf '\ninstall.sh: add this block to your login shell'"'"'s rc file:\n\n'
+	printf '\n%s\n\n' "install.sh: add this block to your login shell's rc file:"
 	print_block
 	printf '\n'
-	fail rc "$SHELL is not in the rc table (zsh, or bash on Linux or Darwin), \
+	fail rc "$shell_label is not in the rc table (zsh, or bash on Linux or Darwin), \
 so no rc file was written. Paste the block above instead."
 fi
 
@@ -164,6 +170,15 @@ delete the block by hand; rewriting it from here would risk the rest of the file
 		$0 == end { print; inside = 0; next }
 		!inside
 	' "$rc_file" > "$staged" || fail rc "cannot stage a rewrite of $rc_file"
+	# The rewrite must contain both markers before it is allowed to replace
+	# the file. `cat >` truncates first, so a staged file that came out short
+	# -- a full disk, a killed pipeline -- would otherwise destroy the rc
+	# file rather than leave it as it was.
+	if ! grep -Fq "$BEGIN_MARKER" "$staged" || ! grep -Fq "$END_MARKER" "$staged"; then
+		rm -f "$staged"
+		fail rc "the staged rewrite of $rc_file lost the markers; \
+$rc_file was left untouched."
+	fi
 	# cat rather than mv, so the rc file keeps its inode and permissions.
 	cat "$staged" > "$rc_file" || fail rc "cannot update $rc_file"
 	rm -f "$staged"
