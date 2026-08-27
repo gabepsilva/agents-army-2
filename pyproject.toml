@@ -120,6 +120,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_agent_listing.py",
     "tests/test_backends.py",
     "tests/test_cli_surface.py",
+    "tests/test_fork.py",
     "tests/test_paths.py",
     "tests/test_schema.py",
     "tests/test_skills.py",

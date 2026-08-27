@@ -295,7 +295,7 @@ To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
 
 ### Teams
 
-`--team NAME`, accepted by `create`, `talk`, `list`, and `delete`, runs
+`--team NAME`, accepted by `create`, `talk`, `fork`, `list`, and `delete`, runs
 against a named team instead of the teamless layout above: its own registry,
 its own working directory, isolated from every other team. This is what
 lets two fleets work two different GitHub issues at once without both

@@ -149,6 +149,8 @@ def _scripted(
             cwd: Path,
             timeout: int = DEFAULT_TURN_TIMEOUT,
             schema: OutputSchema | None = None,
+            *,
+            resume_as_fork: bool = False,
         ) -> TurnResult:
             calls.append(
                 {
@@ -1061,6 +1063,8 @@ class TestTalkSchema:
                 cwd: Path,
                 timeout: int = DEFAULT_TURN_TIMEOUT,
                 schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

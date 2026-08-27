@@ -38,6 +38,8 @@ def _make_recording_backend(sink: list[Path]) -> type[AgentBackend]:
             cwd: Path,
             timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
             schema=None,
+            *,
+            resume_as_fork: bool = False,
         ) -> TurnResult:
             sink.append(cwd)
             return TurnResult(
@@ -828,6 +830,8 @@ def _make_blocking_backend() -> type[AgentBackend]:
             cwd: Path,
             timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
             schema=None,
+            *,
+            resume_as_fork: bool = False,
         ) -> TurnResult:
             raise BlockingIOError(
                 errno.EAGAIN, "write could not complete without blocking"
@@ -884,6 +888,8 @@ def test_a_boundary_caught_error_releases_the_team_lock(
             cwd: Path,
             timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
             schema=None,
+            *,
+            resume_as_fork: bool = False,
         ) -> TurnResult:
             raise TurnError("cli failed")
 

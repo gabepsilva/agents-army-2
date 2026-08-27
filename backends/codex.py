@@ -15,6 +15,7 @@ from backends.base import (
     json_objects,
     run_cli_turn,
     structured_reply,
+    unsupported_fork_message,
 )
 
 log = logging.getLogger(__name__)
@@ -82,7 +83,11 @@ class CodexBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
+        if resume_as_fork:
+            raise CodexTurnError(unsupported_fork_message(self.name))
         args = ["codex", "exec"]
         if self.model is not None:
             args += ["--model", self.model]

@@ -42,6 +42,10 @@ OPT_IN_REQUIRED_REASON = "sdk_opt_in_required"
 # value starts with "{", which no argument parser reads as a flag.
 SCHEMA_FLAG = "--json-schema"
 
+# Resumes into a copy of the named session instead of continuing it. Only
+# meaningful alongside --resume, which is the only way this adapter emits it.
+FORK_FLAG = "--fork-session"
+
 # The dialect declaration, which the CLI cannot resolve. `--json-schema` is
 # checked by an ajv instance that only knows draft-07, so a document declaring
 # a newer dialect is refused before the turn starts:
@@ -125,6 +129,7 @@ class ClaudeBackend(AgentBackend):
     """Backend for Anthropic's Claude Code CLI (`claude`)."""
 
     name = "claude"
+    supports_fork = True
 
     def run_turn(
         self,
@@ -133,6 +138,8 @@ class ClaudeBackend(AgentBackend):
         cwd: Path,
         timeout: int = DEFAULT_TURN_TIMEOUT,
         schema: OutputSchema | None = None,
+        *,
+        resume_as_fork: bool = False,
     ) -> TurnResult:
         args = [
             "claude",
@@ -150,6 +157,8 @@ class ClaudeBackend(AgentBackend):
             args += [SCHEMA_FLAG, schema_argument(schema)]
         if session_id:
             args += ["--resume", session_id]
+            if resume_as_fork:
+                args.append(FORK_FLAG)
         args += ["-p", prompt]
 
         proc = run_cli_turn(

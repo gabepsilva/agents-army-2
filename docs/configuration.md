@@ -28,8 +28,8 @@ AGENTS_ARMY_STATE_FILE=/tmp/state.json uv run orchestrator list
 
 ## Teams
 
-`--team NAME` (on `create`, `talk`, `list`, `delete`) points `STATE_FILE`,
-`WORKDIR`, and (unless `AGENTS_ARMY_SKILLS` is set) `SKILLS_DIR` at
+`--team NAME` (on `create`, `talk`, `fork`, `list`, `delete`) points
+`STATE_FILE`, `WORKDIR`, and (unless `AGENTS_ARMY_SKILLS` is set) `SKILLS_DIR` at
 `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json`,
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree`, and
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` respectively — a named group of
@@ -60,7 +60,7 @@ the path instead of resolving it.
 `--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
 `AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead) —
 `AGENTS_ARMY_ROOT` is not on that list, since it is the teamless registry's
-own fallback and stays compatible with `--team`. `create`/`talk --team`
+own fallback and stays compatible with `--team`. `create`/`talk`/`fork --team`
 require the team's `worktree` to already exist, since they launch a backend
 into it — the orchestrator never runs `git` itself, so the caller creates it
 with `git worktree add`. `list agents`/`delete NAME --team` only read and
@@ -103,12 +103,18 @@ Without `--team`, the entire registry lives in one JSON file:
 }
 ```
 
-It records every agent's name, backend, session id, and (when set) model and
-reasoning effort — enough for any process to `talk` to an agent created
-earlier and resume its CLI session. No per-agent folders or session files
+It records every agent's name, backend, session id, and (when set) model,
+reasoning effort, and `pending_fork_from` — enough for any process to `talk`
+to an agent created earlier and resume its CLI session. No per-agent folders or session files
 are written; each backend CLI owns its own session storage, addressed by the
 session id kept here. See the `AGENTS_ARMY_STATE_FILE` ladder above for where
 this file defaults to.
+
+`pending_fork_from` appears only between `orchestrator fork` and the new
+agent's first turn: it holds the session id that turn resumes with the
+backend's fork flag, and is dropped again once the agent has a session of its
+own. Every other key is unchanged by this, so a registry written before
+`fork` existed still reads and rewrites identically.
 
 ## Skills
 
@@ -134,12 +140,20 @@ reuses what's stored.
 
 Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.21).
 
-| backend | CLI invocation | resume | notes |
-|---|---|---|---|
-| `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
-| `codex` | `codex exec` | `codex exec resume` | |
-| `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
-| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
+| backend | CLI invocation | resume | fork | notes |
+|---|---|---|---|---|
+| `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | `--fork-session` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
+| `codex` | `codex exec` | `codex exec resume` | — | |
+| `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | `--fork-session` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
+| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | — | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
+
+A backend declares whether it can fork with the class attribute
+`supports_fork`, which [`fork`](cli-reference.md) checks before it creates
+anything. `codex` and `opencode` answer `False` and also raise
+`fork is not yet implemented for the <name> backend` if the flag reaches
+them anyway — their CLIs do have a fork of their own
+(`codex exec fork`, `opencode run --fork`), in an invocation shape this
+interface does not speak yet.
 
 Every backend runs its CLI through one shared boundary, `run_cli_turn` in
 `backends/base.py`. Claude, Codex, and Grok take its default `stdin=DEVNULL`
@@ -150,8 +164,10 @@ instead, so its prompt is read verbatim.
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and
 registering the class in the `_BACKENDS` table in `backends/registry.py`. A
 backend implements `name` and
-`run_turn(prompt, session_id, cwd, timeout, schema)`: it starts a fresh CLI
-session when `session_id` is `None` and resumes it otherwise, returning a
+`run_turn(prompt, session_id, cwd, timeout, schema, *, resume_as_fork=False)`:
+it starts a fresh CLI session when `session_id` is `None` and resumes it
+otherwise — into a *copy* of that session when `resume_as_fork` is set —
+returning a
 `TurnResult` with the reply and the session id for the next turn. Failures
 raise a `TurnError` subclass so `talk` can print the message without caring
 which CLI ran.

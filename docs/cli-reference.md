@@ -4,7 +4,7 @@
 orchestrator [--version] [-v] <verb> ...
 ```
 
-Five verbs: `create`, `talk`, `list`, `delete`, `doctor`. Every verb also
+Six verbs: `create`, `talk`, `fork`, `list`, `delete`, `doctor`. Every verb also
 accepts `-v`/`--verbose` after its own name, so `orchestrator -v talk ...` and
 `orchestrator talk -v ...` both work. `--version` is top-level only —
 `orchestrator talk --version` exits 2 with the `talk` usage line.
@@ -133,6 +133,51 @@ one turn's `--timeout`.
 | `1` | the agent ran but never produced a conforming reply, or the turn otherwise failed |
 | `2` | the schema file is missing, malformed, or not strict — nothing ran, no agent was created |
 
+## `fork` — start a new agent from another's session
+
+```
+orchestrator fork SOURCE DEST [--team NAME]
+```
+
+| argument | meaning |
+|---|---|
+| `source` | (positional) an existing agent whose session `DEST` starts from |
+| `dest` | (positional) the new agent's name, unique in the registry |
+| `--team` | as everywhere else; both agents live in the same team |
+
+```sh
+uv run orchestrator talk primer -p "read the spec and the code, then wait"
+uv run orchestrator fork primer reviewer
+# forked agent 'primer' into 'reviewer' backend=claude
+
+uv run orchestrator talk reviewer -p "review the diff"
+```
+
+`DEST` inherits `SOURCE`'s backend, model, and reasoning effort — there is no
+`--backend` override, since a session cannot be carried across CLIs. `SOURCE`
+is never modified: both agents keep their own session ids afterwards and are
+independently talkable.
+
+**Nothing runs at fork time.** `fork` only writes the registry: `DEST` is
+created with no session of its own and a `pending_fork_from` marker holding
+`SOURCE`'s session id. `DEST`'s *first* `talk` resumes that id with the
+backend's fork flag (`--resume <source> --fork-session`), stores the new
+session id the CLI reports, and clears the marker; every later turn is an
+ordinary `--resume <dest>`. So priming one session and forking it N times
+costs N registry writes, not N model turns.
+
+**The fork is therefore lazy, and this is deliberate:** `DEST` inherits
+`SOURCE`'s context as of `DEST`'s **first turn**, not as of the `fork` call.
+Talking to `SOURCE` in between moves the fork's starting point forward. Fork
+first and talk to the copy before continuing the source if you need the
+context frozen where it was.
+
+`fork` validates eagerly and creates nothing when it refuses — it exits 1
+with a single line for an unknown `SOURCE`, a `SOURCE` that has not had a
+turn yet (nothing to fork), a `DEST` name already taken, or a `SOURCE` on a
+backend that cannot fork (`codex`, `opencode` — see
+[Backends](configuration.md#backends)).
+
 ## `list` — show agents, the skill catalog, or every team
 
 ```
@@ -242,7 +287,7 @@ orchestrator_state.json.*.lock` when no orchestrator command is running.
 
 ## Teams
 
-`--team NAME`, on `create`/`talk`/`list`/`delete`, points the command at a
+`--team NAME`, on `create`/`talk`/`fork`/`list`/`delete`, points the command at a
 team root's `agents/orchestrator_state.json` for state and its `worktree`
 for the backend's working directory (and, unless `AGENTS_ARMY_SKILLS` is
 set, its skill catalog) instead of the teamless layout — a named group of
