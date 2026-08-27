@@ -251,6 +251,12 @@ class AgentBackend(ABC):
     # opt in once it can emit a fork of its own.
     supports_fork: bool = False
 
+    # Whether this CLI can hand an existing session to a human at a terminal.
+    # The default is deliberately conservative: a third-party backend must
+    # opt in after checking that its interactive resume keeps the same session
+    # id, rather than silently risking a stale registry.
+    supports_chat: bool = False
+
     def __init__(
         self,
         *,
@@ -298,3 +304,15 @@ class AgentBackend(ABC):
         than a silently unforked turn.
         """
         ...
+
+    def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+        """Build the interactive resume command for ``session_id``.
+
+        The default backend has no interactive contract. Keeping this method
+        concrete preserves the extension point for existing third-party
+        backends: they can remain unsupported without implementing a method
+        they will never call.
+        """
+        raise NotImplementedError(
+            f"backend '{self.name}' has no interactive chat command for {cwd}"
+        )

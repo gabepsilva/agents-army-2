@@ -109,6 +109,14 @@ class OpenCodeBackend(AgentBackend):
     name = "opencode"
     enforces_schema = False
     supports_fork = True
+    # A2 verdict (2026-08-27, OpenCode 1.18.21): PASS. `--session <id>` is
+    # the interactive continuation spelling; `--fork` is the separate fork.
+    supports_chat = True
+
+    def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+        """Resume the stored OpenCode session in its interactive terminal UI."""
+        log.debug("opencode chat: cwd=%s session=%s", cwd, session_id)
+        return ["opencode", "--session", session_id]
 
     def run_turn(
         self,

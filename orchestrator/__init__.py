@@ -127,6 +127,10 @@ class TeamBusyError(OrchestratorError):
     """Teardown asked for a team another command is still holding."""
 
 
+class AgentBusyError(OrchestratorError):
+    """Chat tried to open an agent whose turn is already in flight."""
+
+
 # User-facing failures that must print one line and exit, never a traceback,
 # paired with the exit code each one earns. Scanned in order and the first
 # match wins, so the most specific entry comes first: SchemaLoadError is a
@@ -645,6 +649,54 @@ class Orchestrator:
                     log.debug("agent '%s': reclaimed lock file, no such agent", name)
                 raise
 
+    def chat(self, name: str) -> int:
+        """Hand the terminal to an agent's interactive session.
+
+        Chat is intentionally read-only with respect to the registry. The
+        agent lock protects the session from a concurrent headless turn, and
+        the registry is re-read after that lock so a waiter uses the current
+        stored session. The read needs no state lock because `_persist` swaps
+        the completed file into place atomically; the child inherits this
+        process's stdio so the human can drive it.
+        """
+        path = self._agent_lock_path(name)
+        with ExitStack() as stack:
+            try:
+                lock = stack.enter_context(
+                    self._agent_lock(name, mode=fcntl.LOCK_EX | fcntl.LOCK_NB)
+                )
+            except BlockingIOError:
+                raise AgentBusyError(
+                    f"agent '{name}' is in use by another command; try again "
+                    "once it finishes"
+                ) from None
+
+            # A chat process may have loaded its registry before a preceding
+            # talk acquired this lock and persisted a newer session id. Read
+            # after the agent lock, but deliberately do not take the state
+            # lock: chat never writes the registry and must not introduce an
+            # agent-lock -> state-lock ordering edge.
+            self._reload()
+            agent = self.agents.get(name)
+            if agent is None:
+                if _is_live(path, lock):
+                    path.unlink(missing_ok=True)
+                    log.debug("agent '%s': reclaimed lock file, no such agent", name)
+                raise AgentNotFoundError(f"no agent named '{name}'")
+            if agent.session_id is None or agent.pending_fork_from is not None:
+                raise OrchestratorError(
+                    f"agent '{name}' has no session to fork yet; talk to it first"
+                )
+            if not agent.backend.supports_chat:
+                raise OrchestratorError(
+                    f"agent '{name}' runs on backend '{agent.backend.name}', "
+                    "which cannot chat"
+                )
+
+            args = agent.backend.chat_argv(agent.session_id, agent.workdir)
+            proc = subprocess.run(args, cwd=str(agent.workdir), check=False)
+            return proc.returncode
+
     def _turn(
         self,
         agent: Agent,
@@ -802,15 +854,23 @@ class Orchestrator:
         return self._locks_dir() / digest
 
     @contextmanager
-    def _locked(self, path: Path, *, revalidate: bool = False) -> Iterator[TextIO]:
-        with _flock(path, revalidate=revalidate) as lock:
+    def _locked(
+        self,
+        path: Path,
+        mode: int = fcntl.LOCK_EX,
+        *,
+        revalidate: bool = False,
+    ) -> Iterator[TextIO]:
+        with _flock(path, mode, revalidate=revalidate) as lock:
             yield lock
 
     def _exclusive(self) -> AbstractContextManager[TextIO]:
         """Serialize reads and writes of the state file."""
         return self._locked(self._lock_path())
 
-    def _agent_lock(self, name: str) -> AbstractContextManager[TextIO]:
+    def _agent_lock(
+        self, name: str, *, mode: int = fcntl.LOCK_EX
+    ) -> AbstractContextManager[TextIO]:
         """Serialize whole turns for one agent, leaving other agents free.
 
         The state lock cannot do this: it covers a file write measured in
@@ -825,7 +885,7 @@ class Orchestrator:
         alone by `_teardown_team`) can lose their file out from under a
         holder, so they stay non-revalidating.
         """
-        return self._locked(self._agent_lock_path(name), revalidate=True)
+        return self._locked(self._agent_lock_path(name), mode, revalidate=True)
 
     def _agent_is_busy(self, name: str) -> bool:
         """Is a turn in flight for `name` right now?
@@ -1010,6 +1070,13 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     # The validated object rather than the reply text: same content, but
     # parsed once here so a caller piping this gets one canonical spelling.
     print(json.dumps(result.structured, indent=2, sort_keys=True))
+
+
+def cmd_chat(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+    """Run the selected backend's interactive session and preserve its status."""
+    returncode = orchestrator.chat(opts.name)
+    if returncode:
+        raise SystemExit(returncode)
 
 
 def _print_agents(orchestrator: Orchestrator) -> None:
@@ -1336,6 +1403,10 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument("--prompt-file")
     _add_team_option(talk)
 
+    chat = _add_verb_parser(subparsers, "chat")
+    chat.add_argument("name")
+    _add_team_option(chat)
+
     fork = _add_verb_parser(subparsers, "fork")
     fork.add_argument("source")
     fork.add_argument("dest")
@@ -1362,6 +1433,7 @@ def _build_parser() -> argparse.ArgumentParser:
 VERBS: dict[str, Callable[[Orchestrator, argparse.Namespace], None]] = {
     "create": cmd_create,
     "talk": cmd_talk,
+    "chat": cmd_chat,
     "fork": cmd_fork,
     "list": cmd_list,
     "delete": cmd_delete,
@@ -1710,8 +1782,8 @@ def _resolve_team(
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
-    already does — except for every verb but `create`/`talk`/`fork` (`list`,
-    `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
+    already does — except for every verb but `create`/`talk`/`chat`/`fork`
+    (`list`, `delete NAME`, and teardown) finding a `team_root` that doesn't exist,
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.
     """
@@ -1733,7 +1805,7 @@ def _resolve_team(
     team_root = _resolve_team_root(team, opts)
     opts._team_root = team_root
     worktree = team_root / "worktree"
-    if opts.verb in ("create", "talk", "fork"):
+    if opts.verb in ("create", "talk", "chat", "fork"):
         # Gated on the verb, not on `teardown`: `list agents --team` and
         # `delete NAME --team` never launch a backend, they read and edit a
         # JSON file, so they must work on a team whose worktree is gone (the

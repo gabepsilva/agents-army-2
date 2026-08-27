@@ -4,7 +4,7 @@
 orchestrator [--version] [-v] <verb> ...
 ```
 
-Six verbs: `create`, `talk`, `fork`, `list`, `delete`, `doctor`. Every verb also
+Seven verbs: `create`, `talk`, `chat`, `fork`, `list`, `delete`, `doctor`. Every verb also
 accepts `-v`/`--verbose` after its own name, so `orchestrator -v talk ...` and
 `orchestrator talk -v ...` both work. `--version` is top-level only —
 `orchestrator talk --version` exits 2 with the `talk` usage line.
@@ -132,6 +132,24 @@ one turn's `--timeout`.
 | `0` | success |
 | `1` | the agent ran but never produced a conforming reply, or the turn otherwise failed |
 | `2` | the schema file is missing, malformed, or not strict — nothing ran, no agent was created |
+
+## `chat` — open an agent's session interactively
+
+```
+orchestrator chat NAME [--team NAME]
+```
+
+`chat` resumes the named agent's stored session by handing the terminal to its
+backend CLI. It accepts no prompt, schema, skill, retry, or timeout options:
+the person at the terminal drives the session and the backend process's exit
+status becomes the orchestrator's. The agent must already have a materialized
+session; `chat` never creates an agent or writes the registry.
+
+`chat` takes the agent's exclusive per-agent lock without waiting. An agent
+whose `talk` or `chat` is already running is refused immediately. Conversely,
+an existing `talk` waits on a chat-held lock, so chatting an agent while a
+driver is using it can stall that driver for the driver's full timeout before
+the driver fails.
 
 ## `fork` — start a new agent from another's session
 
@@ -300,7 +318,7 @@ orchestrator_state.json.*.lock` when no orchestrator command is running.
 
 ## Teams
 
-`--team NAME`, on `create`/`talk`/`fork`/`list`/`delete`, points the command at a
+`--team NAME`, on `create`/`talk`/`chat`/`fork`/`list`/`delete`, points the command at a
 team root's `agents/orchestrator_state.json` for state and its `worktree`
 for the backend's working directory (and, unless `AGENTS_ARMY_SKILLS` is
 set, its skill catalog) instead of the teamless layout — a named group of
@@ -335,15 +353,15 @@ full path and asking for a qualified name instead of guessing. A
 set — it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
 `AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
 
-`create`/`talk`/`fork --team` still require the team's `worktree` to exist,
+`create`/`talk`/`chat`/`fork --team` still require the team's `worktree` to exist,
 since they bind an agent to it as its working directory; `list agents`/`delete
 NAME --team` only read and edit the registry, so they work whether or not
 `worktree` is there.
 
 | exit code | meaning |
 |---|---|
-| `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`/`fork`) the team's `worktree/` doesn't exist yet |
-| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk`/`fork` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
+| `2` | the team name is invalid, ambiguous, or (with `AGENTS_ARMY_TEAMS_DIR` unset) not found under `$AGENTS_ARMY_ROOT`; `--team` was combined with an explicit `AGENTS_ARMY_HOME`/`AGENTS_ARMY_STATE_FILE` or with a `/`-qualified name while `AGENTS_ARMY_TEAMS_DIR` is set; or (for `create`/`talk`/`chat`/`fork`) the team's `worktree/` doesn't exist yet |
+| `1` | a `--team NAME` with `AGENTS_ARMY_TEAMS_DIR` set names a team root that doesn't exist yet (`list`, `delete NAME`, or teardown — `create`/`talk`/`chat`/`fork` exit 2 instead, via the `worktree/` check above), or another command currently holds the team's lock during teardown |
 
 See the [README's Teams section](../README.md#teams) for the full
 `agents/`/`worktree/`/`.lock` layout and the locking model, and

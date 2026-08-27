@@ -222,12 +222,19 @@ sent the document inline in the prompt, and has its reply enforced by
 orchestrator validation and repair instead. Failures raise a `TurnError` subclass so `talk` can print the
 message without knowing which CLI ran.
 
-Every backend hands its finished argv to one shared boundary,
+Backends that support interactive `chat` opt in with `supports_chat = True` and
+implement `chat_argv(session_id, cwd)` after verifying that their interactive
+resume leaves the session id unchanged. The default is `False`, so adding a
+backend without that contract remains safe.
+
+Every headless turn hands its finished argv to one shared boundary,
 `run_cli_turn` in `backends/base.py`, which runs the process and logs the
 turn around it. Claude, Codex, and Grok take its default `stdin=DEVNULL` to
 avoid blocking on an inherited pipe. OpenCode passes `prompt_on_stdin=True`
 and receives the prompt through `input=` instead; its no-positional-message
-mode reads stdin verbatim.
+mode reads stdin verbatim. Interactive `chat` is the deliberate exception:
+it runs the backend's `chat_argv` with inherited terminal stdio so a person
+can drive the resumed session.
 
 The Claude backend runs `claude --print --output-format json --permission-mode
 bypassPermissions`. Print mode otherwise denies tools (`gh`, Bash, WebFetch)
@@ -299,7 +306,7 @@ To point at a different catalog, set `AGENTS_ARMY_SKILLS`.
 
 ### Teams
 
-`--team NAME`, accepted by `create`, `talk`, `fork`, `list`, and `delete`, runs
+`--team NAME`, accepted by `create`, `talk`, `chat`, `fork`, `list`, and `delete`, runs
 against a named team instead of the teamless layout above: its own registry,
 its own working directory, isolated from every other team. This is what
 lets two fleets work two different GitHub issues at once without both
@@ -359,7 +366,7 @@ it names a path relative to `$AGENTS_ARMY_ROOT`, and joining it under
 `AGENTS_ARMY_TEAMS_DIR` would double the path instead of resolving it.
 
 The orchestrator never runs `git` itself — you create the worktree, and
-`--team` refuses to run `create`/`talk`/`fork` against a team whose
+`--team` refuses to run `create`/`talk`/`chat`/`fork` against a team whose
 `worktree/` doesn't exist yet, since those bind an agent to it as its
 working directory. `list agents --team`
 and `delete NAME --team` only read and edit the registry, so they work even
@@ -436,7 +443,7 @@ backends/          # AgentBackend interface + implementations
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator/      # the orchestrator CLI (create / talk / fork / list / delete)
+orchestrator/      # the orchestrator CLI (create / talk / chat / fork / list / delete / doctor)
   schema.py        # --schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite

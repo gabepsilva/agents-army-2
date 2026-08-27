@@ -49,7 +49,7 @@ backends/          # AgentBackend interface + implementations
   grok.py          # GrokBackend (resumes via --resume; JSON is sessionId/text)
   opencode.py      # OpenCodeBackend (resumes via --session; NDJSON events)
   registry.py      # _BACKENDS table + register_backend/list_backends/get_backend
-orchestrator/      # the orchestrator CLI (create / talk / fork / list / delete / doctor)
+orchestrator/      # the orchestrator CLI (create / talk / chat / fork / list / delete / doctor)
   schema.py        # --schema loading, strict-subset checks, reply validation
   skills.py        # --skill name lookup under SKILLS/ + prompt composition
 tests/             # pytest suite
