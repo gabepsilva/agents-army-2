@@ -55,18 +55,20 @@ class EchoBackend(AgentBackend):
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
 
-def _assert_subprocess_kwargs(
+def _assert_subprocess_kwargs(  # noqa: PLR0913 - one flat kwarg per contract term
     kwargs: dict,
     cwd: Path,
     expected_stdin: object = subprocess.DEVNULL,
     expected_input: str | None = None,
+    *,
+    expected_timeout: int = DEFAULT_TURN_TIMEOUT,
 ) -> None:
     """Every backend must run its subprocess the same disciplined way."""
     assert kwargs["cwd"] == str(cwd)
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
     assert kwargs["check"] is False
-    assert kwargs["timeout"] == 3600
+    assert kwargs["timeout"] == expected_timeout
     # Not a detail: a CLI whose stdin is an inherited pipe rather than a tty
     # blocks until it is killed. `codex exec "reply ok" --json` under a pipe
     # returns nothing after 25s and exits 124, and claude and grok are given
