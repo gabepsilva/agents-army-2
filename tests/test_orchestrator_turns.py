@@ -57,12 +57,6 @@ def _flock_is_held(path: Path) -> bool:
         return False
 
 
-# What each tool prints for `--version` on a machine that has all of them.
-# The spellings are the real ones: uv leads with its own name, jq glues its
-# name on with a hyphen, claude prints a bare number, and codex names the
-# package rather than the command.
-
-
 def _gate_backend(
     name: str, entered: threading.Event, release: threading.Event
 ) -> type[AgentBackend]:
@@ -166,11 +160,6 @@ def _overlap_recorder(
             active.remove(who)
 
     return record, state
-
-
-# The same schema as the orchestrator loads it from a file that declares its
-# dialect. Its keys are deliberately unsorted, so a re-serialisation that lost
-# the canonical ordering would be visible.
 
 
 class TestOrchestrator:

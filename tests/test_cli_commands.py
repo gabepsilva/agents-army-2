@@ -74,6 +74,10 @@ def run_version(argv: list[str] | None = None) -> None:
     assert excinfo.value.code == 0
 
 
+# What each tool prints for `--version` on a machine that has all of them.
+# The spellings are the real ones: uv leads with its own name, jq glues its
+# name on with a hyphen, claude prints a bare number, and codex names the
+# package rather than the command.
 ALL_TOOLS_PRESENT = {
     "uv": "uv 0.4.18",
     "claude": "2.1.234 (Claude Code)",

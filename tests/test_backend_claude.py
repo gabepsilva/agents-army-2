@@ -32,6 +32,9 @@ from tests.backend_helpers import (
     _reported_seconds,
 )
 
+# The same schema as the orchestrator loads it from a file that declares its
+# dialect. Its keys are deliberately unsorted, so a re-serialisation that lost
+# the canonical ordering would be visible.
 DIALECT_SCHEMA = OutputSchema(
     text=(
         '{"type":"object","$schema":"https://json-schema.org/draft/2020-12/schema"'
