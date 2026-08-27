@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"fixture"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'm running the requested shell check."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'printf codex-fixture-check'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/bash -lc 'printf codex-fixture-check'","aggregated_output":"codex-fixture-check","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"FIXTURE-DONE"}}
+{"type":"turn.completed","usage":{"input_tokens":33269,"cached_input_tokens":22016,"output_tokens":97,"reasoning_output_tokens":0}}

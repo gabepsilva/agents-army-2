@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,7 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     timeout: int,
     prompt_on_stdin: bool = False,
     stream: bool = False,
+    format_event: Callable[[dict], str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one backend's already-built argv and log the turn around it.
 
@@ -101,9 +103,10 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     written there instead, for OpenCode, which joins positional arguments
     before sending them to the model: omitting that argument makes its
     no-value fallback read stdin verbatim, preserving spaces, quotes, and
-    newlines. With `stream`, the same captured streams are read through
-    nonblocking pipes and complete stdout lines are echoed to this process's
-    flushed stderr while the child runs.
+    newlines. With streaming, the same captured streams are read through
+    nonblocking pipes while the child runs. Complete stdout lines are parsed
+    as JSON objects and passed to `format_event`; a returned line is flushed
+    to this process's stderr. A missing formatter leaves the display silent.
     """
     log.debug(
         "%s turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
@@ -122,6 +125,7 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
             cwd=cwd,
             timeout=timeout,
             prompt_on_stdin=prompt_on_stdin,
+            format_event=format_event,
         )
     else:
         # The non-streaming arm intentionally remains the subprocess.run path:
@@ -184,11 +188,16 @@ def _kill_and_reap(process: subprocess.Popen[bytes]) -> None:
 class _StreamingReader:
     """One nonblocking child output pipe, decoded with text-mode semantics."""
 
-    def __init__(self, pipe: BinaryIO, *, echo_lines: bool) -> None:
+    def __init__(
+        self,
+        pipe: BinaryIO,
+        *,
+        format_event: Callable[[dict], str | None] | None,
+    ) -> None:
         self.pipe = pipe
         self.fd = pipe.fileno()
         self.decoder = _new_text_decoder()
-        self.echo_lines = echo_lines
+        self.format_event = format_event
         self.raw = bytearray()
         self.parts: list[str] = []
         self.pending_line = ""
@@ -216,13 +225,21 @@ class _StreamingReader:
         if not decoded:
             return
         self.parts.append(decoded)
-        if not self.echo_lines:
+        if self.format_event is None:
             return
         self.pending_line += decoded
         while "\n" in self.pending_line:
             line, self.pending_line = self.pending_line.split("\n", 1)
-            sys.stderr.write(f"{line}\n")
-            sys.stderr.flush()
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            formatted = self.format_event(event)
+            if formatted is not None:
+                sys.stderr.write(f"{formatted}\n")
+                sys.stderr.flush()
 
     def close(self) -> None:
         self.pipe.close()
@@ -314,6 +331,7 @@ def _run_streaming_cli_turn(
     cwd: Path,
     timeout: int,
     prompt_on_stdin: bool,
+    format_event: Callable[[dict], str | None] | None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a CLI with nonblocking pipes and one absolute deadline.
 
@@ -334,8 +352,10 @@ def _run_streaming_cli_turn(
         stderr=subprocess.PIPE,
         bufsize=0,
     )
-    stdout_reader = _StreamingReader(cast(BinaryIO, process.stdout), echo_lines=True)
-    stderr_reader = _StreamingReader(cast(BinaryIO, process.stderr), echo_lines=False)
+    stdout_reader = _StreamingReader(
+        cast(BinaryIO, process.stdout), format_event=format_event
+    )
+    stderr_reader = _StreamingReader(cast(BinaryIO, process.stderr), format_event=None)
     stdin_pipe = cast(BinaryIO | None, process.stdin)
     input_stream = (
         _StreamingInput(stdin_pipe, input_bytes)

@@ -1,0 +1,9 @@
+{"type":"system","subtype":"init","session_id":"fixture"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"printf claude-fixture-check","description":"Print fixture check string"}}]}}
+{"type":"system","subtype":"task_summary","detail":"Printing fixture check string"}
+{"type":"user","message":{"content":[{"tool_use_id":"fixture","type":"tool_result","content":"claude-fixture-check","is_error":false}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FIXTURE-DONE"}]}}
+{"type":"system","subtype":"post_turn_summary","status_category":"review_ready"}
+{"type":"result","is_error":false,"session_id":"fixture","result":"FIXTURE-DONE"}
+{"type":"system","subtype":"task_summary","detail":null}
