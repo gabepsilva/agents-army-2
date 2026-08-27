@@ -48,6 +48,9 @@ uv run orchestrator talk -b codex --model gpt-5 --reasoning-effort high \
 # Talk to an agent (resumes its session, prints the reply)
 uv run orchestrator talk reviewer -p "what did we decide about issue #23?"
 
+# Open an agent's existing session in its interactive terminal UI
+uv run orchestrator chat reviewer
+
 # Read the prompt from a file instead of a flag argument or -- tail
 uv run orchestrator talk reviewer --prompt-file ./prompts/issue-23-summary.txt
 
