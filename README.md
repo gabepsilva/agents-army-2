@@ -64,6 +64,9 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 # Set the wall-clock turn limit for a flag-style invocation
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
 
+# Stream complete CLI event lines to stderr while the turn is running
+uv run orchestrator talk reviewer --stream --prompt "review the change"
+
 # Fork a primed agent: 'copy' inherits reviewer's backend/model/effort and
 # starts from its session on its own first turn (no turn is spent forking)
 uv run orchestrator fork reviewer copy
@@ -156,6 +159,21 @@ parsing the message:
 | **2** | the schema file is missing, malformed, or not strict — nothing ran |
 | **1** | the agent ran and never produced a conforming reply, or the turn failed |
 
+### Streaming: `--stream`
+
+Streaming is opt-in. `orchestrator talk --stream` forwards each complete line
+from the backend CLI's stdout to the caller's stderr, flushed as soon as the
+line arrives. This makes newline-delimited Codex and OpenCode events visible
+while a turn is still running; Claude and Grok may still emit one late
+envelope, depending on their CLI behavior.
+
+The normal `talk` result is unchanged: stdout contains the session line and
+the reply (or sorted, indented schema JSON), and never contains streamed event
+lines. The backend CLI's own stderr remains captured for turn diagnostics;
+existing orchestrator notices and logs also continue to use stderr. A final
+stdout line without a newline is retained in the returned raw output but is
+not forwarded until it becomes a complete line.
+
 ### Verbosity
 
 A turn blocks until the CLI it drives returns, which can take minutes with no
@@ -215,7 +233,7 @@ Currently available: `claude`, `codex`, `grok`, `opencode`.
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and registering
 the class in the `_BACKENDS` table in `backends/registry.py`. A backend only
 has to implement `name` and
-`run_turn(prompt, session_id, cwd, timeout, schema)`. `run_turn` starts a
+`run_turn(prompt, session_id, cwd, timeout, schema, stream=False)`. `run_turn` starts a
 fresh CLI session when `session_id` is `None` and resumes it otherwise,
 returning a `TurnResult` with the reply and the session id for the next turn.
 `schema` is `None` unless `--schema` was used. Schema-capable backends declare
@@ -235,7 +253,9 @@ Every headless turn hands its finished argv to one shared boundary,
 turn around it. Claude, Codex, and Grok take its default `stdin=DEVNULL` to
 avoid blocking on an inherited pipe. OpenCode passes `prompt_on_stdin=True`
 and receives the prompt through `input=` instead; its no-positional-message
-mode reads stdin verbatim. Interactive `chat` is the deliberate exception:
+mode reads stdin verbatim. `stream=True` selects the nonblocking three-pipe
+reader, which drains stdin, stdout, and stderr against the same timeout while
+copying complete stdout lines to the caller's flushed stderr. Interactive `chat` is the deliberate exception:
 it runs the backend's `chat_argv` with inherited terminal stdio so a person
 can drive the resumed session.
 

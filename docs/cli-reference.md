@@ -55,6 +55,7 @@ Backend, model, and reasoning effort are fixed at creation (or at the first
 ```
 orchestrator talk NAME [-b/--backend ...] [-m/--model ...] [-e/--reasoning-effort ...]
                        [-s/--skill NAMES] [--schema PATH] [--retries N] [--timeout SECONDS]
+                       [--stream]
                        [--team NAME]
                        (-p/--prompt TEXT | --prompt-file PATH | -- PROMPT...)
 ```
@@ -76,6 +77,7 @@ possibly-new agent without a separate `create` step.
 | `--schema PATH` | JSON Schema file; the reply is validated against it and printed as JSON instead of raw text |
 | `--retries N` | correction attempts allowed when a reply misses `--schema` (default `2`) |
 | `--timeout SECONDS` | wall-clock budget for the whole turn, corrections included (default `3600`) |
+| `--stream` | forward each complete backend stdout line to flushed stderr while the turn runs |
 | `--team` | run against team `NAME`'s registry and worktree instead of the teamless layout; found under `$AGENTS_ARMY_TEAMS_DIR` if set, otherwise resolved by walking `$AGENTS_ARMY_ROOT` — see [Teams](#teams) |
 
 Exactly one of `-p/--prompt`, `--prompt-file`, or `-- PROMPT...` is required —
@@ -106,7 +108,19 @@ uv run orchestrator talk reviewer --schema verdict.json --prompt "is it ready?"
 
 # cap the turn's wall-clock budget
 uv run orchestrator talk reviewer --timeout 900 --prompt "review the change"
+
+# stream complete CLI event lines to stderr while the turn is running
+uv run orchestrator talk reviewer --stream --prompt "review the change"
 ```
+
+`--stream` is off by default. It forwards each complete line from the backend
+CLI's stdout to the caller's stderr and flushes it immediately, so
+newline-delimited Codex and OpenCode events can be observed before the turn
+finishes. Claude and Grok may still emit one late envelope. The normal stdout
+contract is unchanged: it contains the session line and reply (or sorted,
+indented schema JSON), with no streamed event lines. The backend CLI's own
+stderr remains captured for diagnostics, and a final stdout line without a
+newline is retained but is not forwarded as a complete line.
 
 ### `--schema`: structured replies
 
