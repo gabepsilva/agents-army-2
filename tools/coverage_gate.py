@@ -25,6 +25,7 @@ COVERAGE_POLICY_VERSION = 2
 # invocation, so these retain the strongest coverage requirement.
 FLOORS: dict[str, float] = {
     "orchestrator/__init__.py": 95.0,
+    "orchestrator/core.py": 95.0,
     "orchestrator/doctor.py": 95.0,
     "orchestrator/paths.py": 95.0,
     "orchestrator/schema.py": 95.0,

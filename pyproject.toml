@@ -105,6 +105,7 @@ skip_empty = true
 [tool.mutmut]
 source_paths = [
     "orchestrator/__init__.py",
+    "orchestrator/core.py",
     "orchestrator/doctor.py",
     "orchestrator/paths.py",
     "orchestrator/schema.py",
