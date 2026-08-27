@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,10 +120,18 @@ class _StreamCapture:
             sys.stderr.flush()
 
 
-def _drain_pipe(pipe: BinaryIO, capture: _StreamCapture) -> bool:
+def _drain_pipe(
+    pipe: BinaryIO,
+    capture: _StreamCapture,
+    *,
+    deadline: float,
+    timeout: Callable[[], subprocess.TimeoutExpired],
+) -> bool:
     """Read all currently available bytes, returning whether EOF was seen."""
     file_descriptor = pipe.fileno()
     while True:
+        if time.monotonic() >= deadline:
+            raise timeout()
         try:
             data = os.read(file_descriptor, _STREAM_CHUNK_SIZE)
         except BlockingIOError:
@@ -259,13 +268,23 @@ class _StreamingTurn:
         if (
             self.stdout_fd is not None
             and self.stdout_fd in readable
-            and _drain_pipe(self.stdout_pipe, self.stdout_capture)
+            and _drain_pipe(
+                self.stdout_pipe,
+                self.stdout_capture,
+                deadline=self.deadline,
+                timeout=self._timeout,
+            )
         ):
             self._close_stdout()
         if (
             self.stderr_fd is not None
             and self.stderr_fd in readable
-            and _drain_pipe(self.stderr_pipe, self.stderr_capture)
+            and _drain_pipe(
+                self.stderr_pipe,
+                self.stderr_capture,
+                deadline=self.deadline,
+                timeout=self._timeout,
+            )
         ):
             self._close_stderr()
 

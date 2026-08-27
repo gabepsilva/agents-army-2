@@ -196,6 +196,30 @@ def test_streaming_timeout_kills_and_reaps_a_child_after_output(
     assert capsys.readouterr().err == f"{pid}\n"
 
 
+def test_streaming_times_out_while_a_child_continuously_writes(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_cli_turn(
+            "demo",
+            _child(
+                "import os, time\n"
+                "data = b'x' * 65536\n"
+                "end = time.monotonic() + 3\n"
+                "while time.monotonic() < end:\n"
+                "    os.write(1, data)\n"
+            ),
+            prompt="",
+            session_id=None,
+            cwd=tmp_path,
+            timeout=1,
+            stream=True,
+        )
+
+    assert time.monotonic() - started < 2
+
+
 def test_streaming_closes_an_empty_prompt_pipe(tmp_path: Path, capsys) -> None:
     result = run_cli_turn(
         "demo",
