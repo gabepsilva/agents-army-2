@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -84,12 +86,770 @@ class _TrackingStderr(io.StringIO):
         return super().write(text)
 
 
-def test_streaming_runner_echoes_complete_lines_before_child_exit(
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "thinking", "thinking": "private plan"}]
+                },
+            },
+            "Thinking...",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "thinking", "thinking": "private plan"},
+                        {"type": "text", "text": "visible"},
+                    ]
+                },
+            },
+            "Thinking... | Assistant: visible",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        None,
+                        {"type": "text", "text": "after malformed block"},
+                    ]
+                },
+            },
+            "Assistant: after malformed block",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {
+                                "command": "printf tool-check",
+                                "description": "Print tool-check",
+                            },
+                        }
+                    ]
+                },
+            },
+            'Tool call: Bash {"command":"printf tool-check","description":"Print tool-check"}',
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Lookup",
+                            "input": {"query": "café"},
+                        }
+                    ]
+                },
+            },
+            'Tool call: Lookup {"query":"café"}',
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "NoInput"}]},
+            },
+            "Tool call: NoInput {}",
+        ),
+        (
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "tool-check",
+                            "is_error": False,
+                        }
+                    ]
+                },
+            },
+            "Tool result: tool-check",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "DONE"}]},
+            },
+            "Assistant: DONE",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "mcp__github__get_issue",
+                            "input": {"issue": 138},
+                        }
+                    ]
+                },
+            },
+            'MCP call: mcp__github__get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": "permission denied",
+                            "is_error": True,
+                        }
+                    ]
+                },
+            },
+            "Tool result (error): permission denied",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first\nsecond"}]},
+            },
+            r"Assistant: first\nsecond",
+        ),
+        (
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "first\r\nsecond"}]},
+            },
+            r"Assistant: first\r\nsecond",
+        ),
+        (
+            {"type": "result", "is_error": True, "result": "credit exhausted"},
+            "Error: credit exhausted",
+        ),
+        ({"type": "error", "message": "transport failed"}, "Error: transport failed"),
+        (
+            {
+                "type": "result",
+                "is_error": True,
+                "result": {"unexpected": True},
+                "message": "fallback result",
+            },
+            "Error: fallback result",
+        ),
+        (
+            {
+                "type": "result",
+                "is_error": True,
+                "result": None,
+                "message": {"unexpected": True},
+                "error": "fallback error",
+            },
+            "Error: fallback error",
+        ),
+        ({"type": "error"}, "Error: Claude reported an error"),
+        ({"type": "rate_limit_event"}, None),
+        ({"type": "assistant", "is_error": True}, None),
+        ({"type": "unknown", "is_error": True}, None),
+        ({"type": "assistant", "message": {"content": [{"type": "unknown"}]}}, None),
+        ({"type": "assistant", "message": {"content": "not blocks"}}, None),
+    ],
+)
+def test_claude_stream_formatter_returns_exact_lines(
+    event: dict, expected: str | None
+) -> None:
+    assert claude.format_event(event) == expected
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {
+                "type": "item.started",
+                "item": {
+                    "type": "command_execution",
+                    "command": "/usr/bin/bash -lc 'printf codex-tool-check'",
+                },
+            },
+            "Tool call: command /usr/bin/bash -lc 'printf codex-tool-check'",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "/usr/bin/bash -lc 'printf codex-tool-check'",
+                    "aggregated_output": "codex-tool-check",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            },
+            "Tool result: codex-tool-check",
+        ),
+        (
+            {
+                "type": "item.started",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "server": "github",
+                    "tool": "get_issue",
+                    "arguments": {"issue": 138},
+                },
+            },
+            'MCP call: github/get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "server": "github",
+                    "tool": "get_issue",
+                    "arguments": {"issue": 138},
+                    "result": "issue data",
+                    "status": "completed",
+                },
+            },
+            "MCP result: issue data",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "command": "printf updated",
+                    "output": "updated output",
+                    "status": "completed",
+                },
+            },
+            "Tool result: updated output",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {"type": "command_execution", "status": "running"},
+            },
+            "Tool call: command ",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "status": "completed",
+                },
+            },
+            None,
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "status": "running",
+                    "aggregated_output": "aggregated",
+                },
+            },
+            "Tool result: aggregated",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "status": "running",
+                    "output": "output",
+                },
+            },
+            "Tool result: output",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "status": "running",
+                    "result": "result",
+                },
+            },
+            "Tool result: result",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "type": "command_execution",
+                    "status": "running",
+                    "aggregated_output": "aggregated",
+                    "output": "output",
+                    "result": "result",
+                },
+            },
+            "Tool result: aggregated",
+        ),
+        (
+            {
+                "type": "item.started",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "name": "list_files",
+                    "input": {"path": "/tmp"},
+                },
+            },
+            'MCP call: list_files {"path":"/tmp"}',
+        ),
+        (
+            {
+                "type": "mcp_tool_call",
+                "name": "direct_call",
+                "arguments": {"value": "café"},
+            },
+            'MCP call: direct_call {"value":"café"}',
+        ),
+        (
+            {
+                "type": "mcp_tool_call",
+                "arguments": {"first": 1, "second": 2},
+            },
+            'MCP call: unknown {"first":1,"second":2}',
+        ),
+        (
+            {
+                "type": "mcp_tool_call",
+                "server": {"unexpected": True},
+                "name": "direct_call",
+            },
+            "MCP call: direct_call {}",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "mcp_tool_call",
+                    "server": "github",
+                    "tool": "get_issue",
+                    "error": {"message": "denied"},
+                    "status": "completed",
+                },
+            },
+            'MCP result: {"message":"denied"}',
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "DONE"},
+            },
+            "Assistant: DONE",
+        ),
+        ({"type": "item.completed", "item": {"type": "reasoning"}}, "Thinking..."),
+        ({"type": "error", "message": "transport failed"}, "Error: transport failed"),
+        (
+            {
+                "type": "turn.failed",
+                "error": {"message": "turn failed"},
+            },
+            "Error: turn failed",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "first\nsecond",
+                },
+            },
+            r"Assistant: first\nsecond",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "first\rsecond"},
+            },
+            r"Assistant: first\rsecond",
+        ),
+        (
+            {"type": "item.started", "item": {"type": "command_execution"}},
+            "Tool call: command ",
+        ),
+        (
+            {
+                "type": "error",
+            },
+            "Error: Codex reported an error",
+        ),
+        (
+            {
+                "type": "turn.failed",
+                "error": {"message": ""},
+            },
+            "Error: Codex reported an error",
+        ),
+        ({"type": "turn.completed"}, None),
+        ({"type": "item.completed", "item": {"type": "unknown"}}, None),
+        ({"type": "item.completed", "item": "not an item"}, None),
+    ],
+)
+def test_codex_stream_formatter_returns_exact_lines(
+    event: dict, expected: str | None
+) -> None:
+    assert codex.format_event(event) == expected
+
+
+@pytest.mark.parametrize(
+    ("event", "expected"),
+    [
+        (
+            {
+                "type": "text",
+                "part": {"type": "text", "text": "DONE"},
+            },
+            "Assistant: DONE",
+        ),
+        (
+            {
+                "type": "reasoning",
+                "part": {"type": "reasoning", "text": "private plan"},
+            },
+            "Thinking...",
+        ),
+        (
+            {
+                "type": "message",
+                "part": {"type": "reasoning", "text": "private plan"},
+            },
+            "Thinking...",
+        ),
+        (
+            {
+                "type": "reasoning",
+                "part": {"type": "text", "text": "not shown"},
+            },
+            "Thinking...",
+        ),
+        (
+            {
+                "type": "message",
+                "part": {"type": "wrong", "text": "not shown"},
+            },
+            None,
+        ),
+        (
+            {
+                "type": "step_finish",
+                "part": {"type": "text", "text": "not assistant text"},
+            },
+            None,
+        ),
+        (
+            {
+                "type": "text",
+                "part": {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {"status": "running", "input": {}},
+                },
+            },
+            None,
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "running",
+                        "input": {"command": "printf opencode-tool-check"},
+                    },
+                },
+            },
+            'Tool call: bash {"command":"printf opencode-tool-check"}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "name": "named_tool",
+                    "state": {"status": "running", "input": {}},
+                },
+            },
+            "Tool call: named_tool {}",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {"state": {"status": "running", "input": {}}},
+            },
+            "Tool call: unknown {}",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": {"unexpected": True},
+                    "name": "named_tool",
+                    "state": {"status": "running", "input": {}},
+                },
+            },
+            "Tool call: named_tool {}",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": "printf opencode-tool-check"},
+                        "output": "opencode-tool-check",
+                    },
+                },
+            },
+            'Tool call: bash {"command":"printf opencode-tool-check"} | '
+            "Tool result: opencode-tool-check",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "mcp__github__get_issue",
+                    "state": {
+                        "status": "running",
+                        "input": {"issue": 138},
+                    },
+                },
+            },
+            'MCP call: mcp__github__get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "server": "github",
+                    "tool": "get_issue",
+                    "state": {"status": "running", "input": {"issue": 138}},
+                },
+            },
+            'MCP call: get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "mcp_server": "github",
+                    "tool": "get_issue",
+                    "state": {"status": "running", "input": {"issue": 138}},
+                },
+            },
+            'MCP call: get_issue {"issue":138}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "mcp_lookup",
+                    "state": {"status": "running", "input": {"issue": 138}},
+                },
+            },
+            'MCP call: mcp_lookup {"issue":138}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "mcp",
+                    "tool": "lookup",
+                    "state": {"status": "running", "input": {"issue": 138}},
+                },
+            },
+            'MCP call: lookup {"issue":138}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "mcp",
+                    "tool": "lookup",
+                    "state": {
+                        "status": "completed",
+                        "result": {"first": "café", "second": 2},
+                    },
+                },
+            },
+            'MCP result: {"first":"café","second":2}',
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {"status": "error", "error": "permission denied"},
+                },
+            },
+            "Tool result (error): permission denied",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "mcp__github__get_issue",
+                    "state": {
+                        "status": "error",
+                        "input": {"issue": 138},
+                        "error": "permission denied",
+                    },
+                },
+            },
+            'MCP call: mcp__github__get_issue {"issue":138} | '
+            "MCP result (error): permission denied",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "read",
+                    "state": {"status": "completed", "output": "file data"},
+                },
+            },
+            "Tool result: file data",
+        ),
+        (
+            {
+                "type": "text",
+                "part": {"type": "text", "text": "first\nsecond"},
+            },
+            r"Assistant: first\nsecond",
+        ),
+        (
+            {
+                "type": "text",
+                "part": {"type": "text", "text": "first\rsecond"},
+            },
+            r"Assistant: first\rsecond",
+        ),
+        (
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": "lookup",
+                    "state": {
+                        "status": "running",
+                        "input": {"first": "café", "second": 2},
+                    },
+                },
+            },
+            'Tool call: lookup {"first":"café","second":2}',
+        ),
+        (
+            {"type": "error", "error": {"data": {"message": "bad request"}}},
+            "Error: bad request",
+        ),
+        (
+            {"type": "error", "message": "top-level failure", "error": "ignored"},
+            "Error: top-level failure",
+        ),
+        (
+            {
+                "type": "error",
+                "message": {"unexpected": True},
+                "error": "fallback failure",
+            },
+            "Error: fallback failure",
+        ),
+        ({"type": "error", "error": "fallback failure"}, "Error: fallback failure"),
+        (
+            {"type": "error", "error": {"unexpected": True}},
+            "Error: OpenCode reported an error",
+        ),
+        ({"type": "error"}, "Error: OpenCode reported an error"),
+        ({"type": "session_error", "message": "not recognized"}, None),
+        ({"type": "step_finish", "part": {"reason": "stop"}}, None),
+        ({"type": "tool_use", "part": "not a part"}, None),
+        ({"type": "unknown"}, None),
+    ],
+)
+def test_opencode_stream_formatter_returns_exact_lines(
+    event: dict, expected: str | None
+) -> None:
+    assert opencode.format_event(event) == expected
+
+
+@pytest.mark.parametrize(
+    ("fixture", "formatter", "expected"),
+    [
+        (
+            "claude.jsonl",
+            claude.format_event,
+            [
+                'Tool call: Bash {"command":"printf claude-fixture-check","description":"Print fixture check string"}',
+                "Tool result: claude-fixture-check",
+                "Assistant: FIXTURE-DONE",
+            ],
+        ),
+        (
+            "codex.jsonl",
+            codex.format_event,
+            [
+                "Assistant: I'm running the requested shell check.",
+                "Tool call: command /usr/bin/bash -lc 'printf codex-fixture-check'",
+                "Tool result: codex-fixture-check",
+                "Assistant: FIXTURE-DONE",
+            ],
+        ),
+        (
+            "opencode.jsonl",
+            opencode.format_event,
+            [
+                "Assistant: Running the requested shell check.",
+                'Tool call: bash {"command":"printf opencode-fixture-check"} | Tool result: opencode-fixture-check',
+                "Assistant: FIXTURE-DONE",
+            ],
+        ),
+    ],
+)
+def test_recorded_stream_fixtures_format_supported_events(
+    fixture: str,
+    formatter: Callable[[dict], str | None],
+    expected: list[str],
+) -> None:
+    path = Path(__file__).parent / "fixtures" / "streaming" / fixture
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+
+    assert [
+        formatted for event in events if (formatted := formatter(event))
+    ] == expected
+
+
+def test_streaming_runner_formats_complete_json_lines_before_child_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     child_finished = tmp_path / "child-finished"
     stderr = _TrackingStderr(child_finished)
     monkeypatch.setattr(sys, "stderr", stderr)
+
+    formatted: list[dict] = []
+
+    def format_event(event: dict) -> str | None:
+        formatted.append(event)
+        display = event.get("display")
+        return display if isinstance(display, str) else None
 
     args = _python(
         """
@@ -98,7 +858,11 @@ def test_streaming_runner_echoes_complete_lines_before_child_exit(
         import time
 
         finished = pathlib.Path(sys.argv[1])
-        sys.stdout.write("event one\\nevent two\\n")
+        sys.stdout.write('{"dis')
+        sys.stdout.flush()
+        time.sleep(0.2)
+        sys.stdout.write('play":"event one"}\\nnot json\\n["ignored"]\\n')
+        sys.stdout.write('{"display":"event two"}\\n')
         sys.stdout.flush()
         time.sleep(0.2)
         finished.write_text("done")
@@ -113,15 +877,20 @@ def test_streaming_runner_echoes_complete_lines_before_child_exit(
         cwd=tmp_path,
         timeout=5,
         stream=True,
+        format_event=format_event,
     )
 
     assert proc.args == args
     assert proc.returncode == 0
-    assert proc.stdout == "event one\nevent two\n"
+    assert (
+        proc.stdout
+        == '{"display":"event one"}\nnot json\n["ignored"]\n{"display":"event two"}\n'
+    )
     assert proc.stderr == ""
     assert stderr.getvalue() == "event one\nevent two\n"
     assert stderr.writes == ["event one\n", "event two\n"]
     assert stderr.wrote_before_child_exit
+    assert formatted == [{"display": "event one"}, {"display": "event two"}]
 
 
 def test_streaming_runner_matches_subprocess_text_decoding(
@@ -167,7 +936,7 @@ def test_streaming_runner_matches_subprocess_text_decoding(
     assert streamed.stdout == baseline.stdout
     assert streamed.stderr == baseline.stderr
     assert captured.out == ""
-    assert captured.err == "π\nsecond\n"
+    assert captured.err == ""
 
 
 def test_streaming_runner_drains_large_stdin_and_stderr(
@@ -202,7 +971,7 @@ def test_streaming_runner_drains_large_stdin_and_stderr(
     assert proc.returncode == 0
     assert proc.stdout == f"{len(prompt)}\n"
     assert proc.stderr == "e" * stderr_size
-    assert captured.err == f"{len(prompt)}\n"
+    assert captured.err == ""
 
 
 def test_streaming_runner_kills_and_reaps_a_child_at_the_deadline(
@@ -286,7 +1055,7 @@ def test_streaming_runner_closes_empty_stdin(
     )
 
     assert proc.stdout == "0\n"
-    assert capsys.readouterr().err == "0\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_flushes_a_final_carriage_return(
@@ -313,7 +1082,7 @@ def test_streaming_runner_flushes_a_final_carriage_return(
 
     assert proc.stdout == "partial\n"
     assert proc.stderr == ""
-    assert capsys.readouterr().err == "partial\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_honors_the_requested_working_directory(
@@ -330,7 +1099,7 @@ def test_streaming_runner_honors_the_requested_working_directory(
     )
 
     assert proc.stdout == f"{tmp_path}\n"
-    assert capsys.readouterr().err == f"{tmp_path}\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_uses_the_locale_text_encoding(
@@ -548,12 +1317,13 @@ def test_streaming_runner_reaps_a_child_when_decoding_fails(
 
 
 @pytest.mark.parametrize(
-    ("backend_cls", "module", "stdout"),
+    ("backend_cls", "module", "stdout", "expected_formatter"),
     [
         (
             claude.ClaudeBackend,
             claude,
             '{"type":"result","session_id":"s1","result":"reply"}',
+            claude.format_event,
         ),
         (
             codex.CodexBackend,
@@ -561,12 +1331,14 @@ def test_streaming_runner_reaps_a_child_when_decoding_fails(
             '{"type":"thread.started","thread_id":"s1"}\n'
             '{"type":"item.completed","item":{"type":"agent_message",'
             '"text":"reply"}}\n',
+            codex.format_event,
         ),
-        (grok.GrokBackend, grok, '{"sessionId":"s1","text":"reply"}'),
+        (grok.GrokBackend, grok, '{"sessionId":"s1","text":"reply"}', None),
         (
             opencode.OpenCodeBackend,
             opencode,
             '{"type":"text","sessionID":"s1","part":{"id":"p1","text":"reply"}}\n',
+            opencode.format_event,
         ),
     ],
 )
@@ -574,6 +1346,7 @@ def test_each_backend_forwards_stream_to_the_shared_runner(
     backend_cls: type[base.AgentBackend],
     module: object,
     stdout: str,
+    expected_formatter: object,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -592,6 +1365,13 @@ def test_each_backend_forwards_stream_to_the_shared_runner(
 
     assert result.reply == "reply"
     assert calls[0]["stream"] is True
+    assert calls[0].get("format_event") is expected_formatter
+
+    calls.clear()
+    result = backend_cls().run_turn("prompt", None, tmp_path)
+
+    assert result.reply == "reply"
+    assert calls[0].get("format_event") is None
 
 
 def test_agent_forwards_turn_arguments_and_keeps_stream_opt_in(

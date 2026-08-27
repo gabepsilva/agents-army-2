@@ -63,6 +63,78 @@ DIALECT_KEYWORD = "$schema"
 STRUCTURED_FIELD = "structured_output"
 
 
+def _stream_value(value: object) -> str:
+    """Keep a streamed value readable on one stderr line."""
+    if isinstance(value, str):
+        return value.replace("\r", "\\r").replace("\n", "\\n")
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _format_content_blocks(content: object) -> str | None:
+    """Format the supported blocks in one Claude message event."""
+    if not isinstance(content, list):
+        return None
+
+    lines: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "thinking":
+            lines.append("Thinking...")
+        elif block_type == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                lines.append(f"Assistant: {_stream_value(text)}")
+        elif block_type == "tool_use":
+            name = block.get("name")
+            if isinstance(name, str):
+                label = "MCP call" if name.startswith("mcp__") else "Tool call"
+                lines.append(f"{label}: {name} {_stream_value(block.get('input', {}))}")
+        elif block_type == "tool_result":
+            label = (
+                "Tool result (error)"
+                if block.get("is_error") is True
+                else "Tool result"
+            )
+            lines.append(f"{label}: {_stream_value(block.get('content'))}")
+    return " | ".join(lines) or None
+
+
+def _format_error_event(event: dict) -> str:
+    """Format a Claude error event without exposing usage metadata."""
+    message = event.get("result")
+    if not isinstance(message, str) or not message:
+        message = event.get("message")
+    if not isinstance(message, str) or not message:
+        message = event.get("error")
+    if message is None:
+        message = "Claude reported an error"
+    return f"Error: {_stream_value(message)}"
+
+
+def format_event(event: dict) -> str | None:
+    """Render one Claude stream event for the live stderr display."""
+    event_type = event.get("type")
+    if event_type in {"assistant", "user"}:
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return None
+        return _format_content_blocks(message.get("content"))
+    if event_type == "result" and event.get("is_error") is True:
+        return _format_error_event(event)
+    if event_type == "error":
+        return _format_error_event(event)
+    return None
+
+
+def _output_format_args(stream: bool) -> list[str]:
+    """Choose Claude's JSON envelope mode without changing other flags."""
+    if stream:
+        return ["--output-format", "stream-json", "--verbose"]
+    return ["--output-format", "json"]
+
+
 def schema_argument(schema: OutputSchema) -> str:
     """The schema document as `--json-schema` accepts it: no dialect keyword.
 
@@ -153,8 +225,7 @@ class ClaudeBackend(AgentBackend):
         args = [
             "claude",
             "--print",
-            "--output-format",
-            "json",
+            *_output_format_args(stream),
             "--permission-mode",
             PERMISSION_MODE,
         ]
@@ -178,6 +249,7 @@ class ClaudeBackend(AgentBackend):
             cwd=cwd,
             timeout=timeout,
             stream=stream,
+            format_event=format_event if stream else None,
         )
         if proc.returncode != 0:
             raise ClaudeTurnError(

@@ -603,7 +603,7 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument(
         "--stream",
         action="store_true",
-        help="echo complete child stdout lines to stderr while the turn runs",
+        help="render recognized backend events to stderr while the turn runs",
     )
     talk.add_argument("-p", "--prompt")
     talk.add_argument("--prompt-file")
