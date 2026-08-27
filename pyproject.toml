@@ -121,6 +121,7 @@ source_paths = [
 also_copy = ["backends/", "orchestrator/"]
 pytest_add_cli_args_test_selection = [
     "tests/test_agent_listing.py",
+    "tests/test_backend_boundary.py",
     "tests/test_backends.py",
     "tests/test_cli_surface.py",
     "tests/test_fork.py",
