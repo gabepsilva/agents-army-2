@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import codecs
+import io
 import json
+import locale
 import logging
+import os
+import select
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, cast
 
 # One turn's wall-clock ceiling, shared by every backend and by the
 # orchestrator that budgets a retry loop against it. A per-backend literal
@@ -77,6 +85,7 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     cwd: Path,
     timeout: int,
     prompt_on_stdin: bool = False,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one backend's already-built argv and log the turn around it.
 
@@ -92,7 +101,9 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
     written there instead, for OpenCode, which joins positional arguments
     before sending them to the model: omitting that argument makes its
     no-value fallback read stdin verbatim, preserving spaces, quotes, and
-    newlines.
+    newlines. With `stream`, the same captured streams are read through
+    nonblocking pipes and complete stdout lines are echoed to this process's
+    flushed stderr while the child runs.
     """
     log.debug(
         "%s turn: cwd=%s resume=%s prompt_chars=%d timeout=%ds",
@@ -103,30 +114,43 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
         timeout,
     )
     log.debug("%s turn: invoking %s", name, describe_command(args, prompt))
-    # The two arms differ only in the stdin kwarg, spelled out at each call
-    # because subprocess.run is overloaded on it and an unpacked mapping
-    # leaves the type checker no overload to pick.
-    started = time.monotonic()
-    if prompt_on_stdin:
-        proc = subprocess.run(
+    if stream:
+        started = time.monotonic()
+        proc = _run_streaming_cli_turn(
             args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
+            prompt=prompt,
+            cwd=cwd,
             timeout=timeout,
-            input=prompt,
+            prompt_on_stdin=prompt_on_stdin,
         )
     else:
-        proc = subprocess.run(
-            args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-        )
+        # The non-streaming arm intentionally remains the subprocess.run path:
+        # its text-mode decoding, input handling, and TimeoutExpired behavior
+        # are the compatibility contract for every existing backend.
+        # The two arms differ only in the stdin kwarg, spelled out at each call
+        # because subprocess.run is overloaded on it and an unpacked mapping
+        # leaves the type checker no overload to pick.
+        started = time.monotonic()
+        if prompt_on_stdin:
+            proc = subprocess.run(
+                args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+                input=prompt,
+            )
+        else:
+            proc = subprocess.run(
+                args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+                stdin=subprocess.DEVNULL,
+            )
     log.debug(
         "%s turn: exited %d after %.1fs with %d chars of stdout",
         name,
@@ -135,6 +159,234 @@ def run_cli_turn(  # noqa: PLR0913 - flat process arguments, see above
         len(proc.stdout),
     )
     return proc
+
+
+def _new_text_decoder() -> io.IncrementalNewlineDecoder:
+    """Build the incremental equivalent of subprocess text-mode decoding."""
+    encoding = locale.getpreferredencoding(False)
+    decoder = codecs.getincrementaldecoder(encoding)()
+    return io.IncrementalNewlineDecoder(decoder, translate=True)
+
+
+def _close_pipe(pipe: BinaryIO | None) -> None:
+    """Close one Popen pipe, tolerating the already-drained case."""
+    if pipe is not None:
+        pipe.close()
+
+
+def _kill_and_reap(process: subprocess.Popen[bytes]) -> None:
+    """Kill a timed-out child and wait for its process entry to disappear."""
+    with suppress(ProcessLookupError):
+        process.kill()
+    process.wait()
+
+
+class _StreamingReader:
+    """One nonblocking child output pipe, decoded with text-mode semantics."""
+
+    def __init__(self, pipe: BinaryIO, *, echo_lines: bool) -> None:
+        self.pipe = pipe
+        self.fd = pipe.fileno()
+        self.decoder = _new_text_decoder()
+        self.echo_lines = echo_lines
+        self.raw = bytearray()
+        self.parts: list[str] = []
+        self.pending_line = ""
+
+    @property
+    def text(self) -> str:
+        return "".join(self.parts)
+
+    def read(self) -> bool:
+        """Read one ready chunk; return false after reaching EOF."""
+        try:
+            chunk = os.read(self.fd, 65536)
+        except BlockingIOError:
+            return True
+        if not chunk:
+            self._decode(b"", final=True)
+            self.pipe.close()
+            return False
+        self.raw.extend(chunk)
+        self._decode(chunk)
+        return True
+
+    def _decode(self, chunk: bytes, *, final: bool = False) -> None:
+        decoded = self.decoder.decode(chunk, final=final)
+        if not decoded:
+            return
+        self.parts.append(decoded)
+        if not self.echo_lines:
+            return
+        self.pending_line += decoded
+        while "\n" in self.pending_line:
+            line, self.pending_line = self.pending_line.split("\n", 1)
+            sys.stderr.write(f"{line}\n")
+            sys.stderr.flush()
+
+    def close(self) -> None:
+        self.pipe.close()
+
+
+class _StreamingInput:
+    """A nonblocking stdin pipe that drains a prompt in bounded writes."""
+
+    def __init__(self, pipe: BinaryIO, data: bytes) -> None:
+        self.pipe = pipe
+        self.fd = pipe.fileno()
+        self.pending = memoryview(data)
+        if not self.pending:
+            self.close()
+
+    @property
+    def open(self) -> bool:
+        return not self.pipe.closed
+
+    def write(self) -> bool:
+        """Write one ready chunk; return false after closing stdin."""
+        try:
+            written = os.write(self.fd, self.pending)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close()
+            return False
+        self.pending = self.pending[written:]
+        if not self.pending:
+            self.close()
+            return False
+        return True
+
+    def close(self) -> None:
+        self.pipe.close()
+
+
+def _wait_for_streams(
+    readers: dict[int, _StreamingReader],
+    input_stream: _StreamingInput | None,
+    *,
+    args: list[str],
+    deadline: float,
+    timeout: int,
+) -> tuple[list[int], list[int]]:
+    """Wait for at least one pipe event against the shared deadline."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(args, timeout)
+        write_fds = [input_stream.fd] if input_stream is not None else []
+        try:
+            readable, writable, _ = select.select(
+                list(readers), write_fds, [], remaining
+            )
+        except InterruptedError:
+            continue
+        if readable or writable:
+            return readable, writable
+        raise subprocess.TimeoutExpired(args, timeout)
+
+
+def _read_ready_pipes(
+    readable: list[int], readers: dict[int, _StreamingReader]
+) -> None:
+    """Drain one nonblocking chunk from every output pipe selected as ready."""
+    for fd in readable:
+        reader = readers[fd]
+        if not reader.read():
+            del readers[fd]
+
+
+def _write_ready_input(
+    input_stream: _StreamingInput | None, writable: list[int]
+) -> _StreamingInput | None:
+    """Write one ready stdin chunk and clear the writer after EOF."""
+    if (
+        input_stream is not None
+        and input_stream.fd in writable
+        and not input_stream.write()
+    ):
+        return None
+    return input_stream
+
+
+def _run_streaming_cli_turn(
+    args: list[str],
+    *,
+    prompt: str,
+    cwd: Path,
+    timeout: int,
+    prompt_on_stdin: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Run a CLI with nonblocking pipes and one absolute deadline.
+
+    Binary reads are decoded locally so a UTF-8 character or CRLF pair split
+    across pipe reads has the same text-mode result as ``subprocess.run``.
+    Keeping the byte buffers too lets a timeout expose the same raw captured
+    values as the standard subprocess boundary.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    encoding = locale.getpreferredencoding(False)
+    input_bytes = prompt.encode(encoding) if prompt_on_stdin else None
+    process = subprocess.Popen(
+        args,
+        cwd=str(cwd),
+        stdin=subprocess.PIPE if prompt_on_stdin else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    stdout_reader = _StreamingReader(cast(BinaryIO, process.stdout), echo_lines=True)
+    stderr_reader = _StreamingReader(cast(BinaryIO, process.stderr), echo_lines=False)
+    stdin_pipe = cast(BinaryIO | None, process.stdin)
+    input_stream = (
+        _StreamingInput(stdin_pipe, input_bytes)
+        if prompt_on_stdin and input_bytes is not None and stdin_pipe is not None
+        else None
+    )
+    if input_stream is not None and not input_stream.open:
+        input_stream = None
+    for fd in (stdout_reader.fd, stderr_reader.fd):
+        os.set_blocking(fd, False)
+    if input_stream is not None:
+        os.set_blocking(input_stream.fd, False)
+    readers = {stdout_reader.fd: stdout_reader, stderr_reader.fd: stderr_reader}
+
+    try:
+        while readers or input_stream is not None:
+            readable, writable = _wait_for_streams(
+                readers,
+                input_stream,
+                args=args,
+                deadline=deadline,
+                timeout=timeout,
+            )
+            _read_ready_pipes(readable, readers)
+            input_stream = _write_ready_input(input_stream, writable)
+
+        try:
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired(args, timeout) from None
+    except subprocess.TimeoutExpired:
+        _kill_and_reap(process)
+        raise subprocess.TimeoutExpired(
+            args,
+            timeout,
+            output=bytes(stdout_reader.raw) or None,
+            stderr=bytes(stderr_reader.raw) or None,
+        ) from None
+    finally:
+        _close_pipe(stdin_pipe)
+        stdout_reader.close()
+        stderr_reader.close()
+        if process.poll() is None:
+            _kill_and_reap(process)
+
+    return subprocess.CompletedProcess(
+        args,
+        returncode,
+        stdout=stdout_reader.text,
+        stderr=stderr_reader.text,
+    )
 
 
 def stdout_for_error(stdout: str) -> str:
