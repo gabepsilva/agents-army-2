@@ -23,7 +23,7 @@ from backends.base import (
     structured_reply,
 )
 from backends.registry import register_backend
-from orchestrator import Orchestrator
+from orchestrator.core import Orchestrator
 from orchestrator.schema import load_schema
 from tests.path_helpers import runtime_paths
 
@@ -140,14 +140,14 @@ class TestUtcNow:
 
 class TestAgentDefaults:
     def test_an_agent_requires_an_explicit_workdir(self) -> None:
-        constructor = cast(Callable[..., object], orchestrator.Agent)
+        constructor = cast(Callable[..., object], core.Agent)
         with pytest.raises(TypeError, match="workdir"):
             constructor("a", EchoBackend())
 
     def test_a_freshly_constructed_agent_has_no_metadata_yet(
         self, tmp_path: Path
     ) -> None:
-        agent = orchestrator.Agent("a", EchoBackend(), workdir=tmp_path)
+        agent = core.Agent("a", EchoBackend(), workdir=tmp_path)
         assert agent.created_at is None
         assert agent.last_turn_at is None
         assert agent.turns is None

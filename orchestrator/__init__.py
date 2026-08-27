@@ -126,7 +126,7 @@ _CLI_EXIT_CODES: tuple[tuple[tuple[type[Exception], ...], int], ...] = (
     ((SchemaLoadError,), 2),
     (
         (
-            OrchestratorError,
+            core.OrchestratorError,
             UnknownBackendError,
             SkillError,
             SchemaError,
@@ -173,7 +173,7 @@ def _agent_config(agent: Agent) -> tuple[str, str | None, str | None]:
     return agent.backend.name, agent.backend.model, agent.backend.reasoning_effort
 
 
-def cmd_create(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_create(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     agent = orchestrator.spawn(
         opts.name,
         opts.backend,
@@ -183,7 +183,7 @@ def cmd_create(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(f"created agent '{agent.name}' backend={agent.backend.name}")
 
 
-def cmd_fork(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_fork(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     agent = orchestrator.fork(opts.source, opts.dest)
     print(
         f"forked agent '{opts.source}' into '{agent.name}' backend={agent.backend.name}"
@@ -191,7 +191,7 @@ def cmd_fork(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
 
 
 def _ensure_agent(
-    orchestrator: Orchestrator,
+    orchestrator: core.Orchestrator,
     name: str,
     backend: str | None = None,
     model: str | None = None,
@@ -230,7 +230,7 @@ def _ensure_agent(
         )
 
 
-def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_talk(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     prompt = opts.prompt
     composed = prompt
     if opts.skill is not None:
@@ -272,14 +272,14 @@ def cmd_talk(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
     print(json.dumps(result.structured, indent=2, sort_keys=True))
 
 
-def cmd_chat(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_chat(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     """Run the selected backend's interactive session and preserve its status."""
     returncode = orchestrator.chat(opts.name)
     if returncode:
         raise SystemExit(returncode)
 
 
-def _print_agents(orchestrator: Orchestrator) -> None:
+def _print_agents(orchestrator: core.Orchestrator) -> None:
     # Printed unconditionally, including the `no agents` case: which
     # registry a `--team`/AGENTS_ARMY_STATE_FILE/AGENTS_ARMY_HOME ladder
     # resolved to is exactly what's unknowable without this line.
@@ -324,7 +324,7 @@ def _print_agents(orchestrator: Orchestrator) -> None:
         )
 
 
-def cmd_list(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_list(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     if opts.target == "agents":
         _print_agents(orchestrator)
         return
@@ -344,7 +344,7 @@ def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
     registry that read fine and is simply empty.
     """
     try:
-        raw = _load_state_file(state_file)
+        raw = core._load_state_file(state_file)
     except (StateError, OSError):
         return None
     # The shape a registry is supposed to have, checked explicitly rather
@@ -458,7 +458,7 @@ def _teardown_team(team: str, team_root: Path) -> None:
     print(f"deleted team '{team}'")
 
 
-def cmd_delete(orchestrator: Orchestrator, opts: argparse.Namespace) -> None:
+def cmd_delete(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     # Always a named agent: `delete --team T` with no name is teardown, and
     # main() runs that itself, before an Orchestrator exists.
     agent = orchestrator.delete(opts.name)
@@ -597,7 +597,7 @@ def _build_parser() -> argparse.ArgumentParser:
     talk.add_argument("-s", "--skill")
     talk.add_argument("--schema")
     talk.add_argument(
-        "--retries", type=_retry_count, default=DEFAULT_VALIDATION_RETRIES
+        "--retries", type=_retry_count, default=core.DEFAULT_VALIDATION_RETRIES
     )
     talk.add_argument("--timeout", type=_positive_seconds, default=DEFAULT_TURN_TIMEOUT)
     talk.add_argument(
@@ -636,7 +636,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-VERBS: dict[str, Callable[[Orchestrator, argparse.Namespace], None]] = {
+VERBS: dict[str, Callable[[core.Orchestrator, argparse.Namespace], None]] = {
     "create": cmd_create,
     "talk": cmd_talk,
     "chat": cmd_chat,
@@ -717,7 +717,7 @@ def _team_locked(path: Path, team: str, mode: int) -> Iterator[None]:
     """
     with ExitStack() as stack:
         try:
-            stack.enter_context(_flock(path, mode))
+            stack.enter_context(core._flock(path, mode))
         except BlockingIOError:
             raise TeamBusyError(
                 f"team '{team}' is in use by another command; try again "
@@ -946,7 +946,7 @@ def main(argv: list[str] | None = None) -> None:
                 # state file, and this reads N of them.
                 _print_teams(runtime_paths)
             else:
-                VERBS[opts.verb](Orchestrator(runtime_paths), opts)
+                VERBS[opts.verb](core.Orchestrator(runtime_paths), opts)
     except _CLI_ERRORS as exc:
         # KeyError(str) renders as '"message"' — print the payload, not repr.
         message = exc.args[0] if exc.args else str(exc)

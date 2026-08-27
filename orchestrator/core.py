@@ -25,7 +25,10 @@ from typing import NamedTuple, TextIO
 from backends import AgentBackend, TurnResult, get_backend
 from backends.base import DEFAULT_TURN_TIMEOUT, OutputSchema
 
-from . import paths
+from . import (
+    paths,
+    skills,  # noqa: F401 - required by the core module boundary; skills.py is import-safe.
+)
 from .schema import (
     ReplyValidationError,
     compose_schema_prompt,

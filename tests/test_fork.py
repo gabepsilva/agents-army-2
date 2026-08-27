@@ -15,6 +15,7 @@ from typing import ClassVar
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -22,7 +23,7 @@ from backends.base import (
     TurnResult,
 )
 from backends.registry import register_backend
-from orchestrator import (
+from orchestrator.core import (
     AgentExistsError,
     AgentNotFoundError,
     Orchestrator,
@@ -114,7 +115,7 @@ def test_an_agent_that_was_never_forked_takes_an_ordinary_first_turn(
 ) -> None:
     """Nothing pending means nothing to fork: the resume target is this
     agent's own session, and the fork flag stays off."""
-    orchestrator.Agent("solo", ForkingBackend(), workdir=tmp_path).talk("hello")
+    core.Agent("solo", ForkingBackend(), workdir=tmp_path).talk("hello")
 
     assert ForkingBackend.turns == [("hello", None, False)]
 

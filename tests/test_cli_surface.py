@@ -108,7 +108,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
         encoding="utf-8",
     )
     fake = FakeOrchestrator()
-    monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: fake)
+    monkeypatch.setattr(core, "Orchestrator", lambda *_: fake)
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "skills"))
 
     orchestrator.main(
@@ -171,7 +171,8 @@ def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
     def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    monkeypatch.setattr(core, "Orchestrator", fail)
+
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(argv)
     assert excinfo.value.code == 2
@@ -188,7 +189,8 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
     def fail(*_: object) -> None:
         raise AssertionError("invalid CLI input constructed Orchestrator")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", fail)
+    monkeypatch.setattr(core, "Orchestrator", fail)
+
     for argv in (
         ["talk", "a", "-p", "one", "--prompt-file", str(prompt_file)],
         ["talk", "a", "--prompt-file", str(prompt_file), "--", "two"],
@@ -239,7 +241,7 @@ def test_version_exits_before_constructing_orchestrator(
     argv: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
@@ -304,7 +306,7 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
     )
     monkeypatch.setattr(orchestrator, "_print_dependency_check", report)
     monkeypatch.setattr(
-        orchestrator,
+        core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
@@ -382,9 +384,9 @@ def test_missing_skills_directory_has_one_stderr_line(
     ("argv", "level"),
     [
         (["-v", "list"], logging.DEBUG),
-        (["-vv", "list"], orchestrator.TRACE),
-        (["-vvv", "list"], orchestrator.TRACE),
-        (["-v", "talk", "-v", "a", "-p", "x"], orchestrator.TRACE),
+        (["-vv", "list"], core.TRACE),
+        (["-vvv", "list"], core.TRACE),
+        (["-v", "talk", "-v", "a", "-p", "x"], core.TRACE),
     ],
 )
 def test_verbosity_counts_before_and_after_verb(
@@ -419,7 +421,7 @@ def test_verbosity_counts_before_and_after_verb(
         def talk(self, *args, **kwargs) -> TurnResult:
             return TurnResult(session_id="sid", reply="reply", raw="")
 
-    monkeypatch.setattr(orchestrator, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(core, "Orchestrator", FakeOrchestrator)
     for logger_name in orchestrator.OWN_LOGGERS:
         logging.getLogger(logger_name).setLevel(logging.NOTSET)
     orchestrator.main(argv)
