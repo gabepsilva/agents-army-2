@@ -14,8 +14,10 @@ project actually needs. Judge it and take exactly one of these four paths:
    can genuinely read in one sitting; if the acceptance criteria do not fit a
    short list, split. Open self-contained child issues with 'gh issue create',
    each a complete ask on its own that references this issue. Post a comment
-   listing the children in the order you suggest, then add the label
-   'owens-split'.
+   explaining the split and listing the children in build order, and end that
+   comment with exactly one line of the form 'CHILDREN: #12 #13' naming the
+   child issue numbers in that order - the driver parses it. Then add the
+   label 'owens-split'.
 3. RESHAPE - the underlying need is real but the ask is wrong or too small.
    Your job is a good outcome for the project, not a surviving proposal - the
    scope may grow beyond the original ask. Continue as path 4 with your

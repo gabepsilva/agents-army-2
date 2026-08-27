@@ -9,9 +9,14 @@ Critique at the requirements level, without diving into the code:
 - Which of the listed assumptions are load-bearing?
 
 Open the code only for a claim that you dispute AND whose answer would change
-the decision - one check per dispute, and the check settles it. Everything
-else stays an assumption; the developer verifies assumptions while
-implementing, in the files he is editing anyway.
+the decision. Route each check to wherever correctness is cheapest: if one
+cheap command from where you already are settles it, run it yourself and post
+the finding, not the question. If it is not cheap from here, post the dispute
+and name the exact check that settles it, for the author to run in the
+rebuttal - a dispute without a named settling check is an opinion; do not
+post it. Anything cheapest to verify at implementation time stays an
+assumption; the developer verifies assumptions in the files he is editing
+anyway.
 
 If nothing decision-changing is disputed, post the critique showing what you
 checked and add the label 'spectacle-is-happy' in the same turn. Otherwise
