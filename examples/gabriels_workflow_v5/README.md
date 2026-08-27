@@ -39,10 +39,15 @@ back to fresh agents per issue and print that the fallback is in effect.
 - Prompts are rendered from `prompts/*.md` substituting ONLY these variables:
   `$issue_url`, `$pr_url`, `$ci_head`, `$ci_log` (use `string.Template`; do
   not substitute anything else — the prose contains other dollar signs).
-- The first talk to an agent carries its backend flags
-  (`-b claude -m opus -e <effort>`: owen/doku medium, spectacle/devin low,
-  code-reviewer high); later talks resume the session and must not re-send
-  them. Devin's first build talk also carries
+- The first talk to an agent carries its backend flags. One dict per agent
+  holds them (`{"backend": ..., "model": ..., "effort": ...}`), so a single
+  line moves an agent to another model: primer/owen `claude opus medium`,
+  code-reviewer `claude opus high`, spectacle/devin `claude luna max`, doku
+  `opencode opencode/muse-spark-1.2-contributor-free medium`. The line that
+  announces a first talk prints that dict, so the run log says what each agent
+  ran on, and every turn is followed by `<agent> worked for N seconds`. Later
+  talks resume the session and must not re-send the flags.
+  Devin's first build talk also carries
   `-s implement,tdd,code-review-and-quality`; the reviewer's first talk
   carries `-s code-review-and-quality`; skills are never re-sent.
 - Before relying on devin's work, verify he committed and pushed: clean

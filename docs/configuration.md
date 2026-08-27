@@ -143,17 +143,15 @@ Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.
 | backend | CLI invocation | resume | fork | notes |
 |---|---|---|---|---|
 | `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | `--fork-session` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
-| `codex` | `codex exec` | `codex exec resume` | — | |
+| `codex` | `codex exec` | `codex exec resume` | `codex exec fork` (in `resume`'s place) | |
 | `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | `--fork-session` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
-| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | — | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
+| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | `--fork` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
 A backend declares whether it can fork with the class attribute
 `supports_fork`, which [`fork`](cli-reference.md) checks before it creates
-anything. `codex` and `opencode` answer `False` and also raise
-`fork is not yet implemented for the <name> backend` if the flag reaches
-them anyway — their CLIs do have a fork of their own
-(`codex exec fork`, `opencode run --fork`), in an invocation shape this
-interface does not speak yet.
+anything. All four shipped backends answer `True`. The attribute defaults to
+`False` on `AgentBackend`, so a backend added outside this repo has to opt in
+once it can emit a fork of its own.
 
 Every backend runs its CLI through one shared boundary, `run_cli_turn` in
 `backends/base.py`. Claude, Codex, and Grok take its default `stdin=DEVNULL`

@@ -15,10 +15,14 @@ from backends.base import (
     json_objects,
     run_cli_turn,
     structured_reply,
-    unsupported_fork_message,
 )
 
 log = logging.getLogger(__name__)
+
+# Forks whatever session the same command line names, so it is only ever
+# emitted next to the `--session` a resume already carries; opencode itself
+# rejects it with neither `--session` nor `--continue`.
+FORK_FLAG = "--fork"
 
 
 class OpenCodeTurnError(TurnError):
@@ -104,6 +108,7 @@ class OpenCodeBackend(AgentBackend):
 
     name = "opencode"
     enforces_schema = False
+    supports_fork = True
 
     def run_turn(
         self,
@@ -115,8 +120,6 @@ class OpenCodeBackend(AgentBackend):
         *,
         resume_as_fork: bool = False,
     ) -> TurnResult:
-        if resume_as_fork:
-            raise OpenCodeTurnError(unsupported_fork_message(self.name))
         cwd = cwd.absolute()
         # OpenCode resolves its project directory from PWD, so --dir remains
         # explicit even though subprocess.run also receives the same cwd.
@@ -135,6 +138,8 @@ class OpenCodeBackend(AgentBackend):
             args += ["--variant", self.reasoning_effort]
         if session_id:
             args += ["--session", session_id]
+            if resume_as_fork:
+                args.append(FORK_FLAG)
 
         proc = run_cli_turn(
             self.name,

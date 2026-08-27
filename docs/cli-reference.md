@@ -161,10 +161,12 @@ independently talkable.
 **Nothing runs at fork time.** `fork` only writes the registry: `DEST` is
 created with no session of its own and a `pending_fork_from` marker holding
 `SOURCE`'s session id. `DEST`'s *first* `talk` resumes that id with the
-backend's fork flag (`--resume <source> --fork-session`), stores the new
-session id the CLI reports, and clears the marker; every later turn is an
-ordinary `--resume <dest>`. So priming one session and forking it N times
-costs N registry writes, not N model turns.
+backend's own fork spelling — `--resume <source> --fork-session` for claude
+and grok, `codex exec fork <source>`, `opencode run --session <source>
+--fork` — stores the new session id the CLI reports, and clears the marker;
+every later turn is an ordinary resume of `DEST`'s own session. So priming
+one session and forking it N times costs N registry writes, not N model
+turns.
 
 **The fork is therefore lazy, and this is deliberate:** `DEST` inherits
 `SOURCE`'s context as of `DEST`'s **first turn**, not as of the `fork` call,
@@ -172,8 +174,8 @@ so talking to `SOURCE` in between moves the fork's starting point forward.
 Precisely: the marker is a *snapshot of `SOURCE`'s session id* taken at fork
 time, and what `DEST` inherits is whatever that session holds when `DEST`
 first resumes it — which is everything `SOURCE` has said into it meanwhile,
-because claude and grok keep one session id across resumes. Were a CLI ever
-to report a new id per turn, the fork point would instead be frozen at the
+because every shipped CLI keeps one session id across resumes. Were a CLI
+ever to report a new id per turn, the fork point would instead be frozen at the
 `fork` call. Either way, forking and then talking to the copy before
 continuing the source gives you the context frozen where it was.
 
@@ -185,7 +187,8 @@ rather than pointing both agents at one session.
 `fork` validates eagerly and creates nothing when it refuses — it exits 1
 with a single line for an unknown `SOURCE`, a `SOURCE` that has not had a
 turn yet (nothing to fork), a `DEST` name already taken, or a `SOURCE` on a
-backend that cannot fork (`codex`, `opencode` — see
+backend that cannot fork — no shipped backend is in that last group, so it
+can only be a backend registered outside this repo (see
 [Backends](configuration.md#backends)).
 
 ## `list` — show agents, the skill catalog, or every team

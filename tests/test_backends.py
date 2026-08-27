@@ -43,6 +43,7 @@ from backends.claude import (
     parse_claude_stdout,
 )
 from backends.claude import SCHEMA_FLAG as CLAUDE_SCHEMA_FLAG
+from backends.codex import FORK_COMMAND as CODEX_FORK_COMMAND
 from backends.codex import SCHEMA_FLAG as CODEX_SCHEMA_FLAG
 from backends.codex import CodexBackend, CodexTurnError
 from backends.grok import (
@@ -54,6 +55,7 @@ from backends.grok import (
 )
 from backends.grok import FORK_FLAG as GROK_FORK_FLAG
 from backends.grok import SCHEMA_FLAG as GROK_SCHEMA_FLAG
+from backends.opencode import FORK_FLAG as OPENCODE_FORK_FLAG
 from backends.opencode import OpenCodeBackend, OpenCodeTurnError
 from backends.registry import (
     UnknownBackendError,
@@ -507,37 +509,8 @@ class TestAgentBackendInterface:
         assert AgentBackend.supports_fork is False
         assert ClaudeBackend.supports_fork is True
         assert GrokBackend.supports_fork is True
-        assert CodexBackend.supports_fork is False
-        assert OpenCodeBackend.supports_fork is False
-
-    @pytest.mark.parametrize(
-        ("backend", "error"),
-        [
-            (CodexBackend(), CodexTurnError),
-            (OpenCodeBackend(), OpenCodeTurnError),
-        ],
-        ids=["codex", "opencode"],
-    )
-    def test_a_backend_without_fork_refuses_before_running_its_cli(
-        self,
-        backend: AgentBackend,
-        error: type[TurnError],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The guard lives in the adapter too, not only in the CLI's own
-        check, so a caller that reaches a backend directly cannot fork one
-        that has no fork flag to emit."""
-
-        def fail(*args, **kwargs):
-            raise AssertionError("the CLI ran for a fork it cannot do")
-
-        monkeypatch.setattr(subprocess, "run", fail)
-        with pytest.raises(error) as excinfo:
-            backend.run_turn("hi", "s1", tmp_path, resume_as_fork=True)
-        assert str(excinfo.value) == (
-            f"fork is not yet implemented for the {backend.name} backend"
-        )
+        assert CodexBackend.supports_fork is True
+        assert OpenCodeBackend.supports_fork is True
 
     def test_get_backend_resolves_grok(self) -> None:
         backend = get_backend("grok", model="grok-test", reasoning_effort="high")
@@ -1219,6 +1192,46 @@ class TestCodexRunTurn:
             "codex exec resume t1 <prompt:5chars> --json --skip-git-repo-check"
         )
         assert messages[3] == "codex turn: parsed session=t1 messages=1 reply_chars=4"
+
+    def test_forked_resume_swaps_fork_in_for_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`codex exec fork <source> <prompt>` takes `resume`'s whole slot: the
+        config flags that precede it and the prompt that follows are where an
+        ordinary resume puts them, and no `resume` survives in the argv."""
+        backend = CodexBackend(model="gpt-test", reasoning_effort="xhigh")
+        schema = OutputSchema(text="{}", path=tmp_path / "schema.json")
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "codex",
+                "exec",
+                "--model",
+                "gpt-test",
+                "--config",
+                'model_reasoning_effort="xhigh"',
+                CODEX_FORK_COMMAND,
+                "source-tid",
+                "again",
+                "--json",
+                "--skip-git-repo-check",
+                CODEX_SCHEMA_FLAG,
+                str(schema.path),
+            ]
+            assert "resume" not in args
+            _assert_subprocess_kwargs(kwargs, tmp_path)
+            stdout = (
+                '{"type":"thread.started","thread_id":"forked-tid"}\n'
+                '{"type":"item.completed","item":'
+                '{"type":"agent_message","text":"hi"}}\n'
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn(
+            "again", "source-tid", tmp_path, schema=schema, resume_as_fork=True
+        )
+        assert result.session_id == "forked-tid"
 
     def test_no_thread_id_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = CodexBackend()
@@ -2042,6 +2055,36 @@ class TestOpenCodeRunTurn:
         assert _messages(caplog)[0] == (
             f"opencode turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
         )
+
+    def test_forked_resume_adds_the_fork_flag_next_to_the_source_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`--fork` needs the source session on the same command line: it forks
+        what `--session` names, and the new id is the one the events report."""
+        backend = OpenCodeBackend()
+        stdout = json.dumps({"type": "step-finish", "sessionID": "forked-sid"})
+
+        def fake_run(args, **kwargs):
+            assert args == [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--auto",
+                "--dir",
+                str(tmp_path),
+                "--session",
+                "source-sid",
+                OPENCODE_FORK_FLAG,
+            ]
+            _assert_subprocess_kwargs(
+                kwargs, tmp_path, expected_stdin=None, expected_input="again"
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = backend.run_turn("again", "source-sid", tmp_path, resume_as_fork=True)
+        assert result.session_id == "forked-sid"
 
     def test_noisy_events_are_combined_and_structured_is_parsed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
