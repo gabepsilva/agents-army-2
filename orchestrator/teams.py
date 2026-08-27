@@ -30,7 +30,7 @@ from pathlib import Path
 
 MARKER = ("agents", "orchestrator_state.json")
 
-# $ROOT/<repo>/<workflow>/<team>/ puts a team at depth 3 and its worktree/ at
+# $AGENTS_ARMY_ROOT/<repo>/<workflow>/<team>/ puts a team at depth 3 and its worktree/ at
 # depth 4, so 4 is exactly one level of headroom, not slack. It is also the
 # only thing bounding the walk: a directory missing agents/ is not a team, so
 # the never-descend rule in `_walk` can't protect it, and the walk

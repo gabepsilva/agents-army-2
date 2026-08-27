@@ -7,12 +7,11 @@ own, so a caller supplying a complete mapping gets a result that cannot
 depend on the machine it runs on — which is what makes the precedence
 ladders below testable rather than merely asserted.
 
-`orchestrator/__init__.py` performs the single import-time construction that
-supplies the ambient values, and keeps exposing the resolved values as
-module globals. A `--team` run derives a second `RuntimePaths` from those
-and hands it down the call chain; nothing is rebound. The immutability here
-is the `RuntimePaths` object's own: a resolved set of paths is never edited
-in place, only derived from.
+`orchestrator.main` performs the single per-invocation construction that
+supplies the ambient values. A `--team` run derives a second `RuntimePaths`
+from those and hands it down the call chain; nothing is rebound. The
+immutability here is the `RuntimePaths` object's own: a resolved set of paths
+is never edited in place, only derived from.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 # The registry filename, under a team's `agents/` directory or on its own
-# below ROOT/HOME.
+# below the configured root or home directory.
 STATE_FILENAME = "orchestrator_state.json"
 # The skills catalog's directory name, relative to whichever root owns it.
 SKILLS_DIRNAME = "SKILLS"
@@ -52,10 +51,10 @@ class RuntimePaths:
         # The backend working directory and skills root default to the
         # caller's cwd (override with AGENTS_ARMY_HOME) rather than next to
         # the installed package, so they don't leak into the venv. The state
-        # file's own default no longer follows HOME — see below.
+        # file's own default no longer follows the resolved home — see below.
         home = Path(env.get("AGENTS_ARMY_HOME", cwd))
         # State file precedence: an explicit path wins outright; failing
-        # that, an explicitly-set AGENTS_ARMY_HOME (not "HOME happens to
+        # that, an explicitly-set AGENTS_ARMY_HOME (not "the resolved home happens to
         # equal cwd", which is the unset case) relocates it alongside
         # workdir/skills_dir; otherwise it defaults under root rather than
         # cwd, so a plain `orchestrator create` run from any checkout writes
