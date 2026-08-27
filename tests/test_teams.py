@@ -1049,13 +1049,12 @@ def test_list_teams_several_teams_under_one_namespace(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "repo-a/gdw-v3/issue-1" in out
-    assert "1 agent" in out
-    assert "dev/claude" in out
-    assert "repo-a/gdw-v3/issue-2" in out
-    assert "2 agents" in out
-    assert "rev/codex" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  repo-a/gdw-v3/issue-1  (1 agent: dev/claude)",
+        "  repo-a/gdw-v3/issue-2  (2 agents: dev/claude, rev/codex)",
+        "",
+    ]
 
 
 def test_list_teams_namespaced_root_and_flat_root_in_same_walk(
@@ -1070,9 +1069,12 @@ def test_list_teams_namespaced_root_and_flat_root_in_same_walk(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "repo-a/gdw-v3/issue-1" in out
-    assert "flat" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  flat  (1 agent: ops/codex)",
+        "  repo-a/gdw-v3/issue-1  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_directory_without_agents_dir_is_not_a_team(
@@ -1086,7 +1088,7 @@ def test_list_teams_directory_without_agents_dir_is_not_a_team(
 
     orchestrator.main(["list", "teams"])
 
-    assert "not-a-team" not in capsys.readouterr().out
+    assert capsys.readouterr().out == "no teams\n"
 
 
 def test_list_teams_flags_a_team_missing_its_worktree(
@@ -1100,9 +1102,11 @@ def test_list_teams_flags_a_team_missing_its_worktree(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "orphan" in out
-    assert "[worktree missing]" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  orphan  (1 agent: dev/claude)  [worktree missing]",
+        "",
+    ]
 
 
 def test_list_teams_team_with_intact_worktree_is_not_flagged(
@@ -1116,7 +1120,11 @@ def test_list_teams_team_with_intact_worktree_is_not_flagged(
 
     orchestrator.main(["list", "teams"])
 
-    assert "[worktree missing]" not in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  healthy  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_decoy_worktree_with_its_own_registry_yields_one_team(
@@ -1137,10 +1145,11 @@ def test_list_teams_decoy_worktree_with_its_own_registry_yields_one_team(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert out.count("issue-1") == 1
-    assert "(1 agent: dev/claude)" in out
-    assert "decoy/codex" not in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  issue-1  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_depth_bound_finds_depth_4_but_not_depth_5(
@@ -1159,10 +1168,11 @@ def test_list_teams_depth_bound_finds_depth_4_but_not_depth_5(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "a/b/c/d" in out
-    assert "x/y/z/w/v" not in out
-    assert "no teams" not in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  a/b/c/d  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_symlink_loop_terminates(
@@ -1196,10 +1206,14 @@ def test_list_teams_out_of_root_teams_dir_is_its_own_group(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert str(root) in out
-    assert str(teams_dir) in out
-    assert "t1" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  no teams",
+        "",
+        str(teams_dir),
+        "  t1  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_teams_dir_under_root_is_not_a_second_group(
@@ -1214,9 +1228,11 @@ def test_list_teams_teams_dir_under_root_is_not_a_second_group(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert out.count("t1") == 1
-    assert out.count(str(root)) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  nested/t1  (1 agent: dev/claude)",
+        "",
+    ]
 
 
 def test_list_teams_finds_a_team_outside_root_when_teams_dir_is_an_ancestor(
@@ -1241,10 +1257,14 @@ def test_list_teams_finds_a_team_outside_root_when_teams_dir_is_an_ancestor(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert out.count("inside_team") == 1
-    assert out.count("outside_team") == 1
-    assert "ops/codex" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  inside_team  (1 agent: dev/claude)",
+        "",
+        str(teams_dir),
+        "  outside_team  (1 agent: ops/codex)",
+        "",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1272,11 +1292,12 @@ def test_list_teams_unreadable_team_registry_does_not_abort_the_walk(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "registry unreadable" in out, label
-    assert "broken" in out
-    assert "healthy" in out
-    assert "dev/claude" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  broken  (registry unreadable)  [worktree missing]",
+        "  healthy  (1 agent: dev/claude)",
+        "",
+    ], label
 
 
 def test_list_teams_reports_a_team_whose_backend_plugin_is_gone(
@@ -1295,10 +1316,12 @@ def test_list_teams_reports_a_team_whose_backend_plugin_is_gone(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "dev/retired-plugin" in out
-    assert "ops/claude" in out
-    assert "registry unreadable" not in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  healthy  (1 agent: ops/claude)",
+        "  legacy  (1 agent: dev/retired-plugin)",
+        "",
+    ]
 
 
 def test_list_teams_unreadable_teamless_registry_does_not_abort_the_walk(
@@ -1313,11 +1336,13 @@ def test_list_teams_unreadable_teamless_registry_does_not_abort_the_walk(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "healthy" in out
-    assert "dev/claude" in out
-    assert "(teamless)" in out
-    assert "registry unreadable" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  healthy  (1 agent: dev/claude)",
+        "",
+        f"(teamless) {root / 'orchestrator_state.json'}",
+        "  registry unreadable",
+    ]
 
 
 def test_list_teams_unreadable_teamless_registry_is_not_hidden_behind_no_teams(
@@ -1336,10 +1361,13 @@ def test_list_teams_unreadable_teamless_registry_is_not_hidden_behind_no_teams(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert out != "no teams\n"
-    assert "(teamless)" in out
-    assert "registry unreadable" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  no teams",
+        "",
+        f"(teamless) {root / 'orchestrator_state.json'}",
+        "  registry unreadable",
+    ]
 
 
 def test_list_teams_teamless_group_present(
@@ -1356,11 +1384,13 @@ def test_list_teams_teamless_group_present(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "(teamless)" in out
-    assert "tir" in out
-    assert "backend=codex" in out
-    assert f"(teamless) {root / 'orchestrator_state.json'}" in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  no teams",
+        "",
+        f"(teamless) {root / 'orchestrator_state.json'}",
+        "  tir backend=codex",
+    ]
 
 
 def test_list_teams_teamless_group_reads_state_file_not_bare_root_file(
@@ -1385,10 +1415,13 @@ def test_list_teams_teamless_group_reads_state_file_not_bare_root_file(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert f"(teamless) {relocated}" in out
-    assert "realagent" in out
-    assert "decoy" not in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  no teams",
+        "",
+        f"(teamless) {relocated}",
+        "  realagent backend=claude",
+    ]
 
 
 def test_list_teams_teamless_group_present_but_empty(
@@ -1403,10 +1436,13 @@ def test_list_teams_teamless_group_present_but_empty(
 
     orchestrator.main(["list", "teams"])
 
-    out = capsys.readouterr().out
-    assert "(teamless)" in out
-    assert "0 agents" in out
-    assert "registry unreadable" not in out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  no teams",
+        "",
+        f"(teamless) {root / 'orchestrator_state.json'}",
+        "  0 agents",
+    ]
 
 
 def test_list_teams_teamless_group_absent_when_no_bare_registry(
@@ -1420,7 +1456,35 @@ def test_list_teams_teamless_group_absent_when_no_bare_registry(
 
     orchestrator.main(["list", "teams"])
 
-    assert "(teamless)" not in capsys.readouterr().out
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  t1  (1 agent: dev/claude)",
+        "",
+    ]
+
+
+def test_list_teams_registry_entry_without_a_backend_renders_a_question_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A row that is a well-formed object but names no backend is still an
+    agent: the registry reads fine, so the team is not flagged unreadable,
+    and the missing name renders as `?` rather than dropping the row."""
+    root = tmp_path / "root"
+    _make_team(root, "partial")
+    (root / "partial" / "agents" / "orchestrator_state.json").write_text(
+        json.dumps({"dev": {}, "ops": {"backend": "codex"}})
+    )
+    monkeypatch.setattr(orchestrator, "ROOT", root)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", root / "orchestrator_state.json")
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", None)
+
+    orchestrator.main(["list", "teams"])
+
+    assert capsys.readouterr().out.splitlines() == [
+        str(root),
+        "  partial  (2 agents: dev/?, ops/codex)",
+        "",
+    ]
 
 
 def test_list_teams_with_team_option_exits_2(
