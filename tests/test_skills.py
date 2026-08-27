@@ -375,6 +375,101 @@ class TestComposeSkillPrompt:
         )
 
 
+class TestCatalogLadderThroughTheCli:
+    """The rungs as a user meets them: env override, cwd catalog, root catalog."""
+
+    @pytest.fixture
+    def env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A cwd with no catalog, a runtime root, and nothing inherited."""
+        cwd = tmp_path / "checkout"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
+        for name in ("AGENTS_ARMY_SKILLS", "AGENTS_ARMY_HOME", "AGENTS_ARMY_TEAMS_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        return cwd
+
+    @staticmethod
+    def _catalog(directory: Path, skill: str) -> Path:
+        (directory / skill).mkdir(parents=True)
+        (directory / skill / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
+        return (directory / skill / "SKILL.md").resolve()
+
+    def test_cwd_catalog_wins_and_shadows_the_root_catalog(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        local = self._catalog(env / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == f"skills: {env / 'SKILLS'}\n{'local':20} {local}\n"
+
+    def test_root_catalog_is_used_when_the_cwd_has_none(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == (
+            f"skills: {tmp_path / 'root' / 'SKILLS'}\n{'rooted':20} {rooted}\n"
+        )
+
+    def test_explicit_catalog_wins_over_both(
+        self,
+        env: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._catalog(env / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        explicit = self._catalog(tmp_path / "explicit", "chosen")
+        monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "explicit"))
+        main(["list", "skills"])
+        out = capsys.readouterr().out
+        assert out == (f"skills: {tmp_path / 'explicit'}\n{'chosen':20} {explicit}\n")
+
+    def test_an_existing_but_empty_root_catalog_lists_as_empty(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "root" / "SKILLS").mkdir(parents=True)
+        main(["list", "skills"])
+        assert capsys.readouterr().out == (
+            f"skills: {tmp_path / 'root' / 'SKILLS'}\nno skills\n"
+        )
+
+    def test_no_catalog_anywhere_exits_one_naming_both(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit, match="1"):
+            main(["list", "skills"])
+        captured = capsys.readouterr()
+        assert captured.err == (
+            f"skills directory not found: tried {env / 'SKILLS'} "
+            f"and {tmp_path / 'root' / 'SKILLS'}\n"
+        )
+        assert captured.out == ""
+
+    def test_talk_attaches_a_skill_from_the_root_catalog(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
+        assert f"- rooted: {rooted}" in capsys.readouterr().out
+
+    def test_talk_prefers_the_cwd_catalog_and_says_where_it_looked(
+        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._catalog(env / "SKILLS", "local")
+        self._catalog(tmp_path / "root" / "SKILLS", "rooted")
+        with pytest.raises(SystemExit, match="1"):
+            main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
+        assert capsys.readouterr().err == (
+            f"unknown skill 'rooted' in {env / 'SKILLS'}. available skills: local\n"
+        )
+
+
 class TestFormatSkillListing:
     def test_empty_catalog(self) -> None:
         assert format_skill_listing({}) == "no skills"
@@ -473,7 +568,9 @@ class TestListCommand:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         _cmd_list(orch, _options(["list", "skills"]))
-        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+        assert capsys.readouterr().out == (
+            f"skills: {skills_tree}\n" + _expected_skill_listing(skills_tree) + "\n"
+        )
 
     def test_list_skills_empty_catalog(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -484,7 +581,7 @@ class TestListCommand:
             runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=empty)
         )
         _cmd_list(orch, _options(["list", "skills"]))
-        assert capsys.readouterr().out == "no skills\n"
+        assert capsys.readouterr().out == f"skills: {empty}\nno skills\n"
 
     def test_list_skills_missing_dir(
         self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
@@ -497,7 +594,9 @@ class TestListCommand:
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
         captured = capsys.readouterr()
-        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.err == (
+            f"skills directory not found: tried {missing} and {tmp_path / 'SKILLS'}\n"
+        )
         assert captured.out == ""
 
     def test_list_without_target_defaults_to_agents(
@@ -887,7 +986,9 @@ class TestMainSkillInvocation:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["list", "skills"])
-        assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
+        assert capsys.readouterr().out == (
+            f"skills: {skills_tree}\n" + _expected_skill_listing(skills_tree) + "\n"
+        )
 
     def test_removed_list_equals_form_is_rejected(
         self,
@@ -943,5 +1044,7 @@ class TestMainSkillInvocation:
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo", "--prompt", "x"])
         captured = capsys.readouterr()
-        assert captured.err == f"skills directory not found: {missing}\n"
+        assert captured.err == (
+            f"skills directory not found: tried {missing} and {tmp_path / 'SKILLS'}\n"
+        )
         assert captured.out == ""

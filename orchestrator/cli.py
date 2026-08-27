@@ -41,6 +41,7 @@ from orchestrator.skills import (
     format_skill_listing,
     index_skills,
     parse_skill_names,
+    resolve_catalog_dir,
     resolve_skills,
 )
 
@@ -172,7 +173,7 @@ def cmd_talk(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     composed = prompt
     if opts.skill is not None:
         names = parse_skill_names(opts.skill)
-        resolved = resolve_skills(names, orchestrator.runtime_paths.skills_dir)
+        resolved = resolve_skills(names, _catalog_dir(orchestrator.runtime_paths))
         composed = compose_skill_prompt(resolved, prompt)
         log.info(
             "agent '%s': attaching skill(s) %s",
@@ -261,11 +262,20 @@ def _print_agents(orchestrator: core.Orchestrator) -> None:
         )
 
 
+def _catalog_dir(runtime_paths: paths.RuntimePaths) -> Path:
+    """The catalog directory this run indexes, one rung below `skills_dir`."""
+    return resolve_catalog_dir(runtime_paths.skills_dir, runtime_paths.root)
+
+
 def cmd_list(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
     if opts.target == "agents":
         _print_agents(orchestrator)
         return
-    print(format_skill_listing(index_skills(orchestrator.runtime_paths.skills_dir)))
+    catalog_dir = _catalog_dir(orchestrator.runtime_paths)
+    # Which of the ladder's directories won, the way `list agents` names the
+    # registry it read.
+    print(f"skills: {catalog_dir}")
+    print(format_skill_listing(index_skills(catalog_dir)))
 
 
 def _agents_from_registry(state_file: Path) -> dict[str, str] | None:
