@@ -46,12 +46,11 @@ given rather than silently coming out as the primer.
   holds them (`{"backend": ..., "model": ..., "effort": ...}`), so a single
   line moves an agent to another model: primer/owen `claude opus medium`,
   code-reviewer `claude opus high`, spectacle/devin `opencode
-  muse-spark-1.2-contributor-free max`, doku the same model at medium. The
-  line that
-  announces a first talk prints that dict, so the run log says what each agent
-  ran on, and every turn is followed by `<agent> worked for N seconds`. Later
-  talks resume the session and must not re-send the flags.
-  Devin's first build talk also carries
+  muse-spark-1.2-contributor-free max`, doku the same model at medium. The line
+  that announces a first talk prints that dict, so the run log says what each
+  agent ran on, and every turn is followed by `<agent> worked for N seconds`.
+  Later talks resume the session and must not re-send the flags. Devin's first
+  build talk also carries
   `-s implement,tdd,code-review-and-quality`; the reviewer's first talk
   carries `-s code-review-and-quality`; skills are never re-sent.
 - Before relying on devin's work, verify he committed and pushed: clean
