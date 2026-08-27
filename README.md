@@ -204,11 +204,12 @@ Tool result: command output
 Assistant: the final response
 ```
 
-Claude labels MCP tools as `MCP call`/`MCP result`; Codex and OpenCode do the
-same for their MCP event shapes. Grok has no stream formatter, so `--stream`
-produces no live progress for Grok. In every case the final session header and
-reply (or structured object) remain on stdout, child stderr is captured but not
-echoed, and omitting `--stream` preserves the historical subprocess path.
+Claude labels MCP tool calls as `MCP call` when their name uses the `mcp__...`
+convention; Codex and OpenCode label calls and results when their event shapes
+identify MCP tools. Grok has no stream formatter, so `--stream` produces no
+live progress for Grok. In every case the final session header and reply (or
+structured object) remain on stdout, child stderr is captured but not echoed,
+and omitting `--stream` preserves the historical subprocess path.
 
 ### Example
 
