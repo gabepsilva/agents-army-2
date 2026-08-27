@@ -22,6 +22,7 @@ from tests.backend_helpers import (
     _completed,
     _messages,
     _reported_seconds,
+    _subprocess_recorder,
 )
 
 
@@ -83,12 +84,7 @@ class TestOpenCodeRunTurn:
                 ),
             ]
         )
-        calls: list[tuple[list[str], dict]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG", logger="backends"):
             result = backend.run_turn(prompt, None, tmp_path)
@@ -139,26 +135,24 @@ class TestOpenCodeRunTurn:
         backend = OpenCodeBackend()
         stdout = json.dumps({"type": "step-finish", "sessionID": "s1"})
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "opencode",
-                "run",
-                "--format",
-                "json",
-                "--auto",
-                "--dir",
-                str(tmp_path),
-                "--session",
-                "s1",
-            ]
-            _assert_subprocess_kwargs(
-                kwargs, tmp_path, expected_stdin=None, expected_input="again"
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG", logger="backends"):
             assert backend.run_turn("again", "s1", tmp_path).session_id == "s1"
+        assert calls[0][0] == [
+            "opencode",
+            "run",
+            "--format",
+            "json",
+            "--auto",
+            "--dir",
+            str(tmp_path),
+            "--session",
+            "s1",
+        ]
+        _assert_subprocess_kwargs(
+            calls[0][1], tmp_path, expected_stdin=None, expected_input="again"
+        )
         assert _messages(caplog)[0] == (
             f"opencode turn: cwd={tmp_path} resume=True prompt_chars=5 timeout=3600s"
         )
@@ -171,26 +165,24 @@ class TestOpenCodeRunTurn:
         backend = OpenCodeBackend()
         stdout = json.dumps({"type": "step-finish", "sessionID": "forked-sid"})
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "opencode",
-                "run",
-                "--format",
-                "json",
-                "--auto",
-                "--dir",
-                str(tmp_path),
-                "--session",
-                "source-sid",
-                OPENCODE_FORK_FLAG,
-            ]
-            _assert_subprocess_kwargs(
-                kwargs, tmp_path, expected_stdin=None, expected_input="again"
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("again", "source-sid", tmp_path, resume_as_fork=True)
+        assert calls[0][0] == [
+            "opencode",
+            "run",
+            "--format",
+            "json",
+            "--auto",
+            "--dir",
+            str(tmp_path),
+            "--session",
+            "source-sid",
+            OPENCODE_FORK_FLAG,
+        ]
+        _assert_subprocess_kwargs(
+            calls[0][1], tmp_path, expected_stdin=None, expected_input="again"
+        )
         assert result.session_id == "forked-sid"
 
     def test_noisy_events_are_combined_and_structured_is_parsed(

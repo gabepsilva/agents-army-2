@@ -89,6 +89,19 @@ def _completed(returncode: int, stdout: str, stderr: str = "") -> Callable:
     return run
 
 
+def _subprocess_recorder(
+    result: Callable,
+) -> tuple[Callable, list[tuple[list[str], dict]]]:
+    """Record subprocess calls while returning a supplied canned result."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return result(args, **kwargs)
+
+    return fake_run, calls
+
+
 # A schema as the adapters receive it: already loaded, in both spellings. The
 # text is what claude and grok take inline; the path is what codex is handed.
 SCHEMA = OutputSchema(

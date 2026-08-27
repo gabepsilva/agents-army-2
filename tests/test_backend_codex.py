@@ -27,6 +27,7 @@ from tests.backend_helpers import (
     _completed,
     _messages,
     _reported_seconds,
+    _subprocess_recorder,
 )
 
 
@@ -41,23 +42,22 @@ class TestCodexRunTurn:
             '{"type":"agent_message","text":"done"}}\n'
         )
 
-        def fake_run(args, **_kwargs):
-            assert args == [
-                "codex",
-                "exec",
-                CODEX_YOLO_FLAG,
-                "--model",
-                "gpt-test",
-                "--config",
-                'model_reasoning_effort="xhigh"',
-                "work",
-                "--json",
-                "--skip-git-repo-check",
-            ]
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert backend.run_turn("work", None, tmp_path).reply == "done"
+        result = backend.run_turn("work", None, tmp_path)
+        assert calls[0][0] == [
+            "codex",
+            "exec",
+            CODEX_YOLO_FLAG,
+            "--model",
+            "gpt-test",
+            "--config",
+            'model_reasoning_effort="xhigh"',
+            "work",
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        assert result.reply == "done"
 
     def test_streaming_turn_passes_formatter_and_keeps_codex_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -94,26 +94,24 @@ class TestCodexRunTurn:
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"yo"}}\n'
+        )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "codex",
-                "exec",
-                CODEX_YOLO_FLAG,
-                "hello",
-                "--json",
-                "--skip-git-repo-check",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            stdout = (
-                '{"type":"thread.started","thread_id":"t1"}\n'
-                '{"type":"item.completed","item":{"type":"agent_message","text":"yo"}}\n'
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG"):
             result = backend.run_turn("hello", None, tmp_path)
+        assert calls[0][0] == [
+            "codex",
+            "exec",
+            CODEX_YOLO_FLAG,
+            "hello",
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "t1"
         assert result.reply == "yo"
         messages = _messages(caplog)
@@ -138,28 +136,26 @@ class TestCodexRunTurn:
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         backend = CodexBackend()
+        stdout = (
+            '{"type":"thread.started","thread_id":"t1"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"back"}}\n'
+        )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "codex",
-                "exec",
-                CODEX_YOLO_FLAG,
-                "resume",
-                "t1",
-                "again",
-                "--json",
-                "--skip-git-repo-check",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            stdout = (
-                '{"type":"thread.started","thread_id":"t1"}\n'
-                '{"type":"item.completed","item":{"type":"agent_message","text":"back"}}\n'
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG"):
             result = backend.run_turn("again", "t1", tmp_path)
+        assert calls[0][0] == [
+            "codex",
+            "exec",
+            CODEX_YOLO_FLAG,
+            "resume",
+            "t1",
+            "again",
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "t1"
         assert result.reply == "back"
         messages = _messages(caplog)
@@ -180,49 +176,45 @@ class TestCodexRunTurn:
         ordinary resume puts them, and no `resume` survives in the argv."""
         backend = CodexBackend(model="gpt-test", reasoning_effort="xhigh")
         schema = OutputSchema(text="{}", path=tmp_path / "schema.json")
+        stdout = (
+            '{"type":"thread.started","thread_id":"forked-tid"}\n'
+            '{"type":"item.completed","item":'
+            '{"type":"agent_message","text":"hi"}}\n'
+        )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "codex",
-                "exec",
-                CODEX_YOLO_FLAG,
-                "--model",
-                "gpt-test",
-                "--config",
-                'model_reasoning_effort="xhigh"',
-                CODEX_FORK_COMMAND,
-                "source-tid",
-                "again",
-                "--json",
-                "--skip-git-repo-check",
-                CODEX_SCHEMA_FLAG,
-                str(schema.path),
-            ]
-            assert "resume" not in args
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            stdout = (
-                '{"type":"thread.started","thread_id":"forked-tid"}\n'
-                '{"type":"item.completed","item":'
-                '{"type":"agent_message","text":"hi"}}\n'
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn(
             "again", "source-tid", tmp_path, schema=schema, resume_as_fork=True
         )
+        assert calls[0][0] == [
+            "codex",
+            "exec",
+            CODEX_YOLO_FLAG,
+            "--model",
+            "gpt-test",
+            "--config",
+            'model_reasoning_effort="xhigh"',
+            CODEX_FORK_COMMAND,
+            "source-tid",
+            "again",
+            "--json",
+            "--skip-git-repo-check",
+            CODEX_SCHEMA_FLAG,
+            str(schema.path),
+        ]
+        assert "resume" not in calls[0][0]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "forked-tid"
 
     def test_no_thread_id_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = CodexBackend()
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, ""))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(CodexTurnError, match="thread_id"):
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
 
     def test_no_thread_id_error_keeps_the_tail_of_long_output(
         self, tmp_path: Path, monkeypatch
@@ -231,9 +223,7 @@ class TestCodexRunTurn:
         stdout = "o" * 2500  # not JSON, so session_id stays None
         stderr = "e" * 2500
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr=stderr)
-
+        fake_run, _ = _subprocess_recorder(_completed(0, stdout, stderr))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(CodexTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
@@ -246,13 +236,11 @@ class TestCodexRunTurn:
         backend = CodexBackend()
         stderr = "e" * 2500
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 1, stdout="", stderr=stderr)
-
+        fake_run, calls = _subprocess_recorder(_completed(1, "", stderr))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(CodexTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == f"codex exited 1\nstderr: {stderr[-2000:]}"
 
     def test_parse_skips_blank_and_malformed_lines_and_other_events(
@@ -272,12 +260,10 @@ class TestCodexRunTurn:
             ]
         )
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "t1"
         assert result.reply == "hi\nthere"
         assert result.raw == stdout
@@ -293,23 +279,21 @@ class TestCodexRunTurn:
             '"text":"{\\"verdict\\":\\"pass\\"}"}}\n'
         )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "codex",
-                "exec",
-                CODEX_YOLO_FLAG,
-                "hello",
-                "--json",
-                "--skip-git-repo-check",
-                CODEX_SCHEMA_FLAG,
-                str(SCHEMA.path),
-            ]
-            assert SCHEMA.text not in args
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert calls[0][0] == [
+            "codex",
+            "exec",
+            CODEX_YOLO_FLAG,
+            "hello",
+            "--json",
+            "--skip-git-repo-check",
+            CODEX_SCHEMA_FLAG,
+            str(SCHEMA.path),
+        ]
+        assert SCHEMA.text not in calls[0][0]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         # No pre-parsed field anywhere in the stream: the object is the text.
         assert result.structured == {"verdict": "pass"}
 
@@ -331,12 +315,11 @@ class TestCodexRunTurn:
         backend = CodexBackend()
         stdout = '{"type":"thread.started","thread_id":"t1"}\n'
 
-        def fake_run(args, **kwargs):
-            assert CODEX_SCHEMA_FLAG not in args
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert backend.run_turn("hi", None, tmp_path).structured is None
+        result = backend.run_turn("hi", None, tmp_path)
+        assert CODEX_SCHEMA_FLAG not in calls[0][0]
+        assert result.structured is None
 
     def test_nonzero_exit_reports_the_api_message_not_the_stderr_tail(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
