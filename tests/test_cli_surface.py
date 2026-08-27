@@ -413,8 +413,8 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
     assert called is True
 
 
-def test_doctor_reporting_names_are_reexported_from_package() -> None:
-    moved = (
+def test_doctor_reporting_names_keep_their_owning_module_surface() -> None:
+    reexported = (
         "DEPENDENCY_TOOLS",
         "FOUND",
         "FOUND_OPTIONAL",
@@ -423,13 +423,29 @@ def test_doctor_reporting_names_are_reexported_from_package() -> None:
         "NOT_FOUND",
         "VERSION_PROBE_TIMEOUT",
     )
+    private = (
+        "_dependency_report",
+        "_describe_version",
+        "_print_dependency_check",
+        "_print_version",
+        "_project_version",
+        "_python_line",
+        "_resolve_version",
+        "_status_line",
+        "_tool_line",
+        "_tool_version",
+    )
 
-    assert set(moved) <= set(orchestrator.__all__)
-    assert all(getattr(orchestrator, name) is getattr(doctor, name) for name in moved)
+    assert set(reexported) <= set(orchestrator.__all__)
+    assert all(
+        getattr(orchestrator, name) is getattr(doctor, name) for name in reexported
+    )
+    assert set(private) <= vars(doctor).keys()
+    assert all(not hasattr(orchestrator, name) for name in private)
 
 
-def test_core_names_are_reexported_from_package() -> None:
-    moved = (
+def test_core_names_keep_their_owning_module_surface() -> None:
+    reexported = (
         "Agent",
         "AgentBusyError",
         "AgentExistsError",
@@ -442,9 +458,21 @@ def test_core_names_are_reexported_from_package() -> None:
         "DEFAULT_BACKEND",
         "DEFAULT_VALIDATION_RETRIES",
     )
+    private = (
+        "_AgentRecord",
+        "_MAX_REVALIDATE_ATTEMPTS",
+        "_flock",
+        "_is_live",
+        "_load_state_file",
+        "_utcnow",
+    )
 
-    assert set(moved) <= set(orchestrator.__all__)
-    assert all(getattr(orchestrator, name) is getattr(core, name) for name in moved)
+    assert set(reexported) <= set(orchestrator.__all__)
+    assert all(
+        getattr(orchestrator, name) is getattr(core, name) for name in reexported
+    )
+    assert set(private) <= vars(core).keys()
+    assert all(not hasattr(orchestrator, name) for name in private)
 
 
 def test_missing_skills_directory_has_one_stderr_line(
