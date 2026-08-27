@@ -1,0 +1,6 @@
+{"type":"step_start","part":{"type":"step-start"}}
+{"type":"text","part":{"type":"text","text":"Running the requested shell check."}}
+{"type":"tool_use","part":{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"printf opencode-fixture-check"},"output":"opencode-fixture-check"}}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls","tokens":{"total":8236,"input":5731,"output":70,"reasoning":82}}}
+{"type":"text","part":{"type":"text","text":"FIXTURE-DONE"}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"stop","tokens":{"total":8305,"input":215,"output":15,"reasoning":26}}}

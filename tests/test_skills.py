@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 import orchestrator.skills as skills_module
 from backends.base import (
@@ -20,13 +20,13 @@ from backends.base import (
 )
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
-from orchestrator import (
+from orchestrator.cli import (
     cmd_list as _cmd_list,
 )
-from orchestrator import (
+from orchestrator.cli import (
     cmd_talk as _cmd_talk,
 )
-from orchestrator import main
+from orchestrator.cli import main
 from orchestrator.core import Orchestrator
 from orchestrator.skills import (
     PROMPT_HEADER,
@@ -44,13 +44,13 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     separator = argv.index("--") if "--" in argv else None
     head = argv if separator is None else argv[:separator]
     tail = [] if separator is None else argv[separator + 1 :]
-    options = orchestrator._build_parser().parse_args(head)
-    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    options = cli._build_parser().parse_args(head)
+    cli._resolve_talk_prompt(options, tail, separator is not None)
     return options
 
 
 def _options(argv: list[str]) -> argparse.Namespace:
-    return orchestrator._build_parser().parse_args(argv)
+    return cli._build_parser().parse_args(argv)
 
 
 class EchoBackend(AgentBackend):

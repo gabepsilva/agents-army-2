@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,37 @@ def _coverage_report(files: dict[str, float]) -> dict:
             for path, percent in files.items()
         }
     }
+
+
+def _configured_mutmut_test_selection() -> set[str]:
+    config = tomllib.loads(REPO.joinpath("pyproject.toml").read_text(encoding="utf-8"))
+    return set(config["tool"]["mutmut"]["pytest_add_cli_args_test_selection"])
+
+
+def _on_disk_test_files() -> set[str]:
+    return {
+        path.relative_to(REPO).as_posix()
+        for path in REPO.joinpath("tests").glob("test_*.py")
+    }
+
+
+def _assert_mutmut_selection_matches_test_files(selection: set[str]) -> None:
+    expected = _on_disk_test_files() - {"tests/test_quality_gates.py"}
+    assert selection == expected, (
+        "mutmut test selection differs from on-disk tests: "
+        f"missing={sorted(expected - selection)!r}, "
+        f"unexpected={sorted(selection - expected)!r}"
+    )
+
+
+def test_mutmut_selection_matches_test_files() -> None:
+    _assert_mutmut_selection_matches_test_files(_configured_mutmut_test_selection())
+
+
+def test_mutmut_selection_rejects_an_omitted_test_file() -> None:
+    selection = _configured_mutmut_test_selection() - {"tests/test_schema.py"}
+    with pytest.raises(AssertionError, match=r"missing=.*test_schema.py"):
+        _assert_mutmut_selection_matches_test_files(selection)
 
 
 class TestCoverageGate:
@@ -1585,6 +1617,9 @@ class TestMutationCache:
         # project built under tmp_path does not have it, so Check B would
         # fail every test here that does not care about exclusions.
         monkeypatch.setattr(mutation_cache, "DIGEST_EXCLUSIONS", {})
+        # The production project has formatter fixtures in these paths; a
+        # minimal temporary project does not, so keep its extra inputs local.
+        monkeypatch.setattr(mutation_cache, "DIGEST_EXTRA", ())
         digest_path = root / "reports" / "mutation-test-inputs.sha256"
         monkeypatch.setattr(mutation_cache, "DIGEST_PATH", digest_path)
         return digest_path
@@ -1682,6 +1717,30 @@ class TestMutationCache:
 
         assert mutation_cache.digest([first]) != mutation_cache.digest([second])
         assert mutation_cache.digest([first, second]) != mutation_cache.digest([first])
+
+    def test_extra_inputs_invalidate_the_cached_mutation_results(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        test_file = tmp_path / "test_a.py"
+        extra_file = tmp_path / "fixture.json"
+        _write(test_file, "assert True\n")
+        _write(extra_file, '{"value": 1}\n')
+        pyproject = self._project(tmp_path, [str(test_file)])
+        self._wire(monkeypatch, tmp_path, pyproject)
+        monkeypatch.setattr(mutation_cache, "DIGEST_EXTRA", ("fixture.json",))
+
+        assert mutation_cache.main(["--record"]) == 0
+        cache = tmp_path / "mutants"
+        cache.mkdir()
+        capsys.readouterr()
+        assert mutation_cache.main([]) == 0
+        assert cache.exists()
+        capsys.readouterr()
+
+        _write(extra_file, '{"value": 2}\n')
+        assert mutation_cache.main([]) == 0
+        assert not cache.exists()
+        assert "tests changed since the cached run" in capsys.readouterr().out
 
     def test_selection_is_read_from_pyproject(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

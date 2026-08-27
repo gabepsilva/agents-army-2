@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ast
+import importlib.metadata
 import logging
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import AgentBackend, TurnResult
@@ -44,13 +48,13 @@ def test_prompt_flag_and_separator_forward_identical_text(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
-    orchestrator.main(["talk", "a", "-p", "same prompt"])
+    cli.main(["talk", "a", "-p", "same prompt"])
     flag_output = capsys.readouterr().out
-    orchestrator.main(["talk", "a", "--", "same", "prompt"])
+    cli.main(["talk", "a", "--", "same", "prompt"])
     tail_output = capsys.readouterr().out
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("same prompt", encoding="utf-8")
-    orchestrator.main(["talk", "a", "--prompt-file", str(prompt_file)])
+    cli.main(["talk", "a", "--prompt-file", str(prompt_file)])
     file_output = capsys.readouterr().out
 
     assert flag_output.endswith("reply:same prompt\n")
@@ -62,7 +66,7 @@ def test_chat_help_exposes_only_the_interactive_agent_selection(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["chat", "--help"])
+        cli.main(["chat", "--help"])
 
     assert excinfo.value.code == 0
     output = capsys.readouterr().out
@@ -71,6 +75,111 @@ def test_chat_help_exposes_only_the_interactive_agent_selection(
     assert "--schema" not in output
     assert "--skill" not in output
     assert "--timeout" not in output
+
+
+def test_talk_help_describes_backend_event_streaming(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["talk", "--help"])
+
+    assert excinfo.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "render recognized backend events to stderr while the turn runs" in output
+
+
+def test_package_and_console_entry_point_resolve_to_cli_main() -> None:
+    import orchestrator.cli as cli
+
+    assert orchestrator.main is cli.main
+    entry_point = next(
+        entry_point
+        for entry_point in importlib.metadata.entry_points(group="console_scripts")
+        if entry_point.name == "orchestrator"
+    )
+    assert entry_point.load() is cli.main
+
+
+def test_package_surface_reexports_supported_objects_without_shrinking() -> None:
+    import backends
+    import backends.base as base
+    import backends.registry as registry
+    import orchestrator.cli as cli
+    import orchestrator.paths as paths
+    import orchestrator.schema as schema
+    import orchestrator.skills as skills
+    import orchestrator.teams as teams
+
+    supported = {
+        "Agent",
+        "AgentBackend",
+        "AgentBusyError",
+        "AgentExistsError",
+        "AgentNotFoundError",
+        "DEFAULT_BACKEND",
+        "DEFAULT_TURN_TIMEOUT",
+        "DEFAULT_VALIDATION_RETRIES",
+        "Orchestrator",
+        "OrchestratorError",
+        "OutputSchema",
+        "SchemaError",
+        "SchemaLoadError",
+        "SkillError",
+        "StateError",
+        "TeamBusyError",
+        "TRACE",
+        "TurnError",
+        "TurnResult",
+        "UnknownBackendError",
+        "cmd_chat",
+        "cmd_create",
+        "cmd_delete",
+        "cmd_fork",
+        "cmd_list",
+        "cmd_talk",
+        "compose_skill_prompt",
+        "format_skill_listing",
+        "get_backend",
+        "index_skills",
+        "list_backends",
+        "load_schema",
+        "main",
+        "parse_skill_names",
+        "paths",
+        "resolve_skills",
+        "schema",
+        "skills",
+        "teams",
+    }
+    assert supported <= set(orchestrator.__all__)
+    assert orchestrator.__all__ == sorted(set(orchestrator.__all__))
+
+    owners = (backends, base, cli, core, doctor, paths, registry, schema, skills, teams)
+    module_objects = set(owners)
+    missing = object()
+    for name in orchestrator.__all__:
+        value = getattr(orchestrator, name)
+        if isinstance(value, ModuleType):
+            assert value in module_objects
+        else:
+            assert any(getattr(owner, name, missing) is value for owner in owners)
+
+
+def test_package_initializer_contains_only_imports_and_derived_all() -> None:
+    package_file = Path(orchestrator.__file__)
+    tree = ast.parse(package_file.read_text(encoding="utf-8"))
+
+    assert len(package_file.read_text(encoding="utf-8").splitlines()) <= 80
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            assert isinstance(node.value.value, str)
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        assert isinstance(node, ast.Assign)
+        assert len(node.targets) == 1
+        assert isinstance(node.targets[0], ast.Name)
+        assert node.targets[0].id == "__all__"
 
 
 def test_talk_forwards_schema_retries_timeout_and_short_options(
@@ -111,7 +220,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
     monkeypatch.setattr(core, "Orchestrator", lambda *_: fake)
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "skills"))
 
-    orchestrator.main(
+    cli.main(
         [
             "talk",
             "a",
@@ -174,7 +283,7 @@ def test_invalid_prompt_or_separator_does_not_construct_orchestrator(
     monkeypatch.setattr(core, "Orchestrator", fail)
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(argv)
+        cli.main(argv)
     assert excinfo.value.code == 2
 
 
@@ -206,7 +315,7 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
         ],
     ):
         with pytest.raises(SystemExit) as excinfo:
-            orchestrator.main(argv)
+            cli.main(argv)
         assert excinfo.value.code == 2
         assert (
             "orchestrator talk: error: talk requires exactly one prompt source"
@@ -246,7 +355,7 @@ def test_version_exits_before_constructing_orchestrator(
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(argv)
+        cli.main(argv)
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
     assert captured.out == "0.1.0\n"
@@ -258,7 +367,7 @@ def test_version_after_a_verb_is_an_unrecognized_argument(
     verb: str, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main([*argv, "--version"])
+        cli.main([*argv, "--version"])
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -271,7 +380,7 @@ def test_verb_help_does_not_offer_version(
     verb: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main([verb, "--help"])
+        cli.main([verb, "--help"])
     assert excinfo.value.code == 0
     assert "--version" not in capsys.readouterr().out
 
@@ -284,7 +393,7 @@ def test_version_after_the_separator_stays_prompt_text(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
-    orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
+    cli.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
 
     out = capsys.readouterr().out
     assert out.endswith("reply:text with --version in it\n")
@@ -304,19 +413,19 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
     monkeypatch.setenv(
         "AGENTS_ARMY_STATE_FILE", str(tmp_path / "orchestrator_state.json")
     )
-    monkeypatch.setattr(orchestrator, "_print_dependency_check", report)
+    monkeypatch.setattr(cli, "_print_dependency_check", report)
     monkeypatch.setattr(
         core,
         "Orchestrator",
         lambda *_: (_ for _ in ()).throw(AssertionError("constructed")),
     )
 
-    orchestrator.main(["-v", "doctor"])
+    cli.main(["-v", "doctor"])
     assert called is True
 
 
-def test_doctor_reporting_names_are_reexported_from_package() -> None:
-    moved = (
+def test_doctor_reporting_names_keep_their_owning_module_surface() -> None:
+    reexported = (
         "DEPENDENCY_TOOLS",
         "FOUND",
         "FOUND_OPTIONAL",
@@ -324,6 +433,8 @@ def test_doctor_reporting_names_are_reexported_from_package() -> None:
         "NAME_SEPARATORS",
         "NOT_FOUND",
         "VERSION_PROBE_TIMEOUT",
+    )
+    private = (
         "_dependency_report",
         "_describe_version",
         "_print_dependency_check",
@@ -336,12 +447,16 @@ def test_doctor_reporting_names_are_reexported_from_package() -> None:
         "_tool_version",
     )
 
-    assert set(moved) <= set(orchestrator.__all__)
-    assert all(getattr(orchestrator, name) is getattr(doctor, name) for name in moved)
+    assert set(reexported) <= set(orchestrator.__all__)
+    assert all(
+        getattr(orchestrator, name) is getattr(doctor, name) for name in reexported
+    )
+    assert set(private) <= vars(doctor).keys()
+    assert all(not hasattr(orchestrator, name) for name in private)
 
 
-def test_core_names_are_reexported_from_package() -> None:
-    moved = (
+def test_core_names_keep_their_owning_module_surface() -> None:
+    reexported = (
         "Agent",
         "AgentBusyError",
         "AgentExistsError",
@@ -353,6 +468,8 @@ def test_core_names_are_reexported_from_package() -> None:
         "TRACE",
         "DEFAULT_BACKEND",
         "DEFAULT_VALIDATION_RETRIES",
+    )
+    private = (
         "_AgentRecord",
         "_MAX_REVALIDATE_ATTEMPTS",
         "_flock",
@@ -361,8 +478,12 @@ def test_core_names_are_reexported_from_package() -> None:
         "_utcnow",
     )
 
-    assert set(moved) <= set(orchestrator.__all__)
-    assert all(getattr(orchestrator, name) is getattr(core, name) for name in moved)
+    assert set(reexported) <= set(orchestrator.__all__)
+    assert all(
+        getattr(orchestrator, name) is getattr(core, name) for name in reexported
+    )
+    assert set(private) <= vars(core).keys()
+    assert all(not hasattr(orchestrator, name) for name in private)
 
 
 def test_missing_skills_directory_has_one_stderr_line(
@@ -373,7 +494,7 @@ def test_missing_skills_directory_has_one_stderr_line(
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "missing"))
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "skills"])
+        cli.main(["list", "skills"])
     captured = capsys.readouterr()
     assert excinfo.value.code == 1
     assert captured.err == f"skills directory not found: {tmp_path / 'missing'}\n"
@@ -422,9 +543,9 @@ def test_verbosity_counts_before_and_after_verb(
             return TurnResult(session_id="sid", reply="reply", raw="")
 
     monkeypatch.setattr(core, "Orchestrator", FakeOrchestrator)
-    for logger_name in orchestrator.OWN_LOGGERS:
+    for logger_name in cli.OWN_LOGGERS:
         logging.getLogger(logger_name).setLevel(logging.NOTSET)
-    orchestrator.main(argv)
+    cli.main(argv)
     assert logging.getLogger("orchestrator").level == level
     assert logging.getLogger("backends").level == level
 
@@ -433,7 +554,7 @@ def test_verbosity_counts_before_and_after_verb(
 def test_every_verb_accepts_verbosity_after_the_verb(
     verb: str, argv: list[str]
 ) -> None:
-    opts = orchestrator._build_parser().parse_args([*argv, "-vv"])
+    opts = cli._build_parser().parse_args([*argv, "-vv"])
 
     assert opts.verbosity_after == 2
     assert opts._parser.prog == f"orchestrator {verb}"

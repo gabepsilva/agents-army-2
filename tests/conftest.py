@@ -11,7 +11,9 @@ from collections.abc import Iterator
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
+from backends.registry import register_backend
+from tests.backend_helpers import EchoBackend
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +27,20 @@ def _restore_own_logger_levels() -> Iterator[None]:
     when pytest-randomly happens to order the two that way, which is exactly
     the shape of flake that reads as a mutant killed by luck.
     """
-    saved = {name: logging.getLogger(name).level for name in orchestrator.OWN_LOGGERS}
+    saved = {name: logging.getLogger(name).level for name in cli.OWN_LOGGERS}
     try:
         yield
     finally:
         for name, level in saved.items():
             logging.getLogger(name).setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def register_echo_backend() -> None:
+    """Registered for every test, not just the class that introduced it.
+
+    The registry is module-level state, so a class relying on another class
+    having registered it first passes or fails on test ordering — which xdist
+    is free to change.
+    """
+    register_backend("echo", EchoBackend)

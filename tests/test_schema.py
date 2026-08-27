@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -23,8 +24,8 @@ from backends.base import (
 )
 from backends.claude import ClaudeTurnError
 from backends.registry import register_backend
-from orchestrator import cmd_talk as _cmd_talk
-from orchestrator import main
+from orchestrator.cli import cmd_talk as _cmd_talk
+from orchestrator.cli import main
 from orchestrator.core import Orchestrator
 from orchestrator.schema import (
     EXCERPT_CHARS,
@@ -73,8 +74,8 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     separator = argv.index("--") if "--" in argv else None
     head = argv if separator is None else argv[:separator]
     tail = [] if separator is None else argv[separator + 1 :]
-    options = orchestrator._build_parser().parse_args(head)
-    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    options = cli._build_parser().parse_args(head)
+    cli._resolve_talk_prompt(options, tail, separator is not None)
     return options
 
 
