@@ -193,7 +193,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
         self,
         prompt: str,
         session_id: str | None,
@@ -235,7 +235,7 @@ def _gate_backend(
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -572,7 +572,7 @@ class TestAgentBackendInterface:
             def name(self) -> str:
                 return "custom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2640,7 +2640,7 @@ class TestOrchestrator:
             name = "advisory"
             enforces_schema = False
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2681,7 +2681,7 @@ class TestOrchestrator:
             name = "advisory-prompt"
             enforces_schema = False
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2711,7 +2711,7 @@ class TestOrchestrator:
         class EnforcingBackend(AgentBackend):
             name = "enforcing-prompt"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2739,7 +2739,7 @@ class TestOrchestrator:
         class EnforcingBackend(AgentBackend):
             name = "enforcing"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2790,7 +2790,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "recording"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -2957,7 +2957,7 @@ class TestOrchestrator:
                 seen_argv.append((session_id, cwd))
                 return ["chat-cli", session_id]
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3183,7 +3183,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "rec"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3230,7 +3230,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "midturn"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3266,7 +3266,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "probelock"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3314,7 +3314,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "forgetful"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3370,7 +3370,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "delduring"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3474,7 +3474,7 @@ class TestOrchestrator:
             def name(self) -> str:
                 return "delduring-reclaim"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3788,7 +3788,7 @@ class TestCLI:
             def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
                 return ["chat-cli", session_id]
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -3997,7 +3997,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4031,7 +4031,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomcodex"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4065,7 +4065,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomany"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4112,7 +4112,7 @@ class TestCLI:
             def name(self) -> str:
                 return "incidental"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4144,7 +4144,7 @@ class TestCLI:
             def name(self) -> str:
                 return "boomgrok"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -4735,7 +4735,7 @@ class TestCLI:
             def name(self) -> str:
                 return "buggy"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,

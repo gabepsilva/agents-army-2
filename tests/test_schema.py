@@ -143,7 +143,7 @@ def _scripted(
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -1058,7 +1058,7 @@ class TestTalkSchema:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,

@@ -61,7 +61,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
         self,
         prompt: str,
         session_id: str | None,
@@ -713,7 +713,7 @@ class TestTalkSkills:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
                 self,
                 prompt: str,
                 session_id: str | None,

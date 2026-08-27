@@ -34,7 +34,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
         self,
         prompt: str,
         session_id: str | None,
@@ -83,7 +83,7 @@ def _scripted(replies: list[str], name: str = "scripted") -> list[dict]:
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,

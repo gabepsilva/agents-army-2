@@ -31,7 +31,7 @@ def _make_recording_backend(sink: list[Path]) -> type[AgentBackend]:
         def name(self) -> str:
             return "recording"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -279,7 +279,7 @@ def test_chat_uses_the_team_registry_and_worktree(
         def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
             return ["chat-cli", session_id]
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -599,7 +599,7 @@ def test_fork_team_writes_the_copy_into_that_teams_registry(
         name = "forkable"
         supports_fork = True
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -921,7 +921,7 @@ def _make_blocking_backend() -> type[AgentBackend]:
         def name(self) -> str:
             return "blocking"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -980,7 +980,7 @@ def test_a_boundary_caught_error_releases_the_team_lock(
         def name(self) -> str:
             return "boom"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,

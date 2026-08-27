@@ -15,7 +15,7 @@ class RecordingBackend(AgentBackend):
     def name(self) -> str:
         return "recording"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
         self,
         prompt: str,
         session_id: str | None,

@@ -44,7 +44,7 @@ class ForkingBackend(AgentBackend):
     supports_fork = True
     turns: ClassVar[list[tuple[str, str | None, bool]]] = []
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
         self,
         prompt: str,
         session_id: str | None,
@@ -187,7 +187,7 @@ def test_a_fork_the_cli_did_not_perform_is_refused_instead_of_aliased(
     class Unforking(ForkingBackend):
         name = "forking"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,

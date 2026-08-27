@@ -416,7 +416,7 @@ def test_talk_without_stream_passes_the_default_false_to_the_backend(
     class RecordingBackend(AgentBackend):
         name = "streaming-default"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -446,7 +446,7 @@ def test_agent_talk_defaults_streaming_off(tmp_path: Path) -> None:
     class RecordingBackend(AgentBackend):
         name = "agent-streaming-default"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -476,7 +476,7 @@ def test_talk_stream_keeps_structured_result_on_stdout(
         def name(self) -> str:
             return backend_name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -545,7 +545,7 @@ def test_streaming_is_inherited_by_schema_repair_attempts(tmp_path: Path) -> Non
     class ScriptedBackend(AgentBackend):
         name = "streaming-scripted"
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test double mirrors AgentBackend interface
             self,
             prompt: str,
             session_id: str | None,
@@ -654,7 +654,7 @@ def test_streaming_is_inherited_by_schema_repair_attempts(tmp_path: Path) -> Non
     ],
 )
 @pytest.mark.parametrize("stream", [False, True], ids=["default", "stream"])
-def test_each_backend_forwards_stream_without_changing_argv(
+def test_each_backend_forwards_stream_without_changing_argv(  # noqa: PLR0913 - explicit backend matrix parameters
     backend_module,
     backend_cls,
     stdout: str,
