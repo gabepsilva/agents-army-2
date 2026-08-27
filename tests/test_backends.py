@@ -17,6 +17,7 @@ import time
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -2595,6 +2596,30 @@ class TestStructuredReply:
 
 
 class TestOrchestrator:
+    def test_an_orchestrator_requires_explicit_runtime_paths(self) -> None:
+        constructor = cast(Callable[..., object], Orchestrator)
+        with pytest.raises(TypeError, match="runtime_paths"):
+            constructor()
+
+    def test_runtime_paths_are_a_construction_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workdir = tmp_path / "workdir"
+        skills_dir = tmp_path / "skills"
+        snapshot = runtime_paths(
+            tmp_path,
+            state_file=tmp_path / "state.json",
+            workdir=workdir,
+            skills_dir=skills_dir,
+        )
+        orch = Orchestrator(snapshot)
+
+        monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path / "other-workdir")
+        monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "other-skills")
+
+        assert orch.runtime_paths is snapshot
+        assert orch.spawn("agent", "echo").workdir == workdir
+
     def test_validated_opencode_turn_warns_once_about_cli_schema_enforcement(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -7,8 +7,9 @@ from __future__ import annotations
 import fcntl
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 import pytest
 
@@ -137,6 +138,11 @@ class TestUtcNow:
 
 
 class TestAgentDefaults:
+    def test_an_agent_requires_an_explicit_workdir(self) -> None:
+        constructor = cast(Callable[..., object], orchestrator.Agent)
+        with pytest.raises(TypeError, match="workdir"):
+            constructor("a", EchoBackend())
+
     def test_a_freshly_constructed_agent_has_no_metadata_yet(
         self, tmp_path: Path
     ) -> None:

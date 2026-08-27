@@ -62,24 +62,6 @@ SKILLS_DIR = _PATHS.skills_dir
 TEAMS_DIR = _PATHS.teams_dir
 
 
-def _global_paths() -> paths.RuntimePaths:
-    """The runtime paths as the module globals say they are, right now.
-
-    Read at call time, not once at import: the globals above are the seam
-    tests rebind (`monkeypatch.setattr(orchestrator, "STATE_FILE", ...)`),
-    and `_PATHS` would not see those rebinds. `home` has no such seam, so it
-    comes straight off the import-time resolution.
-    """
-    return paths.RuntimePaths(
-        root=ROOT,
-        home=_PATHS.home,
-        state_file=STATE_FILE,
-        workdir=WORKDIR,
-        skills_dir=SKILLS_DIR,
-        teams_dir=TEAMS_DIR,
-    )
-
-
 # The backend an agent gets when none is named: by `create`, and by the agent a
 # talk creates for a name that does not exist yet.
 DEFAULT_BACKEND = "claude"
@@ -177,15 +159,10 @@ def _utcnow() -> str:
 class Agent:
     """A single named agent backed by one persistent CLI session."""
 
-    def __init__(
-        self, name: str, backend: AgentBackend, workdir: Path | None = None
-    ) -> None:
+    def __init__(self, name: str, backend: AgentBackend, *, workdir: Path) -> None:
         self.name = name
         self.backend = backend
-        # Where this agent's turns run. Unset means "wherever the module
-        # global points now", which is what a bare `Agent(name, backend)`
-        # gets; the orchestrator that builds an agent passes its own.
-        self.workdir = WORKDIR if workdir is None else workdir
+        self.workdir = workdir
         self.session_id: str | None = None
         # The session this agent was forked from, until its first turn has
         # actually forked it. Set by `Orchestrator.fork` and cleared the
@@ -398,7 +375,7 @@ class _AgentRecord(NamedTuple):
             turns=agent.turns,
         )
 
-    def into_agent(self, name: str, workdir: Path | None = None) -> Agent:
+    def into_agent(self, name: str, workdir: Path) -> Agent:
         """Build the live `Agent` this record describes.
 
         The one place a stored backend name is resolved: backend construction
@@ -412,7 +389,7 @@ class _AgentRecord(NamedTuple):
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
             ),
-            workdir,
+            workdir=workdir,
         )
         agent.session_id = self.session_id
         agent.pending_fork_from = self.pending_fork_from
@@ -481,33 +458,20 @@ class Orchestrator:
 
     def __init__(
         self,
-        runtime_paths: paths.RuntimePaths | None = None,
+        runtime_paths: paths.RuntimePaths,
         *,
         state_file: Path | None = None,
     ) -> None:
-        self._runtime_paths = runtime_paths
+        self.runtime_paths = runtime_paths
         # Resolved once here, and the authority from now on: an explicit
         # `state_file` deliberately points somewhere `runtime_paths` does
         # not, so nothing downstream reads `runtime_paths.state_file`.
-        self.state_file = (
-            self.runtime_paths.state_file if state_file is None else state_file
-        )
+        self.state_file = runtime_paths.state_file if state_file is None else state_file
         self.agents: dict[str, Agent] = {}
         self._reload()
         log.debug(
             "state: loaded %d agent(s) from %s", len(self.agents), self.state_file
         )
-
-    @property
-    def runtime_paths(self) -> paths.RuntimePaths:
-        """The paths this registry's agents work from.
-
-        Unset — a bare `Orchestrator()` — resolves from the module globals on
-        every read rather than snapshotting them at construction, so a caller
-        that rebinds `orchestrator.SKILLS_DIR`/`WORKDIR` afterwards is still
-        honoured. `main` hands the run's resolved paths in instead.
-        """
-        return _global_paths() if self._runtime_paths is None else self._runtime_paths
 
     def spawn(
         self,
@@ -602,7 +566,7 @@ class Orchestrator:
                 model=model,
                 reasoning_effort=reasoning_effort,
             ),
-            self.runtime_paths.workdir,
+            workdir=self.runtime_paths.workdir,
         )
         agent.created_at = _utcnow()
         agent.turns = 0
@@ -1787,7 +1751,14 @@ def _resolve_team(
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.
     """
-    resolved = _global_paths()
+    resolved = paths.RuntimePaths(
+        root=ROOT,
+        home=HOME,
+        state_file=STATE_FILE,
+        workdir=WORKDIR,
+        skills_dir=SKILLS_DIR,
+        teams_dir=TEAMS_DIR,
+    )
     team = opts.team
     if team is None:
         return resolved, nullcontext()
