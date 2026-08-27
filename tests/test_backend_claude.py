@@ -30,6 +30,7 @@ from tests.backend_helpers import (
     _completed,
     _messages,
     _reported_seconds,
+    _subprocess_recorder,
 )
 
 # The same schema as the orchestrator loads it from a file that declares its
@@ -55,9 +56,7 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"type": "result", "session_id": "s1", "result": None})
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("x", None, tmp_path)
         assert result.reply == ""
@@ -69,25 +68,25 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend(model="sonnet", reasoning_effort="high")
         payload = json.dumps({"session_id": "s1", "result": "done"})
 
-        def fake_run(args, **_kwargs):
-            assert args == [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                PERMISSION_MODE,
-                "--model",
-                "sonnet",
-                "--effort",
-                "high",
-                "-p",
-                "work",
-            ]
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert backend.run_turn("work", None, tmp_path).reply == "done"
+        result = backend.run_turn("work", None, tmp_path)
+
+        assert calls[0][0] == [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+            "--model",
+            "sonnet",
+            "--effort",
+            "high",
+            "-p",
+            "work",
+        ]
+        assert result.reply == "done"
 
     def test_streaming_turn_uses_stream_json_and_keeps_result_fields(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -145,23 +144,21 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"is_error": False, "session_id": "s1", "result": "hi"})
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                PERMISSION_MODE,
-                "-p",
-                "hello",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG"):
             result = backend.run_turn("hello", None, tmp_path)
+        assert calls[0][0] == [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+            "-p",
+            "hello",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "s1"
         assert result.reply == "hi"
         assert result.raw == payload
@@ -188,29 +185,27 @@ class TestClaudeRunTurn:
         self, tmp_path: Path, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         backend = ClaudeBackend()
+        payload = json.dumps(
+            {"is_error": False, "session_id": "s1", "result": "still here"}
+        )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                PERMISSION_MODE,
-                "--resume",
-                "s1",
-                "-p",
-                "again",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            payload = json.dumps(
-                {"is_error": False, "session_id": "s1", "result": "still here"}
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with caplog.at_level("DEBUG"):
             result = backend.run_turn("again", "s1", tmp_path)
+        assert calls[0][0] == [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+            "--resume",
+            "s1",
+            "-p",
+            "again",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "s1"
         assert result.reply == "still here"
         messages = _messages(caplog)
@@ -232,56 +227,48 @@ class TestClaudeRunTurn:
         id on the command line is the source's and the flag is what makes the
         turn land in a new one."""
         backend = ClaudeBackend()
+        payload = json.dumps(
+            {"is_error": False, "session_id": "forked-sid", "result": "hi"}
+        )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                PERMISSION_MODE,
-                "--resume",
-                "source-sid",
-                CLAUDE_FORK_FLAG,
-                "-p",
-                "again",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            payload = json.dumps(
-                {"is_error": False, "session_id": "forked-sid", "result": "hi"}
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("again", "source-sid", tmp_path, resume_as_fork=True)
+        assert calls[0][0] == [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+            "--resume",
+            "source-sid",
+            CLAUDE_FORK_FLAG,
+            "-p",
+            "again",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.session_id == "forked-sid"
 
     def test_error_reply_raises(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            # Session id present, so is_error is the only thing making this a
-            # failure: a check that stopped reading the flag would return a
-            # perfectly ordinary reply here.
-            payload = json.dumps(
-                {"is_error": True, "session_id": "s1", "result": "boom"}
-            )
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        # Session id present, so is_error is the only thing making this a
+        # failure: a check that stopped reading the flag would return a
+        # perfectly ordinary reply here.
+        payload = json.dumps({"is_error": True, "session_id": "s1", "result": "boom"})
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == "claude reported an error: boom"
 
     def test_result_defaults_to_empty_reply(self, tmp_path: Path, monkeypatch) -> None:
         backend = ClaudeBackend()
+        payload = json.dumps({"is_error": False, "session_id": "s1"})
 
-        def fake_run(args, **kwargs):
-            payload = json.dumps({"is_error": False, "session_id": "s1"})
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("x", None, tmp_path)
         assert result.reply == ""
@@ -290,13 +277,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         stderr = "s" * 500 + "M" + "e" * 1999  # 2500 chars total
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 1, stdout="", stderr=stderr)
-
+        fake_run, calls = _subprocess_recorder(_completed(1, "", stderr))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == (
             f"claude exited 1\nstderr: {stderr[-2000:]}\nstdout: "
         )
@@ -305,13 +290,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         stdout = "s" * 500 + "M" + "e" * 1999  # 2500 chars total, not valid JSON
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == (
             f"claude output was not JSON\nstdout: {stdout[:400]}\n…\n{stdout[-1600:]}"
         )
@@ -331,9 +314,7 @@ class TestClaudeRunTurn:
         }
         stdout = "I've read both skills\n" + json.dumps(envelope)
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("x", None, tmp_path)
         assert result.session_id == "s1"
@@ -353,9 +334,7 @@ class TestClaudeRunTurn:
             }
         )
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
@@ -372,9 +351,7 @@ class TestClaudeRunTurn:
             {"type": "result", "reason": "stop", "session_id": "s1", "result": "done"}
         )
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert backend.run_turn("x", None, tmp_path).reply == "done"
 
@@ -385,9 +362,7 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"type": "system", "result": "hi"})
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
@@ -399,9 +374,7 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"session_id": "", "result": "hi"})
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError, match="did not report a session_id"):
             backend.run_turn("x", None, tmp_path)
@@ -410,9 +383,7 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"session_id": 17, "result": "hi"})
 
-        def fake_run(args, **kwargs):
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, _ = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError, match="did not report a session_id"):
             backend.run_turn("x", None, tmp_path)
@@ -431,24 +402,22 @@ class TestClaudeRunTurn:
             }
         )
 
-        def fake_run(args, **kwargs):
-            assert args == [
-                "claude",
-                "--print",
-                "--output-format",
-                "json",
-                "--permission-mode",
-                PERMISSION_MODE,
-                CLAUDE_SCHEMA_FLAG,
-                SCHEMA.text,
-                "-p",
-                "hello",
-            ]
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         result = backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
+        assert calls[0][0] == [
+            "claude",
+            "--print",
+            "--output-format",
+            "json",
+            "--permission-mode",
+            PERMISSION_MODE,
+            CLAUDE_SCHEMA_FLAG,
+            SCHEMA.text,
+            "-p",
+            "hello",
+        ]
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert result.structured == {"verdict": "pass"}
         assert result.reply == "see structured_output"
 
@@ -461,17 +430,15 @@ class TestClaudeRunTurn:
         payload = json.dumps(
             {"session_id": "s1", "result": "{}", "structured_output": {}}
         )
-        seen: list[str] = []
-
-        def fake_run(args, **kwargs):
-            seen.append(args[args.index(CLAUDE_SCHEMA_FLAG) + 1])
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
         backend.run_turn("hello", None, tmp_path, schema=DIALECT_SCHEMA)
         backend.run_turn("hello", None, tmp_path, schema=SCHEMA)
 
-        assert seen == [
+        assert [
+            call_args[0][call_args[0].index(CLAUDE_SCHEMA_FLAG) + 1]
+            for call_args in calls
+        ] == [
             '{"additionalProperties":false,"properties":{},"type":"object"}',
             SCHEMA.text,
         ]
@@ -503,12 +470,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         payload = json.dumps({"session_id": "s1", "result": '{"verdict":"pass"}'})
 
-        def fake_run(args, **kwargs):
-            assert CLAUDE_SCHEMA_FLAG not in args
-            return subprocess.CompletedProcess(args, 0, stdout=payload, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, payload))
         monkeypatch.setattr(subprocess, "run", fake_run)
-        assert backend.run_turn("hello", None, tmp_path).structured is None
+        result = backend.run_turn("hello", None, tmp_path)
+        assert CLAUDE_SCHEMA_FLAG not in calls[0][0]
+        assert result.structured is None
 
     def test_nonzero_exit_reports_the_error_envelope_over_the_exit_code(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -519,13 +485,11 @@ class TestClaudeRunTurn:
             {"type": "result", "is_error": True, "result": "credit balance too low"}
         )
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 1, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(1, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == "claude reported an error: credit balance too low"
 
     def test_nonzero_exit_keeps_stdout_when_stderr_is_empty(
@@ -536,13 +500,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         stdout = "Invalid API key · Please run /login"
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 1, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(1, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == (f"claude exited 1\nstderr: \nstdout: {stdout}")
 
     def test_nonzero_exit_bounds_a_long_stdout(
@@ -552,13 +514,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         stdout = "s" * 500 + "M" + "e" * 1999  # 2500 chars, not an envelope
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 2, stdout=stdout, stderr="boom")
-
+        fake_run, calls = _subprocess_recorder(_completed(2, stdout, "boom"))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == (
             f"claude exited 2\nstderr: boom\nstdout: {stdout_for_error(stdout)}"
         )
@@ -571,13 +531,11 @@ class TestClaudeRunTurn:
         backend = ClaudeBackend()
         stdout = json.dumps({"type": "result", "is_error": False, "result": "hi"})
 
-        def fake_run(args, **kwargs):
-            _assert_subprocess_kwargs(kwargs, tmp_path)
-            return subprocess.CompletedProcess(args, 3, stdout=stdout, stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(3, stdout))
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeTurnError) as excinfo:
             backend.run_turn("x", None, tmp_path)
+        _assert_subprocess_kwargs(calls[0][1], tmp_path)
         assert str(excinfo.value) == f"claude exited 3\nstderr: \nstdout: {stdout}"
 
 
