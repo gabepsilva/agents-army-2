@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import pkgutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import backends
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -124,6 +126,25 @@ BACKEND_ROWS = pytest.mark.parametrize(
 )
 
 PROMPT = "sequoia rutabaga"
+
+
+class TestEveryShippedAdapterIsEnrolled:
+    """A shipped adapter with no row silently inherits none of the above."""
+
+    def test_every_adapter_module_has_a_row(self) -> None:
+        """The oracle is the package inventory, not the live registry.
+
+        Tests register throwaway backends into the process-global registry and
+        never restore it, so a guard built on `list_backends()` is both
+        order-dependent under parallel runs and satisfiable by test junk.
+        """
+        shipped = {
+            module.name
+            for module in pkgutil.iter_modules(backends.__path__)
+            if module.name not in {"base", "registry"}
+        }
+
+        assert {row.module for row in BACKENDS} == shipped
 
 
 class TestSharedSubprocessBoundary:
