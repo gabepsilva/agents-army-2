@@ -21,9 +21,13 @@ by the issue's labels — the router at the top of the diagram:
   devin implements and self-reviews, the driver runs `make ci` itself, at most
   three review rounds, doku's user note, cleanup.
 
-The primer: planning starts by creating one role-neutral agent whose only turn
-is to study the repository, then uses `uv run orchestrator fork <src> <dst>`
-to give each issue's owen, spectacle, and doku a fresh fork of that session.
+The primer: the first fork that needs one creates a role-neutral agent whose
+only turn is to study the repository, then uses `uv run orchestrator fork <src>
+<dst>` to give each issue's owen, spectacle, and doku a fresh fork of that
+session. Priming is lazy rather than up front because a split parent never
+converges: re-running one routes to planning even when every child is already
+groomed, and the walk then skips them all — priming first would buy a full repo
+read that nothing forks from.
 Forks are deleted after their issue. The fork verb exists in this repository —
 read its docs and `--help` before use. If fork is unavailable at runtime, fall
 back to fresh agents per issue and print that the fallback is in effect. A role

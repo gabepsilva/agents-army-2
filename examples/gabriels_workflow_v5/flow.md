@@ -10,11 +10,11 @@ flowchart TD
     START(["go.py + issue URL"]) --> ROUTE{"Labels?"}
     ROUTE -- "blocked" --> RB(["exit 1 — resolve evidence first"])
     ROUTE -- "owens-is-happy +<br>spectacle-is-happy" --> BUILD0
-    ROUTE -- "anything else" --> PRIME
+    ROUTE -- "anything else" --> PQ
 
     subgraph PLAN["Invocation A — planning (recursive, then dies)"]
-        PRIME["Prime once per run:<br>one role-neutral session reads the repo"]
         PQ["Queue = [issue]<br>cap: 12 issues per run"]
+        PRIME["Prime, on the first fork that needs it:<br>one role-neutral session reads the repo, once per run<br>(never runs if every issue is already converged)"]
         NEXT{"Next issue<br>from queue"}
         TRI["fork primer → owen: triage<br>(proceed / reshape / reject / split)"]
         SPLITN["Children from the CHILDREN: line<br>queued in build order<br>(their forks share the same primer)"]
@@ -25,9 +25,9 @@ flowchart TD
         REPORT(["exit 0 — script dies<br>human reads briefs, picks leaves to build"])
     end
 
-    PRIME --> PQ --> NEXT
+    PQ --> NEXT
     NEXT -- "already converged" --> NEXT
-    NEXT --> TRI
+    NEXT --> PRIME --> TRI
     TRI -- "split" --> SPLITN --> NEXT
     TRI -- "reject + concur" --> CLOSED["Issue closed as not planned"] --> NEXT
     TRI -- "reject + veto" --> DEB
@@ -74,7 +74,7 @@ flowchart TD
 
 - **Two invocations by design.** Planning always ends with the script dying after every leaf is briefed — the human reads doku's briefs (and the tree summary on the root) and decides what gets built, while disagreeing is still cheap. Build runs one leaf per call, in the `CHILDREN:` order, with the human merging between calls so each leaf builds on the previous one's merged code.
 - **Labels are the state machine.** No verdict → plan. `owens-split` → its children get planned. Converged → build. Blocked → refused until resolved. Re-calling after a crash lands in the right phase automatically; an existing draft PR is reused, never duplicated.
-- **The primer.** Planning primes one role-neutral session on the repo, then `orchestrator fork`s it per issue and per role; forks are discarded after their leaf. Repo knowledge is shared through the primer; debate content never is.
+- **The primer.** The first fork that needs it primes one role-neutral session on the repo, then `orchestrator fork`s it per issue and per role; priming is lazy because a split parent never converges, so re-running one routes to planning even when every child is already groomed — priming up front would buy a repo read that nothing forks from; forks are discarded after their leaf. Repo knowledge is shared through the primer; debate content never is.
 - Code is opened during the debate only when a claim is **disputed and decision-changing**, checked by whoever can check cheapest; everything else rides the assumptions ledger to devin, who verifies in the files he is editing anyway. A false assumption stops the build (exit 6) with devin's finding as a PR comment — amend the spec and call again.
 - The driver owns `make ci`; the reviewer reads the log instead of re-running gates. Remote (GitHub-hosted) CI is never consulted — local `make ci` is authoritative *because the stale-base gate guarantees it ran on a branch containing current `origin/master`*. Parallel runs take turns on a machine-wide CI lock, so gates never fight for cores.
 - **Parallel runs.** Each issue works in a private full clone (at `<team>/worktree` — the path `--team` resolves as the workdir), so concurrent runs share no git state; a per-issue flock refuses a second run on the same issue (exit 4). Parallelize across *independent* issues only: the leaves of one split tree still build serially in `CHILDREN:` order — siblings edit the same files, and every merge forces every other in-flight branch through a re-gate.

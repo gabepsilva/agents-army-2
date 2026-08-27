@@ -122,6 +122,7 @@ PRIMER_PROMPT = (
 )
 
 FORKS = set()  # the forks alive for the issue being planned
+PRIMED = False  # the primer is read once per run, on the first fork that needs it
 FORK_WORKS = True  # flips off if the fork verb refuses at runtime
 CI_RUNS = []  # the driver's own make ci runs: {"head", "log"} each
 
@@ -174,8 +175,16 @@ def cleanup():  # Y - the team and clone die with the run; logs are kept
 
 
 def prime():  # PRIME - one role-neutral session reads the repo, once per run
+    """Called from the first fork that will actually use it, not up front: a
+    split parent is never converged, so re-running it routes to planning, and
+    if every child is already groomed the walk skips them all. Priming before
+    that walk would buy a full repo read that nothing forks from."""
+    global PRIMED
+    if PRIMED:
+        return
     print(f"Priming: one role-neutral session reads the repo. {conf(PRIMER)}")
     talk("primer", PRIMER_PROMPT, *flags_for(PRIMER))
+    PRIMED = True
 
 
 def fork_primer(role, url):
@@ -194,6 +203,7 @@ def fork_primer(role, url):
         return name, []
     FORKS.add(name)
     if FORK_WORKS and ROLES[role]["backend"] == PRIMER["backend"]:
+        prime()  # outside the try - a failed primer turn is not a refused fork
         try:
             sh("uv", "run", "orchestrator", "fork", "primer", name, "--team", TEAM)
             print(f"  {name} forks the primer, inheriting {conf(PRIMER)}")
@@ -284,7 +294,6 @@ def tree_summary():  # SUMM - doku's plan of record on the root, only if anythin
 
 def plan():  # Invocation A - BFS the tree, debate every leaf, then die
     fresh_team_and_clone()
-    prime()
     queue, taken, split_any = [ISSUE_URL], 0, False  # PQ
     while queue:  # NEXT
         url, taken = queue.pop(0), taken + 1
