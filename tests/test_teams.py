@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 from backends.base import AgentBackend, TurnError, TurnResult
 from backends.registry import register_backend
@@ -102,10 +103,8 @@ def _resolved_paths(argv: list[str]) -> paths.RuntimePaths:
     """
     env = dict(os.environ)
     base_paths = paths.RuntimePaths.from_env(env, cwd=Path.cwd(), user_home=Path.home())
-    opts = orchestrator._build_parser().parse_args(argv)
-    runtime_paths, lock = orchestrator._resolve_team(
-        opts, base_paths, env, teardown=False
-    )
+    opts = cli._build_parser().parse_args(argv)
+    runtime_paths, lock = cli._resolve_team(opts, base_paths, env, teardown=False)
     with lock:
         return runtime_paths
 
@@ -253,7 +252,7 @@ def test_workdir_reaches_the_backend_as_the_team_worktree(
     worktree.mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["talk", "a", "--team", "t1", "-b", "recording", "-p", "hi"])
+    cli.main(["talk", "a", "--team", "t1", "-b", "recording", "-p", "hi"])
 
     assert seen == [worktree]
 
@@ -299,7 +298,7 @@ def test_chat_uses_the_team_registry_and_worktree(
 
     monkeypatch.setattr(core.subprocess, "run", fake_run)
 
-    orchestrator.main(["chat", "a", "--team", "t1"])
+    cli.main(["chat", "a", "--team", "t1"])
 
     assert calls == [
         (
@@ -331,7 +330,7 @@ def test_state_file_and_skills_dir_resolve_under_the_team_root(
     assert resolved.skills_dir == worktree / "SKILLS"
 
     # And the resolved registry is the one a real run actually writes.
-    orchestrator.main(["create", "a", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "a", "--team", "t1", "-b", "recording"])
 
     assert resolved.state_file.exists()
 
@@ -362,7 +361,7 @@ def test_teamless_behavior_is_unaffected_by_team_support(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(state_file))
     monkeypatch.setenv("AGENTS_ARMY_HOME", str(workdir))
 
-    orchestrator.main(["talk", "a", "-b", "recording", "-p", "hi"])
+    cli.main(["talk", "a", "-b", "recording", "-p", "hi"])
 
     assert seen == [workdir]
     assert _read_state(state_file)["a"]["backend"] == "recording"
@@ -384,7 +383,7 @@ def test_v1_teams_dir_unset_resolves_under_root_instead_of_erroring(
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
 
-    orchestrator.main(["list", "agents", "--team", "t1"])
+    cli.main(["list", "agents", "--team", "t1"])
 
     out = capsys.readouterr().out
     assert "dev" in out
@@ -404,7 +403,7 @@ def test_v2_invalid_team_name_exits_2_and_creates_nothing(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", bad_name])
+        cli.main(["list", "agents", "--team", bad_name])
 
     assert excinfo.value.code == 2
     assert not teams_dir.exists()
@@ -430,7 +429,7 @@ def test_v2_qualified_name_rejected_while_teams_dir_is_set(
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "agents-army-2/gdw-v3/issue-97"])
+        cli.main(["list", "agents", "--team", "agents-army-2/gdw-v3/issue-97"])
 
     assert excinfo.value.code == 2
     assert not teams_dir.exists()
@@ -453,7 +452,7 @@ def test_v3_team_with_explicit_state_file_exits_2_and_creates_nothing(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "explicit_state.json"))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "t1"])
+        cli.main(["list", "agents", "--team", "t1"])
 
     assert excinfo.value.code == 2
     assert not teams_dir.exists()
@@ -474,7 +473,7 @@ def test_v4_team_with_explicit_home_exits_2_and_creates_nothing(
     monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path / "explicit_home"))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "t1"])
+        cli.main(["list", "agents", "--team", "t1"])
 
     assert excinfo.value.code == 2
     assert not teams_dir.exists()
@@ -505,7 +504,7 @@ def test_v5_missing_worktree_exits_2_for_worktree_binding_verbs(
         (["fork", "a", "b", "--team", "t1"], "fork"),
     ):
         with pytest.raises(SystemExit) as excinfo:
-            orchestrator.main(argv)
+            cli.main(argv)
         assert excinfo.value.code == 2
         assert (
             f"orchestrator {prog}: error: team workspace {worktree} does "
@@ -540,7 +539,7 @@ def test_bogus_team_under_teams_dir_exits_1_and_creates_nothing(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(argv)
+        cli.main(argv)
 
     assert excinfo.value.code == 1
     assert (
@@ -560,7 +559,7 @@ def test_list_agents_team_succeeds_with_no_worktree(
     _make_team(teams_dir, "t1", agents={"dev": "claude"}, worktree=False)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["list", "agents", "--team", "t1"])
+    cli.main(["list", "agents", "--team", "t1"])
 
     out = capsys.readouterr().out
     assert "dev" in out
@@ -574,7 +573,7 @@ def test_delete_by_name_team_succeeds_with_no_worktree(
     _make_team(teams_dir, "t1", agents={"dev": "claude"}, worktree=False)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["delete", "dev", "--team", "t1"])
+    cli.main(["delete", "dev", "--team", "t1"])
 
     state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
     assert "dev" not in state
@@ -607,9 +606,9 @@ def test_fork_team_writes_the_copy_into_that_teams_registry(
     teams_dir = tmp_path / "teams"
     _make_team(teams_dir, "t1")
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    orchestrator.main(["talk", "primer", "--team", "t1", "-b", "forkable", "-p", "hi"])
+    cli.main(["talk", "primer", "--team", "t1", "-b", "forkable", "-p", "hi"])
 
-    orchestrator.main(["fork", "primer", "copy", "--team", "t1"])
+    cli.main(["fork", "primer", "copy", "--team", "t1"])
 
     state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
     assert state["copy"]["backend"] == "forkable"
@@ -619,7 +618,7 @@ def test_fork_team_writes_the_copy_into_that_teams_registry(
 
 def test_team_help_text_names_the_layout(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
-        orchestrator.main(["talk", "--help"])
+        cli.main(["talk", "--help"])
     assert (
         "  --team TEAM           run against team <team>'s {agents,worktree} "
         "instead of\n"
@@ -638,11 +637,11 @@ def test_v5_does_not_apply_to_teardown(
     worktree = teams_dir / "t1" / "worktree"
     worktree.mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
     # Simulate the worktree already having been removed by the caller.
     shutil.rmtree(worktree)
 
-    orchestrator.main(["delete", "--team", "t1"])
+    cli.main(["delete", "--team", "t1"])
 
     assert not (teams_dir / "t1" / "agents").exists()
 
@@ -661,7 +660,7 @@ def test_zero_hits_under_root_exits_2_with_recovery_instructions(
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "nope"])
+        cli.main(["list", "agents", "--team", "nope"])
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
@@ -696,7 +695,7 @@ def test_zero_hits_exits_2_for_teardown_too(
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["delete", "--team", "nope"])
+        cli.main(["delete", "--team", "nope"])
 
     assert excinfo.value.code == 2
     assert f"no team named 'nope' under {root}" in capsys.readouterr().err
@@ -712,7 +711,7 @@ def test_ambiguity_under_root_exits_2_and_lists_full_paths(
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "agents", "--team", "issue-97"])
+        cli.main(["list", "agents", "--team", "issue-97"])
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
@@ -734,7 +733,7 @@ def test_qualified_name_resolves_one_of_two_ambiguous_teams(
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "agents", "--team", "repo-a/wf/issue-97"])
+    cli.main(["list", "agents", "--team", "repo-a/wf/issue-97"])
 
     out = capsys.readouterr().out
     assert "dev" in out
@@ -754,7 +753,7 @@ def test_teams_dir_set_short_circuits_the_root_walk(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["create", "a", "--team", "t1", "-b", "claude"])
+        cli.main(["create", "a", "--team", "t1", "-b", "claude"])
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
@@ -774,7 +773,7 @@ def test_delete_team_tears_down_an_agents_dir_without_the_marker_file(
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["delete", "--team", "t1"])
+    cli.main(["delete", "--team", "t1"])
 
     assert capsys.readouterr().out == "deleted team 't1'\n"
     assert not agents_dir.exists()
@@ -797,8 +796,8 @@ def test_two_teams_with_the_same_agent_name_are_independent(
     worktree1.mkdir(parents=True)
     worktree2.mkdir(parents=True)
 
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
-    orchestrator.main(["create", "owen", "--team", "t2", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t2", "-b", "recording"])
 
     state_file1 = teams_dir / "t1" / "agents" / "orchestrator_state.json"
     state_file2 = teams_dir / "t2" / "agents" / "orchestrator_state.json"
@@ -806,8 +805,8 @@ def test_two_teams_with_the_same_agent_name_are_independent(
     assert "owen" in _read_state(state_file1)
     assert "owen" in _read_state(state_file2)
 
-    orchestrator.main(["talk", "owen", "--team", "t1", "-p", "hi1"])
-    orchestrator.main(["talk", "owen", "--team", "t2", "-p", "hi2"])
+    cli.main(["talk", "owen", "--team", "t1", "-p", "hi1"])
+    cli.main(["talk", "owen", "--team", "t2", "-p", "hi2"])
 
     assert seen == [worktree1, worktree2]
     assert _read_state(state_file1)["owen"]["session_id"] == "sid-hi1"
@@ -826,10 +825,10 @@ def test_delete_team_name_deletes_one_agent_leaving_the_rest(
     teams_dir = tmp_path / "teams"
     (teams_dir / "t1" / "worktree").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
-    orchestrator.main(["create", "spectacle", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "spectacle", "--team", "t1", "-b", "recording"])
 
-    orchestrator.main(["delete", "owen", "--team", "t1"])
+    cli.main(["delete", "owen", "--team", "t1"])
 
     state = _read_state(teams_dir / "t1" / "agents" / "orchestrator_state.json")
     assert "owen" not in state
@@ -838,7 +837,7 @@ def test_delete_team_name_deletes_one_agent_leaving_the_rest(
 
 def test_bare_delete_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["delete"])
+        cli.main(["delete"])
     assert excinfo.value.code == 2
     assert (
         "orchestrator delete: error: delete requires NAME or --team\n"
@@ -854,7 +853,7 @@ def test_teardown_of_a_team_with_no_agents_ever_created_succeeds(
     (teams_dir / "t1" / "worktree").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["delete", "--team", "t1"])
+    cli.main(["delete", "--team", "t1"])
 
     assert capsys.readouterr().out == "deleted team 't1'\n"
     assert not (teams_dir / "t1" / "agents").exists()
@@ -891,7 +890,7 @@ def test_teardown_removes_a_registry_it_cannot_parse(
     (agents_dir / "orchestrator_state.json").write_text(payload, encoding="utf-8")
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["delete", "--team", "t1"])
+    cli.main(["delete", "--team", "t1"])
 
     captured = capsys.readouterr()
     assert captured.out == "deleted team 't1'\n"
@@ -955,7 +954,7 @@ def test_an_incidental_blocking_io_error_is_not_a_busy_team(
         monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path))
 
     with pytest.raises(BlockingIOError):
-        orchestrator.main(["talk", "a", *team_argv, "-b", "blocking", "-p", "hi"])
+        cli.main(["talk", "a", *team_argv, "-b", "blocking", "-p", "hi"])
 
     assert "in use by another command" not in capsys.readouterr().err
 
@@ -994,7 +993,7 @@ def test_a_boundary_caught_error_releases_the_team_lock(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["talk", "a", "--team", "t1", "-b", "boom", "-p", "hi"])
+        cli.main(["talk", "a", "--team", "t1", "-b", "boom", "-p", "hi"])
 
     assert excinfo.value.code == 1
     assert capsys.readouterr().err.endswith("cli failed\n")
@@ -1011,7 +1010,7 @@ def test_teardown_of_an_unknown_team_exits_1(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["delete", "--team", "nope"])
+        cli.main(["delete", "--team", "nope"])
 
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
@@ -1030,11 +1029,11 @@ def test_delete_team_removes_agents_dir_leaves_worktree_and_git_metadata_intact(
     _run_git(["worktree", "add", "-q", "-B", "t1-branch", str(worktree)], cwd=repo)
     register_backend("recording", _make_recording_backend([]))
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
     agents_dir = teams_dir / "t1" / "agents"
     assert agents_dir.exists()
 
-    orchestrator.main(["delete", "--team", "t1"])
+    cli.main(["delete", "--team", "t1"])
 
     assert not agents_dir.exists()
     assert worktree.is_dir()
@@ -1049,7 +1048,7 @@ def test_teardown_overlapping_a_held_shared_lock_exits_nonzero_and_removes_nothi
     teams_dir = tmp_path / "teams"
     (teams_dir / "t1" / "worktree").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
     agents_dir = teams_dir / "t1" / "agents"
     assert agents_dir.exists()
     capsys.readouterr()  # discard the "created agent" noise above
@@ -1058,7 +1057,7 @@ def test_teardown_overlapping_a_held_shared_lock_exits_nonzero_and_removes_nothi
     with lock_path.open("a+", encoding="utf-8") as held:
         fcntl.flock(held.fileno(), fcntl.LOCK_SH)
         with pytest.raises(SystemExit) as excinfo:
-            orchestrator.main(["delete", "--team", "t1"])
+            cli.main(["delete", "--team", "t1"])
         fcntl.flock(held.fileno(), fcntl.LOCK_UN)
 
     assert excinfo.value.code == 1
@@ -1085,7 +1084,7 @@ def test_list_teams_empty_root_prints_no_teams_and_exits_0(
     )
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out == "no teams\n"
 
@@ -1102,7 +1101,7 @@ def test_list_teams_several_teams_under_one_namespace(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1122,7 +1121,7 @@ def test_list_teams_namespaced_root_and_flat_root_in_same_walk(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1144,7 +1143,7 @@ def test_list_teams_directory_without_agents_dir_is_not_a_team(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out == "no teams\n"
 
@@ -1158,7 +1157,7 @@ def test_list_teams_flags_a_team_missing_its_worktree(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1176,7 +1175,7 @@ def test_list_teams_team_with_intact_worktree_is_not_flagged(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1201,7 +1200,7 @@ def test_list_teams_decoy_worktree_with_its_own_registry_yields_one_team(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1224,7 +1223,7 @@ def test_list_teams_depth_bound_finds_depth_4_but_not_depth_5(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1246,7 +1245,7 @@ def test_list_teams_symlink_loop_terminates(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])  # must return, not hang
+    cli.main(["list", "teams"])  # must return, not hang
 
     assert capsys.readouterr().out == "no teams\n"
 
@@ -1262,7 +1261,7 @@ def test_list_teams_out_of_root_teams_dir_is_its_own_group(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1284,7 +1283,7 @@ def test_list_teams_teams_dir_under_root_is_not_a_second_group(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1314,7 +1313,7 @@ def test_list_teams_finds_a_team_outside_root_when_teams_dir_is_an_ancestor(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1349,7 +1348,7 @@ def test_list_teams_unreadable_team_registry_does_not_abort_the_walk(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1373,7 +1372,7 @@ def test_list_teams_reports_a_team_whose_backend_plugin_is_gone(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1393,7 +1392,7 @@ def test_list_teams_unreadable_teamless_registry_does_not_abort_the_walk(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1418,7 +1417,7 @@ def test_list_teams_unreadable_teamless_registry_is_not_hidden_behind_no_teams(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1441,7 +1440,7 @@ def test_list_teams_teamless_group_present(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1473,7 +1472,7 @@ def test_list_teams_teamless_group_reads_state_file_not_bare_root_file(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(relocated))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1494,7 +1493,7 @@ def test_list_teams_teamless_group_present_but_empty(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1514,7 +1513,7 @@ def test_list_teams_teamless_group_absent_when_no_bare_registry(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1538,7 +1537,7 @@ def test_list_teams_registry_entry_without_a_backend_renders_a_question_mark(
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(root / "orchestrator_state.json"))
     monkeypatch.delenv("AGENTS_ARMY_TEAMS_DIR", raising=False)
 
-    orchestrator.main(["list", "teams"])
+    cli.main(["list", "teams"])
 
     assert capsys.readouterr().out.splitlines() == [
         str(root),
@@ -1551,7 +1550,7 @@ def test_list_teams_with_team_option_exits_2(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        orchestrator.main(["list", "teams", "--team", "x"])
+        cli.main(["list", "teams", "--team", "x"])
 
     assert excinfo.value.code == 2
     assert (
@@ -1575,7 +1574,7 @@ def test_state_file_ladder_prefers_explicit_state_file(
     monkeypatch.setenv("AGENTS_ARMY_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
 
-    orchestrator.main(["list", "agents"])
+    cli.main(["list", "agents"])
 
     assert capsys.readouterr().out == f"registry: {explicit}\nno agents\n"
 
@@ -1589,7 +1588,7 @@ def test_state_file_ladder_prefers_explicit_home_over_root(
     monkeypatch.setenv("AGENTS_ARMY_HOME", str(home))
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
 
-    orchestrator.main(["list", "agents"])
+    cli.main(["list", "agents"])
 
     assert capsys.readouterr().out == (
         f"registry: {home / 'orchestrator_state.json'}\nno agents\n"
@@ -1604,7 +1603,7 @@ def test_state_file_ladder_defaults_under_root_when_nothing_else_is_set(
     monkeypatch.delenv("AGENTS_ARMY_STATE_FILE", raising=False)
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
 
-    orchestrator.main(["list", "agents"])
+    cli.main(["list", "agents"])
 
     assert capsys.readouterr().out == (
         f"registry: {root / 'orchestrator_state.json'}\nno agents\n"
@@ -1624,7 +1623,7 @@ def test_root_default_state_file_does_not_consult_cwd(
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(root))
     monkeypatch.chdir(cwd)
 
-    orchestrator.main(["create", "dev", "-b", "claude"])
+    cli.main(["create", "dev", "-b", "claude"])
 
     assert not (cwd / "orchestrator_state.json").exists()
     assert (root / "orchestrator_state.json").exists()
@@ -1645,7 +1644,7 @@ def test_workdir_and_skills_dir_still_follow_cwd_under_root_default(
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
     monkeypatch.chdir(tmp_path)
 
-    orchestrator.main(["talk", "a", "-b", "recording", "--skill", "tdd", "-p", "hi"])
+    cli.main(["talk", "a", "-b", "recording", "--skill", "tdd", "-p", "hi"])
 
     assert seen == [tmp_path]
 
@@ -1661,7 +1660,7 @@ def test_agents_army_root_does_not_conflict_with_team(
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
 
-    orchestrator.main(["create", "owen", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "owen", "--team", "t1", "-b", "recording"])
 
     assert (teams_dir / "t1" / "agents" / "orchestrator_state.json").exists()
 
@@ -1676,8 +1675,8 @@ def test_two_teams_in_one_process_do_not_share_a_registry(
         (teams_dir / team / "worktree").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["create", "first", "--team", "t1", "-b", "recording"])
-    orchestrator.main(["create", "second", "--team", "t2", "-b", "recording"])
+    cli.main(["create", "first", "--team", "t1", "-b", "recording"])
+    cli.main(["create", "second", "--team", "t2", "-b", "recording"])
 
     def state(team: str) -> Path:
         return teams_dir / team / "agents" / "orchestrator_state.json"
@@ -1697,8 +1696,8 @@ def test_a_second_teams_turn_runs_in_its_own_worktree(
         (teams_dir / team / "worktree").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
 
-    orchestrator.main(["talk", "a", "--team", "t1", "-b", "recording", "-p", "hi"])
-    orchestrator.main(["talk", "a", "--team", "t2", "-b", "recording", "-p", "hi"])
+    cli.main(["talk", "a", "--team", "t1", "-b", "recording", "-p", "hi"])
+    cli.main(["talk", "a", "--team", "t2", "-b", "recording", "-p", "hi"])
 
     assert seen == [teams_dir / "t1" / "worktree", teams_dir / "t2" / "worktree"]
 
@@ -1721,11 +1720,11 @@ def test_main_resolves_a_new_root_for_each_invocation(
         monkeypatch.delenv(variable, raising=False)
 
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(first_root))
-    orchestrator.main(["list", "agents", "--team", "t1"])
+    cli.main(["list", "agents", "--team", "t1"])
     first_output = capsys.readouterr().out
 
     monkeypatch.setenv("AGENTS_ARMY_ROOT", str(second_root))
-    orchestrator.main(["list", "agents", "--team", "t2"])
+    cli.main(["list", "agents", "--team", "t2"])
     second_output = capsys.readouterr().out
 
     assert (

@@ -18,7 +18,7 @@ import backends.opencode as opencode
 import orchestrator.core as core
 from backends.base import run_cli_turn
 from backends.registry import get_backend, register_backend
-from orchestrator import main
+from orchestrator.cli import main
 from orchestrator.core import Orchestrator
 from tests.path_helpers import runtime_paths
 

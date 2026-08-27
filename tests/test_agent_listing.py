@@ -13,7 +13,7 @@ from typing import TextIO, cast
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -183,7 +183,7 @@ class TestNewFieldsRoundTrip:
         assert agent.last_turn_at is None
         assert agent.turns is None
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         line = capsys.readouterr().out.splitlines()[1]
         assert "turns=-" in line
         assert "created=-" in line
@@ -211,7 +211,7 @@ class TestNewFieldsRoundTrip:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         line = capsys.readouterr().out.splitlines()[1]
         assert "turns=0" in line
         assert "last=-" in line
@@ -266,7 +266,7 @@ class TestBusyProbe:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
 
         locks_dir = orch._locks_dir()
         assert not locks_dir.exists() or list(locks_dir.iterdir()) == []
@@ -285,7 +285,7 @@ class TestListingAlignment:
         path = orch._agent_lock_path(long_name)
         holder = _flock_probe(path, fcntl.LOCK_EX)
         try:
-            orchestrator._print_agents(orch)
+            cli._print_agents(orch)
         finally:
             fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
             holder.close()
@@ -312,7 +312,7 @@ class TestListingAlignment:
         orch.spawn("wide", "echo", model="gpt-5-codex", reasoning_effort="medium")
         orch.spawn("narrow", "echo")
 
-        orchestrator._print_agents(orch)
+        cli._print_agents(orch)
         _header, *lines = capsys.readouterr().out.splitlines()
         assert len(lines) == 2
         offsets = {line.index("session=") for line in lines}

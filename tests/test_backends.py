@@ -21,7 +21,7 @@ from typing import cast
 
 import pytest
 
-import orchestrator
+import orchestrator.cli as cli
 import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import (
@@ -67,19 +67,19 @@ from backends.registry import (
     list_backends,
     register_backend,
 )
-from orchestrator import (
+from orchestrator.cli import (
     cmd_create as _cmd_create,
 )
-from orchestrator import (
+from orchestrator.cli import (
     cmd_delete as _cmd_delete,
 )
-from orchestrator import (
+from orchestrator.cli import (
     cmd_list as _cmd_list,
 )
-from orchestrator import (
+from orchestrator.cli import (
     cmd_talk as _cmd_talk,
 )
-from orchestrator import main
+from orchestrator.cli import main
 from orchestrator.core import (
     Agent,
     AgentBusyError,
@@ -93,13 +93,13 @@ def _talk_options(argv: list[str]) -> argparse.Namespace:
     separator = argv.index("--") if "--" in argv else None
     head = argv if separator is None else argv[:separator]
     tail = [] if separator is None else argv[separator + 1 :]
-    options = orchestrator._build_parser().parse_args(head)
-    orchestrator._resolve_talk_prompt(options, tail, separator is not None)
+    options = cli._build_parser().parse_args(head)
+    cli._resolve_talk_prompt(options, tail, separator is not None)
     return options
 
 
 def _options(argv: list[str]) -> argparse.Namespace:
-    return orchestrator._build_parser().parse_args(argv)
+    return cli._build_parser().parse_args(argv)
 
 
 def run_version(argv: list[str] | None = None) -> None:
@@ -3878,7 +3878,7 @@ class TestCLI:
             ),
         )
         assert capsys.readouterr().err == "created agent 'fresh' backend=echo\n"
-        assert orchestrator._agent_config(orch.agents["fresh"]) == ("echo", "m", "high")
+        assert cli._agent_config(orch.agents["fresh"]) == ("echo", "m", "high")
 
     def test_cmd_talk_matching_flags_reuse_silently(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -5043,7 +5043,7 @@ class TestLoggingConfiguration:
         # default, so starting there would pass without the level ever applying.
         root.setLevel(logging.DEBUG)
 
-        orchestrator._configure_logging(False)
+        cli._configure_logging(False)
 
         assert root.level == logging.WARNING
 
@@ -5051,7 +5051,7 @@ class TestLoggingConfiguration:
         root = logging.getLogger()
         root.handlers.clear()
 
-        orchestrator._configure_logging(False)
+        cli._configure_logging(False)
 
         record = logging.LogRecord(
             "backends.claude", logging.WARNING, "p", 1, "msg", None, None
@@ -5064,7 +5064,7 @@ class TestLoggingConfiguration:
 
 
 def test_parser_exposes_the_complete_new_surface() -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     subparsers = next(
         action
         for action in parser._actions
@@ -5134,7 +5134,7 @@ def test_parser_exposes_the_complete_new_surface() -> None:
 
 
 def test_agent_config_short_options_are_forwarded_by_create_and_talk() -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     create = parser.parse_args(["create", "a", "-m", "model", "-e", "high"])
     talk = parser.parse_args(["talk", "a", "-m", "model", "-e", "high", "-p", "x"])
     assert (create.model, create.reasoning_effort) == ("model", "high")
@@ -5183,10 +5183,10 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     options = parser.parse_args(["talk", "a"])
     with pytest.raises(SystemExit) as missing:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert missing.value.code == 2
     assert (
         "orchestrator talk: error: talk requires exactly one prompt source"
@@ -5195,7 +5195,7 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
 
     options = parser.parse_args(["talk", "a", "-p", " "])
     with pytest.raises(SystemExit) as empty:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert empty.value.code == 2
     assert (
         "orchestrator talk: error: talk prompt must not be empty"
@@ -5203,13 +5203,13 @@ def test_prompt_errors_have_exact_messages_and_strip_tail(
     )
 
     options = parser.parse_args(["talk", "a"])
-    orchestrator._resolve_talk_prompt(options, ["  one", "two  "], True)
+    cli._resolve_talk_prompt(options, ["  one", "two  "], True)
     assert options.prompt == "one two"
 
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("  one\n two  \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_file)])
-    orchestrator._resolve_talk_prompt(options, [], False)
+    cli._resolve_talk_prompt(options, [], False)
     assert options.prompt == "one\n two"
 
 
@@ -5252,12 +5252,12 @@ def test_prompt_file_errors_are_exact_and_prevent_side_effects(
 def test_prompt_file_errors_have_exact_messages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
 
     missing_path = tmp_path / "missing.txt"
     options = parser.parse_args(["talk", "a", "--prompt-file", str(missing_path)])
     with pytest.raises(SystemExit) as missing:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert missing.value.code == 2
     resolved_missing = missing_path.resolve()
     assert (
@@ -5269,7 +5269,7 @@ def test_prompt_file_errors_have_exact_messages(
     directory_path.mkdir()
     options = parser.parse_args(["talk", "a", "--prompt-file", str(directory_path)])
     with pytest.raises(SystemExit) as is_dir:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert is_dir.value.code == 2
     resolved_dir = directory_path.resolve()
     assert (
@@ -5281,7 +5281,7 @@ def test_prompt_file_errors_have_exact_messages(
     binary_path.write_bytes(b"\xff\xfe\x00not utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(binary_path)])
     with pytest.raises(SystemExit) as bad_decode:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert bad_decode.value.code == 2
     resolved_binary = binary_path.resolve()
     assert (
@@ -5293,7 +5293,7 @@ def test_prompt_file_errors_have_exact_messages(
     blank_path.write_text(" \n\t \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(blank_path)])
     with pytest.raises(SystemExit) as blank:
-        orchestrator._resolve_talk_prompt(options, [], False)
+        cli._resolve_talk_prompt(options, [], False)
     assert blank.value.code == 2
     assert (
         "orchestrator talk: error: talk prompt must not be empty"
@@ -5304,11 +5304,11 @@ def test_prompt_file_errors_have_exact_messages(
 def test_prompt_file_strips_outer_whitespace_and_keeps_interior_newlines(
     tmp_path: Path,
 ) -> None:
-    parser = orchestrator._build_parser()
+    parser = cli._build_parser()
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("  line one\nline two  \n", encoding="utf-8")
     options = parser.parse_args(["talk", "a", "--prompt-file", str(prompt_path)])
-    orchestrator._resolve_talk_prompt(options, [], False)
+    cli._resolve_talk_prompt(options, [], False)
     assert options.prompt == "line one\nline two"
 
 
@@ -5337,7 +5337,7 @@ def test_separator_error_and_cli_error_without_arguments_are_exact(
 def test_cli_log_counts_head_and_tail_arguments(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setitem(orchestrator.VERBS, "talk", lambda _orch, _opts: None)
+    monkeypatch.setitem(cli.VERBS, "talk", lambda _orch, _opts: None)
     monkeypatch.setattr(core, "Orchestrator", lambda *_: object())
     caplog.set_level(logging.DEBUG, logger="orchestrator")
     main(["-v", "talk", "a", "--", "one", "two"])
