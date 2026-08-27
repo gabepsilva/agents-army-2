@@ -77,6 +77,17 @@ def test_chat_help_exposes_only_the_interactive_agent_selection(
     assert "--timeout" not in output
 
 
+def test_talk_help_describes_backend_event_streaming(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["talk", "--help"])
+
+    assert excinfo.value.code == 0
+    output = " ".join(capsys.readouterr().out.split())
+    assert "render recognized backend events to stderr while the turn runs" in output
+
+
 def test_package_and_console_entry_point_resolve_to_cli_main() -> None:
     import orchestrator.cli as cli
 
