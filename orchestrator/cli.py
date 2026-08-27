@@ -272,10 +272,12 @@ def cmd_list(orchestrator: core.Orchestrator, opts: argparse.Namespace) -> None:
         _print_agents(orchestrator)
         return
     catalog_dir = _catalog_dir(orchestrator.runtime_paths)
+    listing = format_skill_listing(index_skills(catalog_dir))
     # Which of the ladder's directories won, the way `list agents` names the
-    # registry it read.
+    # registry it read. Printed only once indexing has succeeded, so a failure
+    # leaves stdout empty rather than half-written.
     print(f"skills: {catalog_dir}")
-    print(format_skill_listing(index_skills(catalog_dir)))
+    print(listing)
 
 
 def _agents_from_registry(state_file: Path) -> dict[str, str] | None:

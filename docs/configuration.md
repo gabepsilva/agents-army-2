@@ -19,9 +19,9 @@ current working directory is never consulted for this default — only
 
 The skills catalog resolves in this order:
 
-1. `AGENTS_ARMY_SKILLS`, if set, wins outright — teamless and under `--team`.
-   Like any configured catalog it is used when it exists on disk; a path that
-   does not exist falls through to rung 3 rather than failing on its own.
+1. `AGENTS_ARMY_SKILLS`, if set, replaces the configured catalog outright —
+   teamless and under `--team`. It is still subject to rung 3: a path that
+   does not exist on disk falls through rather than failing on its own.
 2. Otherwise the configured catalog — `$AGENTS_ARMY_HOME/SKILLS` (the current
    working directory's `SKILLS/` unless `AGENTS_ARMY_HOME` is set), or
    `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` under `--team` — **if it
@@ -140,8 +140,8 @@ own. Every other key is unchanged by this, so a registry written before
 ## Skills
 
 A skill is a markdown file under the skills catalog (`SKILLS/` by default,
-any subfolder; see the resolution ladder above for which `SKILLS/`). `--skill NAME` resolves `NAME` to its path and prepends it to
-the prompt; `--skill a,b` attaches more than one. A skill name must be
+any subfolder; see the resolution ladder above for which `SKILLS/`).
+`--skill NAME` resolves `NAME` to its path and prepends it to the prompt; `--skill a,b` attaches more than one. A skill name must be
 unique across the whole catalog — a collision between two subfolders is an
 error, not a silent pick.
 

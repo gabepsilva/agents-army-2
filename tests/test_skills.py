@@ -212,9 +212,8 @@ class TestResolveCatalogDir:
     ) -> None:
         fallback = tmp_path / "root" / "SKILLS"
         fallback.mkdir(parents=True)
-        assert resolve_catalog_dir(
-            tmp_path / "nowhere" / "SKILLS", tmp_path / "root"
-        ) == (fallback)
+        configured = tmp_path / "nowhere" / "SKILLS"
+        assert resolve_catalog_dir(configured, tmp_path / "root") == fallback
 
     def test_an_empty_root_catalog_still_wins_the_rung(self, tmp_path: Path) -> None:
         """Existing-but-empty is a correct answer, not a skipped rung."""
@@ -379,7 +378,7 @@ class TestCatalogLadderThroughTheCli:
     """The rungs as a user meets them: env override, cwd catalog, root catalog."""
 
     @pytest.fixture
-    def env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def checkout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         """A cwd with no catalog, a runtime root, and nothing inherited."""
         cwd = tmp_path / "checkout"
         cwd.mkdir()
@@ -397,16 +396,16 @@ class TestCatalogLadderThroughTheCli:
         return (directory / skill / "SKILL.md").resolve()
 
     def test_cwd_catalog_wins_and_shadows_the_root_catalog(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        local = self._catalog(env / "SKILLS", "local")
+        local = self._catalog(checkout / "SKILLS", "local")
         self._catalog(tmp_path / "root" / "SKILLS", "rooted")
         main(["list", "skills"])
         out = capsys.readouterr().out
-        assert out == f"skills: {env / 'SKILLS'}\n{'local':20} {local}\n"
+        assert out == f"skills: {checkout / 'SKILLS'}\n{'local':20} {local}\n"
 
     def test_root_catalog_is_used_when_the_cwd_has_none(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
         main(["list", "skills"])
@@ -417,21 +416,21 @@ class TestCatalogLadderThroughTheCli:
 
     def test_explicit_catalog_wins_over_both(
         self,
-        env: Path,
+        checkout: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        self._catalog(env / "SKILLS", "local")
+        self._catalog(checkout / "SKILLS", "local")
         self._catalog(tmp_path / "root" / "SKILLS", "rooted")
         explicit = self._catalog(tmp_path / "explicit", "chosen")
         monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "explicit"))
         main(["list", "skills"])
         out = capsys.readouterr().out
-        assert out == (f"skills: {tmp_path / 'explicit'}\n{'chosen':20} {explicit}\n")
+        assert out == f"skills: {tmp_path / 'explicit'}\n{'chosen':20} {explicit}\n"
 
     def test_an_existing_but_empty_root_catalog_lists_as_empty(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         (tmp_path / "root" / "SKILLS").mkdir(parents=True)
         main(["list", "skills"])
@@ -440,33 +439,33 @@ class TestCatalogLadderThroughTheCli:
         )
 
     def test_no_catalog_anywhere_exits_one_naming_both(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
         captured = capsys.readouterr()
         assert captured.err == (
-            f"skills directory not found: tried {env / 'SKILLS'} "
+            f"skills directory not found: tried {checkout / 'SKILLS'} "
             f"and {tmp_path / 'root' / 'SKILLS'}\n"
         )
         assert captured.out == ""
 
     def test_talk_attaches_a_skill_from_the_root_catalog(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rooted = self._catalog(tmp_path / "root" / "SKILLS", "rooted")
         main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
         assert f"- rooted: {rooted}" in capsys.readouterr().out
 
     def test_talk_prefers_the_cwd_catalog_and_says_where_it_looked(
-        self, env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+        self, checkout: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        self._catalog(env / "SKILLS", "local")
+        self._catalog(checkout / "SKILLS", "local")
         self._catalog(tmp_path / "root" / "SKILLS", "rooted")
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--backend", "echo", "--skill", "rooted", "-p", "go"])
         assert capsys.readouterr().err == (
-            f"unknown skill 'rooted' in {env / 'SKILLS'}. available skills: local\n"
+            f"unknown skill 'rooted' in {checkout / 'SKILLS'}. available skills: local\n"
         )
 
 
