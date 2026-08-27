@@ -88,6 +88,14 @@ class CodexBackend(AgentBackend):
 
     name = "codex"
     supports_fork = True
+    # A2 verdict (2026-08-27, codex-cli 0.149.0): PASS. `codex resume
+    # <id>` resumes the previous interactive session without forking it.
+    supports_chat = True
+
+    def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+        """Resume the stored Codex session in its interactive terminal UI."""
+        log.debug("codex chat: cwd=%s session=%s", cwd, session_id)
+        return ["codex", "resume", session_id]
 
     def run_turn(
         self,

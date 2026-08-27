@@ -28,7 +28,7 @@ AGENTS_ARMY_STATE_FILE=/tmp/state.json uv run orchestrator list
 
 ## Teams
 
-`--team NAME` (on `create`, `talk`, `fork`, `list`, `delete`) points
+`--team NAME` (on `create`, `talk`, `chat`, `fork`, `list`, `delete`) points
 `STATE_FILE`, `WORKDIR`, and (unless `AGENTS_ARMY_SKILLS` is set) `SKILLS_DIR` at
 `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json`,
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree`, and
@@ -60,7 +60,7 @@ the path instead of resolving it.
 `--team` cannot be combined with an explicit `AGENTS_ARMY_HOME` or
 `AGENTS_ARMY_STATE_FILE` (both are derived from the team root instead) —
 `AGENTS_ARMY_ROOT` is not on that list, since it is the teamless registry's
-own fallback and stays compatible with `--team`. `create`/`talk`/`fork --team`
+own fallback and stays compatible with `--team`. `create`/`talk`/`chat`/`fork --team`
 require the team's `worktree` to already exist, since they launch a backend
 into it — the orchestrator never runs `git` itself, so the caller creates it
 with `git worktree add`. `list agents`/`delete NAME --team` only read and
@@ -140,12 +140,12 @@ reuses what's stored.
 
 Currently available: `claude`, `codex`, `grok`, `opencode` (tested minimum 1.18.21).
 
-| backend | CLI invocation | resume | fork | notes |
-|---|---|---|---|---|
-| `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | `--fork-session` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
-| `codex` | `codex exec --yolo` | `codex exec resume` | `codex exec fork` (in `resume`'s place) | `--yolo` is codex's alias for `--dangerously-bypass-approvals-and-sandbox`; without it a turn cannot commit in a linked worktree or reach the network |
-| `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | `--fork-session` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
-| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | `--fork` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
+| backend | CLI invocation | resume | chat | fork | notes |
+|---|---|---|---|---|---|
+| `claude` | `claude --print --output-format json --permission-mode bypassPermissions` | `--resume <session_id>` | `claude --resume <session_id>` | `--fork-session` | print mode otherwise denies tools (`gh`, Bash, WebFetch) |
+| `codex` | `codex exec --yolo` | `codex exec resume` | `codex resume <session_id>` | `codex exec fork` (in `resume`'s place) | `--yolo` is codex's alias for `--dangerously-bypass-approvals-and-sandbox`; without it a turn cannot commit in a linked worktree or reach the network |
+| `grok` | `grok --output-format json --always-approve --single=<prompt>` | `--resume` | `grok --resume <session_id>` | `--fork-session` | JSON envelope is camelCase (`sessionId`, `text`); `--session-id` only names a *new* session |
+| `opencode` | `opencode run --format json --auto --dir <cwd>` | `--session <session_id>` | `opencode --session <session_id>` | `--fork` | prompt via stdin; schema inlined in the prompt and enforced by validation/repair; tested minimum 1.18.21 |
 
 A backend declares whether it can fork with the class attribute
 `supports_fork`, which [`fork`](cli-reference.md) checks before it creates
@@ -153,11 +153,18 @@ anything. All four shipped backends answer `True`. The attribute defaults to
 `False` on `AgentBackend`, so a backend added outside this repo has to opt in
 once it can emit a fork of its own.
 
-Every backend runs its CLI through one shared boundary, `run_cli_turn` in
-`backends/base.py`. Claude, Codex, and Grok take its default `stdin=DEVNULL`
-— a CLI whose stdin is an inherited pipe rather than a terminal blocks until
-killed. OpenCode passes `prompt_on_stdin=True` and gets `input=prompt`
-instead, so its prompt is read verbatim.
+A backend declares whether it can be opened by [`chat`](cli-reference.md) with
+`supports_chat` and provides `chat_argv(session_id, cwd)` for its interactive
+resume command. That flag also defaults to `False`; it is safe for a backend
+to remain headless until it has verified that interactive resume preserves the
+stored session id.
+
+Every headless turn runs its CLI through one shared boundary, `run_cli_turn`
+in `backends/base.py`. Claude, Codex, and Grok take its default
+`stdin=DEVNULL` — a CLI whose stdin is an inherited pipe rather than a
+terminal blocks until killed. OpenCode passes `prompt_on_stdin=True` and gets
+`input=prompt` instead, so its prompt is read verbatim. Interactive `chat`
+deliberately uses the backend's `chat_argv` with inherited terminal stdio.
 
 New CLIs plug in by subclassing `AgentBackend` in `backends/` and
 registering the class in the `_BACKENDS` table in `backends/registry.py`. A

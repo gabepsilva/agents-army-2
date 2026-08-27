@@ -55,6 +55,21 @@ def test_prompt_flag_and_separator_forward_identical_text(
     assert file_output.endswith("reply:same prompt\n")
 
 
+def test_chat_help_exposes_only_the_interactive_agent_selection(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        orchestrator.main(["chat", "--help"])
+
+    assert excinfo.value.code == 0
+    output = capsys.readouterr().out
+    assert "usage: orchestrator chat" in output
+    assert "--team TEAM" in output
+    assert "--schema" not in output
+    assert "--skill" not in output
+    assert "--timeout" not in output
+
+
 def test_talk_forwards_schema_retries_timeout_and_short_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -200,6 +215,7 @@ def test_prompt_file_conflicts_are_rejected_before_constructing_orchestrator(
 VERB_INVOCATIONS = (
     ("create", ["create", "a"]),
     ("talk", ["talk", "a", "-p", "hi"]),
+    ("chat", ["chat", "a"]),
     ("fork", ["fork", "a", "b"]),
     ("list", ["list"]),
     ("delete", ["delete", "a"]),

@@ -109,6 +109,14 @@ class GrokBackend(AgentBackend):
 
     name = "grok"
     supports_fork = True
+    # A2 verdict (2026-08-27, Grok 1.0.5): PASS. `grok --resume <id>` is the
+    # interactive resume spelling and `--fork-session` is the separate fork.
+    supports_chat = True
+
+    def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+        """Resume the stored Grok session in its interactive terminal UI."""
+        log.debug("grok chat: cwd=%s session=%s", cwd, session_id)
+        return ["grok", "--resume", session_id]
 
     def run_turn(
         self,

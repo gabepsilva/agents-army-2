@@ -130,6 +130,14 @@ class ClaudeBackend(AgentBackend):
 
     name = "claude"
     supports_fork = True
+    # A2 verdict (2026-08-27, Claude Code 2.1.240): PASS. `claude --resume
+    # <id>` is the interactive resume spelling and does not request a fork.
+    supports_chat = True
+
+    def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+        """Resume the stored Claude session in its interactive terminal UI."""
+        log.debug("claude chat: cwd=%s session=%s", cwd, session_id)
+        return ["claude", "--resume", session_id]
 
     def run_turn(
         self,

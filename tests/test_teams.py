@@ -266,6 +266,61 @@ def test_workdir_reaches_the_backend_as_the_team_worktree(
     assert seen == [worktree]
 
 
+def test_chat_uses_the_team_registry_and_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class ChatBackend(AgentBackend):
+        name = "team-chat"
+        supports_chat = True
+
+        def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+            return ["chat-cli", session_id]
+
+        def run_turn(
+            self,
+            prompt: str,
+            session_id: str | None,
+            cwd: Path,
+            timeout: int = orchestrator.DEFAULT_TURN_TIMEOUT,
+            schema=None,
+            *,
+            resume_as_fork: bool = False,
+        ) -> TurnResult:
+            raise AssertionError("team chat test must not run a headless turn")
+
+    register_backend("team-chat", ChatBackend)
+    teams_dir = tmp_path / "teams"
+    team_root = _make_team(teams_dir, "t1", agents={"a": "team-chat"})
+    state_file = team_root / "agents" / "orchestrator_state.json"
+    state_file.write_text(
+        json.dumps({"a": {"backend": "team-chat", "session_id": "team-sid"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator, "TEAMS_DIR", teams_dir)
+    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "teamless.json")
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    orchestrator.main(["chat", "a", "--team", "t1"])
+
+    assert calls == [
+        (
+            ["chat-cli", "team-sid"],
+            {"cwd": str(team_root / "worktree"), "check": False},
+        )
+    ]
+    assert not (tmp_path / "teamless.json").exists()
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {
+        "a": {"backend": "team-chat", "session_id": "team-sid"}
+    }
+
+
 def test_state_file_and_skills_dir_resolve_under_the_team_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -438,12 +493,12 @@ def test_v4_team_with_explicit_home_exits_2_and_creates_nothing(
     )
 
 
-def test_v5_missing_worktree_exits_2_for_create_talk_and_fork_only(
+def test_v5_missing_worktree_exits_2_for_worktree_binding_verbs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Narrowed gate: only create/talk/fork bind an agent to WORKDIR and so
+    """Narrowed gate: only create/talk/chat/fork bind an agent to WORKDIR and so
     need it to exist. list agents/delete NAME just read and edit a JSON
     file."""
     teams_dir = tmp_path / "teams"
@@ -453,6 +508,7 @@ def test_v5_missing_worktree_exits_2_for_create_talk_and_fork_only(
     for argv, prog in (
         (["create", "a", "--team", "t1", "-b", "claude"], "create"),
         (["talk", "a", "--team", "t1", "-b", "claude", "-p", "hi"], "talk"),
+        (["chat", "a", "--team", "t1"], "chat"),
         (["fork", "a", "b", "--team", "t1"], "fork"),
     ):
         with pytest.raises(SystemExit) as excinfo:

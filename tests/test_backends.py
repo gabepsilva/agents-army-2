@@ -66,6 +66,7 @@ from backends.registry import (
 )
 from orchestrator import (
     Agent,
+    AgentBusyError,
     Orchestrator,
     main,
 )
@@ -512,6 +513,47 @@ class TestAgentBackendInterface:
         assert GrokBackend.supports_fork is True
         assert CodexBackend.supports_fork is True
         assert OpenCodeBackend.supports_fork is True
+
+    def test_chat_support_is_declared_per_backend(self) -> None:
+        """Interactive chat is opt-in, just like session forking."""
+        assert AgentBackend.supports_chat is False
+        assert ClaudeBackend.supports_chat is True
+        assert CodexBackend.supports_chat is True
+        assert GrokBackend.supports_chat is True
+        assert OpenCodeBackend.supports_chat is True
+
+    def test_backend_without_chat_support_has_no_interactive_command(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(NotImplementedError, match="no interactive chat command"):
+            EchoBackend().chat_argv("session-1", tmp_path)
+
+    @pytest.mark.parametrize(
+        ("backend_cls", "expected"),
+        [
+            (ClaudeBackend, ["claude", "--resume", "session-1"]),
+            (CodexBackend, ["codex", "resume", "session-1"]),
+            (GrokBackend, ["grok", "--resume", "session-1"]),
+            (OpenCodeBackend, ["opencode", "--session", "session-1"]),
+        ],
+    )
+    def test_chat_argv_resumes_the_stored_session(
+        self,
+        backend_cls: type[AgentBackend],
+        expected: list[str],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        backend = backend_cls()
+        with caplog.at_level(logging.DEBUG, logger=backend_cls.__module__):
+            actual = backend.chat_argv("session-1", tmp_path)
+
+        assert actual == expected
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == backend_cls.__module__
+        ] == [f"{backend.name} chat: cwd={tmp_path} session=session-1"]
 
     def test_get_backend_resolves_grok(self) -> None:
         backend = get_backend("grok", model="grok-test", reasoning_effort="high")
@@ -2849,6 +2891,189 @@ class TestOrchestrator:
         with pytest.raises(KeyError, match="no agent named"):
             orch.talk("nope", "hi")
 
+    def test_chat_runs_the_interactive_cli_without_state_mutation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state_file = tmp_path / "state.json"
+        seen_argv: list[tuple[str, Path]] = []
+
+        class ChatBackend(AgentBackend):
+            name = "chat-backend"
+            supports_chat = True
+
+            def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+                seen_argv.append((session_id, cwd))
+                return ["chat-cli", session_id]
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
+            ) -> TurnResult:
+                raise AssertionError("chat test must not run a headless turn")
+
+        register_backend("chat-backend", ChatBackend)
+        orch = Orchestrator(state_file=state_file)
+        agent = orch.spawn("a", "chat-backend")
+        agent.session_id = "session-1"
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 17)
+
+        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            orch,
+            "_exclusive",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("chat must not take the state lock")
+            ),
+        )
+
+        state_file.write_text(
+            json.dumps({"a": {"backend": "chat-backend", "session_id": "new-session"}}),
+            encoding="utf-8",
+        )
+        before = state_file.read_bytes()
+
+        assert orch.chat("a") == 17
+        assert seen_argv == [("new-session", agent.workdir)]
+        assert calls == [
+            (
+                ["chat-cli", "new-session"],
+                {"cwd": str(agent.workdir), "check": False},
+            )
+        ]
+        assert state_file.read_bytes() == before
+
+    def test_chat_unknown_agent_refuses_before_launching_cli(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("unknown agent launched a CLI")
+            ),
+        )
+
+        with (
+            caplog.at_level(logging.DEBUG, logger="orchestrator"),
+            pytest.raises(KeyError, match="no agent named 'missing'"),
+        ):
+            orch.chat("missing")
+        assert not orch._agent_lock_path("missing").exists()
+        assert [record.getMessage() for record in caplog.records] == [
+            "agent 'missing': reclaimed lock file, no such agent"
+        ]
+
+    def test_chat_refuses_an_agent_without_a_materialized_session(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        orch.spawn("a", "echo")
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("session-less agent launched a CLI")
+            ),
+        )
+
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match="agent 'a' has no session to fork yet; talk to it first",
+        ):
+            orch.chat("a")
+
+    def test_chat_refuses_a_pending_fork_before_launching_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        agent = orch.spawn("a", "echo")
+        agent.pending_fork_from = "source-session"
+        orch.state_file.write_text(
+            json.dumps(
+                {
+                    "a": {
+                        "backend": "echo",
+                        "pending_fork_from": "source-session",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("pending fork launched a CLI")
+            ),
+        )
+
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match="agent 'a' has no session to fork yet; talk to it first",
+        ):
+            orch.chat("a")
+
+    def test_chat_refuses_a_backend_without_interactive_support(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        agent = orch.spawn("a", "echo")
+        agent.session_id = "session-1"
+        orch.state_file.write_text(
+            json.dumps({"a": {"backend": "echo", "session_id": "session-1"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("unsupported backend launched a CLI")
+            ),
+        )
+
+        with pytest.raises(
+            orchestrator.OrchestratorError,
+            match="agent 'a' runs on backend 'echo', which cannot chat",
+        ):
+            orch.chat("a")
+
+    def test_chat_refuses_a_busy_agent_without_waiting_or_launching_cli(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        orch = Orchestrator(state_file=tmp_path / "state.json")
+        agent = orch.spawn("a", "echo")
+        agent.session_id = "session-1"
+        monkeypatch.setattr(
+            orchestrator.subprocess,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("busy agent launched a CLI")
+            ),
+        )
+
+        with (
+            orch._agent_lock("a"),
+            pytest.raises(
+                AgentBusyError,
+                match="agent 'a' is in use by another command; try again once it finishes",
+            ),
+        ):
+            orch.chat("a")
+
     def test_list_agents(self, tmp_path: Path) -> None:
         orch = Orchestrator(state_file=tmp_path / "s.json")
         orch.spawn("b", "codex")
@@ -3474,6 +3699,58 @@ class TestCLI:
         out = capsys.readouterr().out
         assert "session=echo-sid" in out
         assert "echo:hello there" in out
+
+    def test_main_chat_propagates_child_status_without_writing_registry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        class ChatBackend(AgentBackend):
+            name = "chat-status"
+            supports_chat = True
+
+            def chat_argv(self, session_id: str, cwd: Path) -> list[str]:
+                return ["chat-cli", session_id]
+
+            def run_turn(
+                self,
+                prompt: str,
+                session_id: str | None,
+                cwd: Path,
+                timeout: int = DEFAULT_TURN_TIMEOUT,
+                schema: OutputSchema | None = None,
+                *,
+                resume_as_fork: bool = False,
+            ) -> TurnResult:
+                raise AssertionError("chat test must not run a headless turn")
+
+        register_backend("chat-status", ChatBackend)
+        state_file = tmp_path / "state.json"
+        state_file.write_text(
+            json.dumps({"a": {"backend": "chat-status", "session_id": "s1"}}),
+            encoding="utf-8",
+        )
+        before = state_file.read_bytes()
+        monkeypatch.setattr(orchestrator, "STATE_FILE", state_file)
+        monkeypatch.setattr(orchestrator, "WORKDIR", tmp_path)
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 7)
+
+        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(["chat", "a"])
+
+        assert excinfo.value.code == 7
+        captured = capsys.readouterr()
+        assert calls == [(["chat-cli", "s1"], {"cwd": str(tmp_path), "check": False})]
+        assert captured.out == ""
+        assert captured.err == ""
+        assert state_file.read_bytes() == before
 
     def test_cmd_talk_creates_a_missing_agent(
         self,
@@ -4702,6 +4979,7 @@ def test_parser_exposes_the_complete_new_surface() -> None:
     assert set(subparsers.choices) == {
         "create",
         "talk",
+        "chat",
         "fork",
         "list",
         "delete",
@@ -4710,6 +4988,7 @@ def test_parser_exposes_the_complete_new_surface() -> None:
     child_args = {
         "create": ["a"],
         "talk": ["a", "-p", "x"],
+        "chat": ["a"],
         "fork": ["a", "b"],
         "list": [],
         "delete": ["a"],
