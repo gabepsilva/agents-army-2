@@ -83,12 +83,19 @@ class _TrackingStderr(io.StringIO):
         return super().write(text)
 
 
-def test_streaming_runner_echoes_complete_lines_before_child_exit(
+def test_streaming_runner_formats_complete_json_lines_before_child_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     child_finished = tmp_path / "child-finished"
     stderr = _TrackingStderr(child_finished)
     monkeypatch.setattr(sys, "stderr", stderr)
+
+    formatted: list[dict] = []
+
+    def format_event(event: dict) -> str | None:
+        formatted.append(event)
+        display = event.get("display")
+        return display if isinstance(display, str) else None
 
     args = _python(
         """
@@ -97,7 +104,11 @@ def test_streaming_runner_echoes_complete_lines_before_child_exit(
         import time
 
         finished = pathlib.Path(sys.argv[1])
-        sys.stdout.write("event one\\nevent two\\n")
+        sys.stdout.write('{"dis')
+        sys.stdout.flush()
+        time.sleep(0.2)
+        sys.stdout.write('play":"event one"}\\nnot json\\n["ignored"]\\n')
+        sys.stdout.write('{"display":"event two"}\\n')
         sys.stdout.flush()
         time.sleep(0.2)
         finished.write_text("done")
@@ -112,15 +123,20 @@ def test_streaming_runner_echoes_complete_lines_before_child_exit(
         cwd=tmp_path,
         timeout=5,
         stream=True,
+        format_event=format_event,
     )
 
     assert proc.args == args
     assert proc.returncode == 0
-    assert proc.stdout == "event one\nevent two\n"
+    assert (
+        proc.stdout
+        == '{"display":"event one"}\nnot json\n["ignored"]\n{"display":"event two"}\n'
+    )
     assert proc.stderr == ""
     assert stderr.getvalue() == "event one\nevent two\n"
     assert stderr.writes == ["event one\n", "event two\n"]
     assert stderr.wrote_before_child_exit
+    assert formatted == [{"display": "event one"}, {"display": "event two"}]
 
 
 def test_streaming_runner_matches_subprocess_text_decoding(
@@ -166,7 +182,7 @@ def test_streaming_runner_matches_subprocess_text_decoding(
     assert streamed.stdout == baseline.stdout
     assert streamed.stderr == baseline.stderr
     assert captured.out == ""
-    assert captured.err == "π\nsecond\n"
+    assert captured.err == ""
 
 
 def test_streaming_runner_drains_large_stdin_and_stderr(
@@ -201,7 +217,7 @@ def test_streaming_runner_drains_large_stdin_and_stderr(
     assert proc.returncode == 0
     assert proc.stdout == f"{len(prompt)}\n"
     assert proc.stderr == "e" * stderr_size
-    assert captured.err == f"{len(prompt)}\n"
+    assert captured.err == ""
 
 
 def test_streaming_runner_kills_and_reaps_a_child_at_the_deadline(
@@ -285,7 +301,7 @@ def test_streaming_runner_closes_empty_stdin(
     )
 
     assert proc.stdout == "0\n"
-    assert capsys.readouterr().err == "0\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_flushes_a_final_carriage_return(
@@ -312,7 +328,7 @@ def test_streaming_runner_flushes_a_final_carriage_return(
 
     assert proc.stdout == "partial\n"
     assert proc.stderr == ""
-    assert capsys.readouterr().err == "partial\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_honors_the_requested_working_directory(
@@ -329,7 +345,7 @@ def test_streaming_runner_honors_the_requested_working_directory(
     )
 
     assert proc.stdout == f"{tmp_path}\n"
-    assert capsys.readouterr().err == f"{tmp_path}\n"
+    assert capsys.readouterr().err == ""
 
 
 def test_streaming_runner_uses_the_locale_text_encoding(
