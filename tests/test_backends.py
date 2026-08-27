@@ -22,6 +22,7 @@ from typing import cast
 import pytest
 
 import orchestrator
+import orchestrator.doctor as doctor
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -164,8 +165,8 @@ def _fake_dependency_env(
         assert kwargs["stdin"] == subprocess.DEVNULL
         return subprocess.CompletedProcess(args, 0, stdout=versions[args[0]], stderr="")
 
-    monkeypatch.setattr(orchestrator.shutil, "which", which)
-    monkeypatch.setattr(orchestrator.subprocess, "run", run)
+    monkeypatch.setattr(doctor.shutil, "which", which)
+    monkeypatch.setattr(doctor.subprocess, "run", run)
     return calls
 
 
@@ -4246,7 +4247,7 @@ class TestCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setattr(
-            orchestrator.importlib.metadata,
+            doctor.importlib.metadata,
             "version",
             lambda _: "installed-version",
         )
@@ -4256,9 +4257,9 @@ class TestCLI:
     def test_main_version_uses_installed_metadata_as_fallback(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+        monkeypatch.setattr(doctor, "_project_version", lambda: None)
         monkeypatch.setattr(
-            orchestrator.importlib.metadata,
+            doctor.importlib.metadata,
             "version",
             lambda _: "installed-version",
         )
@@ -4268,8 +4269,8 @@ class TestCLI:
     def test_main_version_rejects_missing_installed_metadata(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
-        monkeypatch.setattr(orchestrator.importlib.metadata, "version", lambda _: None)
+        monkeypatch.setattr(doctor, "_project_version", lambda: None)
+        monkeypatch.setattr(doctor.importlib.metadata, "version", lambda _: None)
         with pytest.raises(SystemExit, match="1"):
             main(["--version"])
         captured = capsys.readouterr()
@@ -4283,7 +4284,7 @@ class TestCLI:
             raise OSError("metadata unavailable")
 
         monkeypatch.setattr(Path, "open", unreadable)
-        assert orchestrator._project_version() is None
+        assert doctor._project_version() is None
 
     def test_main_version_falls_back_for_invalid_utf8_metadata(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -4293,7 +4294,7 @@ class TestCLI:
 
         monkeypatch.setattr(Path, "open", invalid_metadata)
         monkeypatch.setattr(
-            orchestrator.importlib.metadata,
+            doctor.importlib.metadata,
             "version",
             lambda _: "installed-version",
         )
@@ -4303,12 +4304,12 @@ class TestCLI:
     def test_main_version_reports_unavailable_without_traceback(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+        monkeypatch.setattr(doctor, "_project_version", lambda: None)
 
         def missing(_: str) -> str:
-            raise orchestrator.importlib.metadata.PackageNotFoundError
+            raise doctor.importlib.metadata.PackageNotFoundError
 
-        monkeypatch.setattr(orchestrator.importlib.metadata, "version", missing)
+        monkeypatch.setattr(doctor.importlib.metadata, "version", missing)
         with pytest.raises(SystemExit, match="1"):
             main(["--version"])
         captured = capsys.readouterr()
@@ -4466,14 +4467,12 @@ class TestCLI:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setattr(
-            orchestrator.shutil, "which", lambda tool: f"/usr/bin/{tool}"
-        )
+        monkeypatch.setattr(doctor.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
         def explode(args, **kwargs):
             raise failure
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", explode)
+        monkeypatch.setattr(doctor.subprocess, "run", explode)
         main(["doctor"])
         captured = capsys.readouterr()
         assert captured.out == (
@@ -4490,12 +4489,12 @@ class TestCLI:
     def test_dependency_check_ignores_a_version_probe_that_exits_nonzero(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator.shutil, "which", lambda _tool: "/usr/bin/uv")
+        monkeypatch.setattr(doctor.shutil, "which", lambda _tool: "/usr/bin/uv")
 
         def refuse(args, **kwargs):
             return subprocess.CompletedProcess(args, 1, stdout="uv 0.4.18", stderr="")
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", refuse)
+        monkeypatch.setattr(doctor.subprocess, "run", refuse)
         main(["doctor"])
         captured = capsys.readouterr()
         assert "\u2713 uv (version unknown)\n" in captured.out
@@ -4506,7 +4505,7 @@ class TestCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _fake_dependency_env(monkeypatch, {})
-        monkeypatch.setattr(orchestrator.sys, "version_info", (3, 10, 2, "final", 0))
+        monkeypatch.setattr(doctor.sys, "version_info", (3, 10, 2, "final", 0))
         main(["doctor"])
         assert capsys.readouterr().out.startswith(
             "\u2717 Python 3.10.2 (needs 3.11+)\n"
@@ -4517,7 +4516,7 @@ class TestCLI:
     ) -> None:
         """3.11.0 is the floor, not the first version above it."""
         _fake_dependency_env(monkeypatch, {})
-        monkeypatch.setattr(orchestrator.sys, "version_info", (3, 11, 0, "final", 0))
+        monkeypatch.setattr(doctor.sys, "version_info", (3, 11, 0, "final", 0))
         main(["doctor"])
         assert capsys.readouterr().out.startswith("\u2713 Python 3.11.0\n")
 
@@ -4525,12 +4524,12 @@ class TestCLI:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _fake_dependency_env(monkeypatch, {})
-        monkeypatch.setattr(orchestrator.sys, "version_info", (4, 0, 1, "final", 0))
+        monkeypatch.setattr(doctor.sys, "version_info", (4, 0, 1, "final", 0))
         main(["doctor"])
         assert capsys.readouterr().out.startswith("\u2713 Python 4.0.1\n")
 
     def test_only_a_space_or_hyphen_separates_a_name_from_its_version(self) -> None:
-        assert orchestrator.NAME_SEPARATORS == (" ", "-")
+        assert doctor.NAME_SEPARATORS == (" ", "-")
 
     def test_dependency_floor_matches_the_packaged_requires_python(self) -> None:
         required = tomllib.loads(
@@ -4542,10 +4541,10 @@ class TestCLI:
         )["project"]["requires-python"]
         parsed = re.fullmatch(r">=(\d+)\.(\d+)", required)
         assert parsed is not None, required
-        assert tuple(int(part) for part in parsed.groups()) == orchestrator.MIN_PYTHON
+        assert tuple(int(part) for part in parsed.groups()) == doctor.MIN_PYTHON
 
     def test_only_jq_is_optional(self) -> None:
-        assert orchestrator.DEPENDENCY_TOOLS == (
+        assert doctor.DEPENDENCY_TOOLS == (
             ("uv", False),
             ("claude", False),
             ("codex", False),
@@ -4570,7 +4569,7 @@ class TestCLI:
     def test_describe_version_names_each_tool_exactly_once(
         self, tool: str, reported: str, expected: str
     ) -> None:
-        assert orchestrator._describe_version(tool, reported) == expected
+        assert doctor._describe_version(tool, reported) == expected
 
     def test_main_dependency_check_after_command_remains_prompt_data(
         self,
@@ -5144,39 +5143,39 @@ def test_agent_config_short_options_are_forwarded_by_create_and_talk() -> None:
 def test_version_fallback_uses_the_distribution_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
+    monkeypatch.setattr(doctor, "_project_version", lambda: None)
     seen: list[str] = []
 
     def version(package: str) -> str:
         seen.append(package)
         return "9.8.7"
 
-    monkeypatch.setattr(orchestrator.importlib.metadata, "version", version)
-    assert orchestrator._resolve_version() == "9.8.7"
+    monkeypatch.setattr(doctor.importlib.metadata, "version", version)
+    assert doctor._resolve_version() == "9.8.7"
     assert seen == ["agents-army"]
 
 
 def test_version_fallback_rejects_an_empty_metadata_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(orchestrator, "_project_version", lambda: None)
-    monkeypatch.setattr(orchestrator.importlib.metadata, "version", lambda _: "")
+    monkeypatch.setattr(doctor, "_project_version", lambda: None)
+    monkeypatch.setattr(doctor.importlib.metadata, "version", lambda _: "")
     with pytest.raises(ValueError, match=r"^$"):
-        orchestrator._resolve_version()
+        doctor._resolve_version()
 
 
 def test_project_version_rejects_a_non_string_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        orchestrator.tomllib,
+        doctor.tomllib,
         "load",
         lambda _: {"project": {"version": 123}},
     )
     monkeypatch.setattr(Path, "open", lambda *_: io.BytesIO(b"project = {}"))
-    assert orchestrator._project_version() is None
-    monkeypatch.setattr(orchestrator.tomllib, "load", lambda _: {})
-    assert orchestrator._project_version() is None
+    assert doctor._project_version() is None
+    monkeypatch.setattr(doctor.tomllib, "load", lambda _: {})
+    assert doctor._project_version() is None
 
 
 def test_prompt_errors_have_exact_messages_and_strip_tail(

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.doctor as doctor
 from backends.base import AgentBackend, TurnResult
 from backends.registry import register_backend
 
@@ -309,6 +310,31 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
 
     orchestrator.main(["-v", "doctor"])
     assert called is True
+
+
+def test_doctor_reporting_names_are_reexported_from_package() -> None:
+    moved = (
+        "DEPENDENCY_TOOLS",
+        "FOUND",
+        "FOUND_OPTIONAL",
+        "MIN_PYTHON",
+        "NAME_SEPARATORS",
+        "NOT_FOUND",
+        "VERSION_PROBE_TIMEOUT",
+        "_dependency_report",
+        "_describe_version",
+        "_print_dependency_check",
+        "_print_version",
+        "_project_version",
+        "_python_line",
+        "_resolve_version",
+        "_status_line",
+        "_tool_line",
+        "_tool_version",
+    )
+
+    assert set(moved) <= set(orchestrator.__all__)
+    assert all(getattr(orchestrator, name) is getattr(doctor, name) for name in moved)
 
 
 def test_missing_skills_directory_has_one_stderr_line(
