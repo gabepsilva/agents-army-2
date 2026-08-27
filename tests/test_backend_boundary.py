@@ -46,6 +46,7 @@ from tests.backend_helpers import (
     _completed,
     _messages,
     _reported_seconds,
+    _subprocess_recorder,
 )
 
 
@@ -53,12 +54,7 @@ class TestRunCliTurn:
     """The one place every backend hands its argv to the operating system."""
 
     def _record(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict]]:
-        calls: list[tuple[list[str], dict]] = []
-
-        def fake_run(args, **kwargs):
-            calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, 0, stdout="out", stderr="")
-
+        fake_run, calls = _subprocess_recorder(_completed(0, "out"))
         monkeypatch.setattr(subprocess, "run", fake_run)
         return calls
 
