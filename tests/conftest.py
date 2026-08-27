@@ -12,6 +12,8 @@ from collections.abc import Iterator
 import pytest
 
 import orchestrator.cli as cli
+from backends.registry import register_backend
+from tests.backend_helpers import EchoBackend
 
 
 @pytest.fixture(autouse=True)
@@ -31,3 +33,14 @@ def _restore_own_logger_levels() -> Iterator[None]:
     finally:
         for name, level in saved.items():
             logging.getLogger(name).setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def register_echo_backend() -> None:
+    """Registered for every test, not just the class that introduced it.
+
+    The registry is module-level state, so a class relying on another class
+    having registered it first passes or fails on test ordering — which xdist
+    is free to change.
+    """
+    register_backend("echo", EchoBackend)
