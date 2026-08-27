@@ -28,6 +28,7 @@ from orchestrator import (
     Orchestrator,
     OrchestratorError,
 )
+from tests.path_helpers import runtime_paths
 
 
 class ForkingBackend(AgentBackend):
@@ -77,7 +78,7 @@ def _backends() -> None:
 
 def _primed(state_file: Path, backend: str = "forking") -> Orchestrator:
     """A registry holding one agent that has already had a turn."""
-    orch = Orchestrator(state_file=state_file)
+    orch = Orchestrator(runtime_paths(state_file.parent, state_file=state_file))
     orch.spawn("source", backend, model="m", reasoning_effort="high")
     orch.talk("source", "prime")
     return orch
@@ -112,7 +113,7 @@ def test_an_agent_that_was_never_forked_takes_an_ordinary_first_turn(
 ) -> None:
     """Nothing pending means nothing to fork: the resume target is this
     agent's own session, and the fork flag stays off."""
-    orchestrator.Agent("solo", ForkingBackend(), tmp_path).talk("hello")
+    orchestrator.Agent("solo", ForkingBackend(), workdir=tmp_path).talk("hello")
 
     assert ForkingBackend.turns == [("hello", None, False)]
 
@@ -164,7 +165,7 @@ def test_the_recorded_fork_survives_a_reload_before_the_first_turn(
     _primed(state_file).fork("source", "copy")
     ForkingBackend.turns = []
 
-    Orchestrator(state_file=state_file).talk("copy", "first")
+    Orchestrator(runtime_paths(tmp_path, state_file=state_file)).talk("copy", "first")
 
     assert ForkingBackend.turns == [("first", "fresh-sid", True)]
 
@@ -287,7 +288,7 @@ def test_a_rejected_fork_says_why_and_leaves_the_registry_alone(
 ) -> None:
     state_file = tmp_path / "state.json"
     if setup == "fresh":
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("source", "forking")
     elif setup == "unforkable":
         orch = _primed(state_file, "unforkable")
@@ -312,7 +313,7 @@ def test_every_shipped_backend_can_be_forked(tmp_path: Path, backend: str) -> No
         json.dumps({"source": {"backend": backend, "session_id": "s1"}}),
         encoding="utf-8",
     )
-    orch = Orchestrator(state_file=state_file)
+    orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
 
     orch.fork("source", "copy")
 

@@ -38,6 +38,7 @@ from orchestrator.skills import (
     parse_skill_names,
     resolve_skills,
 )
+from tests.path_helpers import runtime_paths
 
 
 def _talk_options(argv: list[str]) -> argparse.Namespace:
@@ -361,9 +362,14 @@ class TestFormatSkillListing:
 
 class TestListCommand:
     @pytest.fixture
-    def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
-        return Orchestrator(state_file=tmp_path / "s.json")
+    def orch(self, tmp_path: Path, skills_tree: Path) -> Orchestrator:
+        return Orchestrator(
+            runtime_paths(
+                tmp_path,
+                state_file=tmp_path / "s.json",
+                skills_dir=skills_tree,
+            )
+        )
 
     def test_list_agents_matches_the_list_command(
         self,
@@ -417,12 +423,13 @@ class TestListCommand:
         assert capsys.readouterr().out == _expected_skill_listing(skills_tree) + "\n"
 
     def test_list_skills_empty_catalog(
-        self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         empty = tmp_path / "SKILLS"
         empty.mkdir()
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", empty)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(
+            runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=empty)
+        )
         _cmd_list(orch, _options(["list", "skills"]))
         assert capsys.readouterr().out == "no skills\n"
 
@@ -430,8 +437,9 @@ class TestListCommand:
         self, tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         missing = tmp_path / "absent"
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(
+            runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
+        )
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
         with pytest.raises(SystemExit, match="1"):
             main(["list", "skills"])
@@ -464,9 +472,14 @@ class TestListCommand:
 
 class TestTalkSkills:
     @pytest.fixture
-    def orch(self, tmp_path: Path, skills_tree: Path, monkeypatch) -> Orchestrator:
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+    def orch(self, tmp_path: Path, skills_tree: Path) -> Orchestrator:
+        orch = Orchestrator(
+            runtime_paths(
+                tmp_path,
+                state_file=tmp_path / "s.json",
+                skills_dir=skills_tree,
+            )
+        )
         orch.spawn("a", "echo")
         return orch
 
@@ -738,10 +751,15 @@ class TestMainSkillInvocation:
     def isolated(
         self, tmp_path: Path, skills_tree: Path, monkeypatch: pytest.MonkeyPatch
     ) -> Orchestrator:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        orch = Orchestrator(
+            runtime_paths(
+                tmp_path,
+                state_file=tmp_path / "s.json",
+                skills_dir=skills_tree,
+            )
+        )
         orch.spawn("a", "echo")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", skills_tree)
         for name in ("orchestrator", "backends"):
             logging.getLogger(name).setLevel(logging.NOTSET)
         return orch
@@ -862,11 +880,12 @@ class TestMainSkillInvocation:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        orch = Orchestrator(state_file=tmp_path / "s.json")
+        missing = tmp_path / "absent"
+        orch = Orchestrator(
+            runtime_paths(tmp_path, state_file=tmp_path / "s.json", skills_dir=missing)
+        )
         orch.spawn("a", "echo")
         monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: orch)
-        missing = tmp_path / "absent"
-        monkeypatch.setattr(orchestrator, "SKILLS_DIR", missing)
         with pytest.raises(SystemExit, match="1"):
             main(["talk", "a", "--skill", "foo", "--prompt", "x"])
         captured = capsys.readouterr()

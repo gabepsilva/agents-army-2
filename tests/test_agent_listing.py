@@ -7,8 +7,9 @@ from __future__ import annotations
 import fcntl
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 import pytest
 
@@ -23,6 +24,7 @@ from backends.base import (
 from backends.registry import register_backend
 from orchestrator import Orchestrator
 from orchestrator.schema import load_schema
+from tests.path_helpers import runtime_paths
 
 
 class EchoBackend(AgentBackend):
@@ -136,8 +138,15 @@ class TestUtcNow:
 
 
 class TestAgentDefaults:
-    def test_a_freshly_constructed_agent_has_no_metadata_yet(self) -> None:
-        agent = orchestrator.Agent("a", EchoBackend())
+    def test_an_agent_requires_an_explicit_workdir(self) -> None:
+        constructor = cast(Callable[..., object], orchestrator.Agent)
+        with pytest.raises(TypeError, match="workdir"):
+            constructor("a", EchoBackend())
+
+    def test_a_freshly_constructed_agent_has_no_metadata_yet(
+        self, tmp_path: Path
+    ) -> None:
+        agent = orchestrator.Agent("a", EchoBackend(), workdir=tmp_path)
         assert agent.created_at is None
         assert agent.last_turn_at is None
         assert agent.turns is None
@@ -149,11 +158,11 @@ class TestNewFieldsRoundTrip:
         never the in-memory Agent already held, which is exactly what would
         still pass under the `agent.turns += 1` bug the spec calls out."""
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         orch.talk("a", "hi")
 
-        reloaded = Orchestrator(state_file=state_file)
+        reloaded = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent = reloaded.agents["a"]
         assert agent.created_at is not None
         assert agent.last_turn_at is not None
@@ -167,7 +176,7 @@ class TestNewFieldsRoundTrip:
             json.dumps({"a": {"backend": "echo", "session_id": None}}),
             encoding="utf-8",
         )
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         agent = orch.agents["a"]
         assert agent.created_at is None
         assert agent.last_turn_at is None
@@ -186,19 +195,19 @@ class TestNewFieldsRoundTrip:
         state_file = tmp_path / "state.json"
         bad = '{"stage":"build","verdict":"banana"}'
         _scripted([bad, json.dumps(_CONFORMING)])
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "scripted")
         result = orch.talk("a", "go", schema=_strict_schema(tmp_path), retries=1)
         assert result.structured == _CONFORMING
 
-        reloaded = Orchestrator(state_file=state_file)
+        reloaded = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         assert reloaded.agents["a"].turns == 2
 
     def test_a_never_talked_agent_shows_zero_turns_and_a_real_created_stamp(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
         orchestrator._print_agents(orch)
@@ -213,7 +222,7 @@ class TestNewFieldsRoundTrip:
 class TestBusyProbe:
     def test_an_exclusively_locked_agent_is_reported_busy(self, tmp_path: Path) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         path = orch._agent_lock_path("a")
 
@@ -229,7 +238,7 @@ class TestBusyProbe:
         make each other report `busy` — only a real turn's exclusive hold
         does."""
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         path = orch._agent_lock_path("a")
 
@@ -244,7 +253,7 @@ class TestBusyProbe:
         self, tmp_path: Path
     ) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
         assert orch._agent_is_busy("a") is False
 
@@ -253,7 +262,7 @@ class TestBusyProbe:
         `_flock` creates the file it opens, and an unguarded probe would
         scatter lock files as a side effect of listing."""
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("a", "echo")
 
         orchestrator._print_agents(orch)
@@ -267,7 +276,7 @@ class TestListingAlignment:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         long_name = "a-name-well-past-twenty-characters"
         orch.spawn(long_name, "echo")
         orch.spawn("short", "echo")
@@ -298,7 +307,7 @@ class TestListingAlignment:
         `backend=opencode` is 8, both wider than the `:6` this regression
         test would have caught fixed at."""
         state_file = tmp_path / "state.json"
-        orch = Orchestrator(state_file=state_file)
+        orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("wide", "echo", model="gpt-5-codex", reasoning_effort="medium")
         orch.spawn("narrow", "echo")
 
