@@ -75,3 +75,29 @@ for entry in "$checkout"/SKILLS/* "$checkout"/SKILLS/.[!.]*; do
 	rm -rf "$catalog/$name" || fail catalog "cannot replace $catalog/$name"
 	cp -R "$entry" "$catalog/$name" || fail catalog "cannot copy $entry"
 done
+
+# --- 3. verify the bin directory the PATH block will add -------------------
+
+# uv's executable directory is derived, not fixed: UV_TOOL_BIN_DIR,
+# XDG_BIN_HOME and XDG_DATA_HOME all redirect it. Without this check the
+# script can install the executable in one directory, add a different one to
+# PATH, and exit 0 with `aarmy --help` still broken.
+#
+# The two cannot be compared as strings: `uv tool dir --bin` reports an
+# unnormalised path such as /home/you/.local/share/../bin on a stock Linux
+# box. Each side is normalised with a subshell cd plus `pwd -P`; readlink -f
+# is not portable to BSD userland.
+path_dir=$HOME/.local/bin
+
+uv_bin=$(uv tool dir --bin) || fail PATH "uv tool dir --bin failed"
+[ -x "$uv_bin/aarmy" ] || fail PATH \
+	"uv installed no aarmy executable in $uv_bin"
+
+normalise() {
+	(cd "$1" 2> /dev/null && pwd -P) || printf '%s (does not exist)\n' "$1"
+}
+if [ "$(normalise "$uv_bin")" != "$(normalise "$path_dir")" ]; then
+	fail PATH "uv installs executables in $uv_bin, but the rc block adds \
+$path_dir. Unset UV_TOOL_BIN_DIR/XDG_BIN_HOME/XDG_DATA_HOME and re-run, or \
+add $uv_bin to PATH yourself."
+fi

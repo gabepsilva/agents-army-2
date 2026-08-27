@@ -44,17 +44,19 @@ new_sandbox() {
 	mkdir -p "$HOME" "$SANDBOX/stub"
 	cat > "$SANDBOX/stub/uv" <<-'STUB'
 		#!/usr/bin/env sh
+		# Real uv derives its bin directory; UV_TOOL_BIN_DIR redirects it.
+		bin_dir=${UV_TOOL_BIN_DIR:-$STUB_BIN}
 		if [ "${1:-}" = "tool" ] && [ "${2:-}" = "dir" ] && [ "${3:-}" = "--bin" ]; then
 			# Report the unnormalised shape real uv reports.
-			printf '%s\n' "$STUB_BIN/../$(basename "$STUB_BIN")"
+			printf '%s\n' "$bin_dir/../$(basename "$bin_dir")"
 			exit 0
 		fi
 		if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ]; then
 			printf '%s\n' "$3" >> "$SANDBOX/uv-install-args"
-			mkdir -p "$STUB_BIN"
+			mkdir -p "$bin_dir"
 			for exe in aarmy agents-army orchestrator; do
-				printf '#!/bin/sh\n' > "$STUB_BIN/$exe"
-				chmod +x "$STUB_BIN/$exe"
+				printf '#!/bin/sh\n' > "$bin_dir/$exe"
+				chmod +x "$bin_dir/$exe"
 			done
 			exit 0
 		fi
@@ -168,6 +170,49 @@ else
 	ok
 fi
 unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="path: an unnormalised bin directory still matches the block's literal"
+new_sandbox
+run_installer
+if [ "$STATUS" -ne 0 ]; then
+	fail "expected success, got $STATUS: $(cat "$OUT")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="path: a redirected bin directory fails, naming the step and both paths"
+new_sandbox
+UV_TOOL_BIN_DIR="$SANDBOX/elsewhere"
+export UV_TOOL_BIN_DIR
+run_installer
+unset UV_TOOL_BIN_DIR
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0: $(cat "$OUT")"
+elif ! grep -q 'PATH step failed' "$OUT"; then
+	fail "the failure does not name the PATH step: $(cat "$OUT")"
+elif ! grep -q "$SANDBOX/elsewhere" "$OUT" || ! grep -q "$HOME/.local/bin" "$OUT"; then
+	fail "the failure does not print both paths: $(cat "$OUT")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="path: a bin directory without aarmy in it fails"
+new_sandbox
+run_installer
+rm "$STUB_BIN/aarmy"
+# Re-run with an install that no longer produces the executable.
+sed -i 's/for exe in aarmy /for exe in /' "$SANDBOX/stub/uv"
+run_installer
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0: $(cat "$OUT")"
+elif ! grep -q 'PATH step failed' "$OUT"; then
+	fail "the failure does not name the PATH step: $(cat "$OUT")"
+else
+	ok
+fi
 drop_sandbox
 
 # --- report ----------------------------------------------------------------
