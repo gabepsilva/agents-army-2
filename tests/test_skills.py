@@ -61,7 +61,7 @@ class EchoBackend(AgentBackend):
     def name(self) -> str:
         return "echo"
 
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -70,6 +70,7 @@ class EchoBackend(AgentBackend):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
@@ -712,7 +713,7 @@ class TestTalkSkills:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -721,6 +722,7 @@ class TestTalkSkills:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 

@@ -525,7 +525,7 @@ class AgentBackend(ABC):
         ...
 
     @abstractmethod
-    def run_turn(
+    def run_turn(  # noqa: PLR0913 - flat backend turn arguments are the public seam
         self,
         prompt: str,
         session_id: str | None,
@@ -534,6 +534,7 @@ class AgentBackend(ABC):
         schema: OutputSchema | None = None,
         *,
         resume_as_fork: bool = False,
+        stream: bool = False,
     ) -> TurnResult:
         """Start (session_id=None) or resume (session_id set) a CLI session with
         `prompt` in directory `cwd` and return the model's text reply along with
@@ -553,7 +554,9 @@ class AgentBackend(ABC):
         site but the first turn of a forked agent — reads unchanged. Every
         shipped backend forks; a third-party backend that leaves
         `supports_fork` False owes callers its own `TurnError` here rather
-        than a silently unforked turn.
+        than a silently unforked turn. `stream` opts into incremental pipe
+        reads at the shared CLI boundary; it defaults off so the historical
+        `subprocess.run` path remains unchanged.
         """
         ...
 

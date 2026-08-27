@@ -143,7 +143,7 @@ def _scripted(
         def name(self) -> str:
             return name
 
-        def run_turn(
+        def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
             self,
             prompt: str,
             session_id: str | None,
@@ -152,6 +152,7 @@ def _scripted(
             schema: OutputSchema | None = None,
             *,
             resume_as_fork: bool = False,
+            stream: bool = False,
         ) -> TurnResult:
             calls.append(
                 {
@@ -1057,7 +1058,7 @@ class TestTalkSchema:
             def name(self) -> str:
                 return "boom"
 
-            def run_turn(
+            def run_turn(  # noqa: PLR0913 - test doubles mirror AgentBackend.run_turn public seam
                 self,
                 prompt: str,
                 session_id: str | None,
@@ -1066,6 +1067,7 @@ class TestTalkSchema:
                 schema: OutputSchema | None = None,
                 *,
                 resume_as_fork: bool = False,
+                stream: bool = False,
             ) -> TurnResult:
                 raise ClaudeTurnError("claude output was not JSON")
 
