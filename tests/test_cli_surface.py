@@ -496,17 +496,13 @@ def test_missing_skills_directory_has_one_stderr_line(
 ) -> None:
     monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "missing"))
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-    # Pin the fallback rung inside tmp_path so a real ~/.agents-army/SKILLS on
-    # the machine running the suite cannot answer instead.
-    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["list", "skills"])
     captured = capsys.readouterr()
     assert excinfo.value.code == 1
-    assert captured.err == (
-        f"skills directory not found: tried {tmp_path / 'missing'} "
-        f"and {tmp_path / 'root' / 'SKILLS'}\n"
-    )
+    # An explicit catalog never falls back, so no AGENTS_ARMY_ROOT pin is
+    # needed here: a real ~/.agents-army/SKILLS cannot answer instead.
+    assert captured.err == f"skills directory not found: {tmp_path / 'missing'}\n"
     assert captured.out == ""
 
 

@@ -52,7 +52,7 @@ def _skill_name_for(path: Path) -> str | None:
     return path.stem
 
 
-def resolve_catalog_dir(configured: Path, root: Path) -> Path:
+def resolve_catalog_dir(configured: Path, root: Path, *, explicit: bool) -> Path:
     """Return the catalog directory to index, given the configured one.
 
     The configured catalog (see `RuntimePaths.skills_dir`) wins if it exists
@@ -62,12 +62,19 @@ def resolve_catalog_dir(configured: Path, root: Path) -> Path:
     needs the filesystem. Exactly one catalog wins — the two are never
     merged.
 
-    Neither existing is an error rather than an empty catalog, and it names
-    both directories, since a user with no catalog anywhere needs to know
-    both places that were consulted.
+    `explicit` says the catalog came from `AGENTS_ARMY_SKILLS` rather than
+    from the cwd or a team worktree. Such a catalog wins outright: it is an
+    instruction, and a typo'd or unmounted path must fail loudly rather than
+    quietly serving a different catalog's skills.
+
+    With no catalog anywhere the result is an error rather than an empty
+    catalog, and it names both directories, since a user with no catalog
+    needs to know both places that were consulted.
     """
     if configured.is_dir():
         return configured
+    if explicit:
+        raise SkillError(f"skills directory not found: {configured}")
     fallback = root / SKILLS_DIRNAME
     if fallback.is_dir():
         return fallback
@@ -80,6 +87,10 @@ def index_skills(root: Path) -> dict[str, list[Path]]:
 
     A name with more than one path is a conflict, reported at resolve time
     so a unique skill still works when a different name is duplicated.
+
+    The missing-directory guard here is for direct API callers: the CLI
+    reaches this through `resolve_catalog_dir`, which has already settled
+    which of the ladder's directories exists.
     """
     if not root.is_dir():
         raise SkillError(f"skills directory not found: {root}")

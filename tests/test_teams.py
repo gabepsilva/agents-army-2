@@ -426,6 +426,24 @@ def test_team_talk_attaches_a_skill_from_the_root_catalog(
     assert f"- rooted: {rooted}" in capsys.readouterr().out
 
 
+def test_explicit_missing_catalog_does_not_fall_back_under_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    teams_dir = tmp_path / "teams"
+    (teams_dir / "t1" / "worktree").mkdir(parents=True)
+    _make_catalog(tmp_path / "root" / "SKILLS", "rooted")
+    monkeypatch.setenv("AGENTS_ARMY_TEAMS_DIR", str(teams_dir))
+    monkeypatch.setenv("AGENTS_ARMY_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "typo"))
+
+    with pytest.raises(SystemExit, match="1"):
+        cli.main(["list", "skills", "--team", "t1"])
+
+    assert capsys.readouterr().err == (
+        f"skills directory not found: {tmp_path / 'typo'}\n"
+    )
+
+
 def test_team_with_no_catalog_anywhere_names_both_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
