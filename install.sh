@@ -41,9 +41,32 @@ command -v uv > /dev/null 2>&1 || fail preflight \
 root=${AGENTS_ARMY_ROOT:-$HOME/.agents-army}
 catalog=$root/SKILLS
 
+
+# The login shell decides the rc file, from a table rather than a heuristic.
+# $SHELL is read on purpose: it names the login shell, whose rc file is the
+# one worth writing, and the shell running this script is not necessarily it.
+rc_file=""
+case "${SHELL##*/}" in
+	zsh) rc_file=$HOME/.zshrc ;;
+	bash)
+		case "$(uname -s)" in
+			# Terminal.app starts bash as a login shell, so ~/.bashrc is
+			# never read there.
+			Darwin) rc_file=$HOME/.bash_profile ;;
+			Linux) rc_file=$HOME/.bashrc ;;
+		esac
+		;;
+esac
+
 printf 'install.sh: about to change:\n'
 printf '  the CLI:      uv tool install %s\n' "$checkout"
 printf '  the catalog:  %s\n' "$catalog"
+if [ -n "$rc_file" ]; then
+	printf '  your PATH:    one delimited block in %s\n' "$rc_file"
+else
+	printf '  your PATH:    nothing -- $SHELL (%s) is not in the rc table\n' \
+		"${SHELL:-unset}"
+fi
 
 # --- 1. install the CLI ----------------------------------------------------
 
@@ -72,7 +95,8 @@ mkdir -p "$catalog" || fail catalog "cannot create $catalog"
 for entry in "$checkout"/SKILLS/* "$checkout"/SKILLS/.[!.]*; do
 	[ -e "$entry" ] || continue
 	name=${entry##*/}
-	rm -rf "$catalog/$name" || fail catalog "cannot replace $catalog/$name"
+	# ${catalog:?} so a hypothetically empty catalog can never make this rm -rf /.
+	rm -rf "${catalog:?}/$name" || fail catalog "cannot replace $catalog/$name"
 	cp -R "$entry" "$catalog/$name" || fail catalog "cannot copy $entry"
 done
 
@@ -101,3 +125,58 @@ if [ "$(normalise "$uv_bin")" != "$(normalise "$path_dir")" ]; then
 $path_dir. Unset UV_TOOL_BIN_DIR/XDG_BIN_HOME/XDG_DATA_HOME and re-run, or \
 add $uv_bin to PATH yourself."
 fi
+
+# --- 4. the shell rc block -------------------------------------------------
+
+BEGIN_MARKER='# >>> agents-army install.sh >>>'
+END_MARKER='# <<< agents-army install.sh <<<'
+# Single-quoted: $PATH and $HOME are expanded when the shell starts, not now.
+# Deliberately no AGENTS_ARMY_SKILLS export -- the runtime falls back to
+# $AGENTS_ARMY_ROOT/SKILLS on its own, and the smaller environment footprint
+# is the point.
+PATH_GUARD='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac'
+
+print_block() {
+	printf '%s\n%s\n%s\n' "$BEGIN_MARKER" "$PATH_GUARD" "$END_MARKER"
+}
+
+if [ -z "$rc_file" ]; then
+	# A skipped step is loud: the CLI and the catalog are installed, but
+	# nothing put them on PATH, so this exits non-zero after saying exactly
+	# what to paste and where.
+	printf '\ninstall.sh: add this block to your login shell'"'"'s rc file:\n\n'
+	print_block
+	printf '\n'
+	fail rc "$SHELL is not in the rc table (zsh, or bash on Linux or Darwin), \
+so no rc file was written. Paste the block above instead."
+fi
+
+if [ -f "$rc_file" ] && grep -Fq "$BEGIN_MARKER" "$rc_file"; then
+	grep -Fq "$END_MARKER" "$rc_file" || fail rc \
+		"$rc_file has the opening marker but not the closing one. Repair or \
+delete the block by hand; rewriting it from here would risk the rest of the file."
+	# Edited strictly inside the markers: every other line is reproduced
+	# verbatim, and the replacement is materialised in full before the rc
+	# file is touched.
+	staged=$rc_file.agents-army.$$
+	awk -v begin="$BEGIN_MARKER" -v end="$END_MARKER" -v guard="$PATH_GUARD" '
+		$0 == begin { print; print guard; inside = 1; next }
+		$0 == end { print; inside = 0; next }
+		!inside
+	' "$rc_file" > "$staged" || fail rc "cannot stage a rewrite of $rc_file"
+	# cat rather than mv, so the rc file keeps its inode and permissions.
+	cat "$staged" > "$rc_file" || fail rc "cannot update $rc_file"
+	rm -f "$staged"
+	printf 'install.sh: refreshed the managed block in %s\n' "$rc_file"
+else
+	# Append-only. A file not ending in a newline would otherwise get the
+	# opening marker glued to its last line.
+	if [ -s "$rc_file" ] && [ -n "$(tail -c 1 "$rc_file")" ]; then
+		printf '\n' >> "$rc_file" || fail rc "cannot append to $rc_file"
+	fi
+	print_block >> "$rc_file" || fail rc "cannot append to $rc_file"
+	printf 'install.sh: added a managed block to %s\n' "$rc_file"
+fi
+
+printf 'install.sh: done. Open a new shell, or source %s, then run: aarmy --help\n' \
+	"$rc_file"

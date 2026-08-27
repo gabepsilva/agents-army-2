@@ -64,6 +64,13 @@ new_sandbox() {
 		exit 64
 	STUB
 	chmod +x "$SANDBOX/stub/uv"
+	# The rc-file table reads `uname -s`; SANDBOX_UNAME reproduces Darwin
+	# without a Mac.
+	cat > "$SANDBOX/stub/uname" <<-'UNAME'
+		#!/usr/bin/env sh
+		printf '%s\n' "${SANDBOX_UNAME:-Linux}"
+	UNAME
+	chmod +x "$SANDBOX/stub/uname"
 	# A fixed minimal PATH, so the sandbox's `uv` is the only uv reachable
 	# and removing it really does reproduce a machine without uv.
 	PATH="$SANDBOX/stub:/usr/bin:/bin"
@@ -81,6 +88,7 @@ drop_sandbox() {
 # stderr land in $OUT; the exit status in $STATUS.
 run_installer() {
 	OUT="$SANDBOX/output"
+	export SANDBOX_UNAME="${SANDBOX_UNAME:-Linux}"
 	if [ -n "${SANDBOX_ROOT:-}" ]; then
 		SHELL="${1:-/bin/zsh}" AGENTS_ARMY_ROOT="$SANDBOX_ROOT" \
 			sh "$INSTALLER" > "$OUT" 2>&1
@@ -210,6 +218,122 @@ if [ "$STATUS" -eq 0 ]; then
 	fail "expected a non-zero exit, got 0: $(cat "$OUT")"
 elif ! grep -q 'PATH step failed' "$OUT"; then
 	fail "the failure does not name the PATH step: $(cat "$OUT")"
+else
+	ok
+fi
+drop_sandbox
+
+PATH_GUARD='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac'
+
+CASE="rc: zsh gets ~/.zshrc, appended, with the PATH guard unexpanded"
+new_sandbox
+printf '# my own settings\nexport EDITOR=vi\n' > "$HOME/.zshrc"
+run_installer /bin/zsh
+if [ "$STATUS" -ne 0 ]; then
+	fail "expected success, got $STATUS: $(cat "$OUT")"
+elif ! grep -q '^export EDITOR=vi$' "$HOME/.zshrc"; then
+	fail "the rc file's existing contents did not survive"
+elif ! grep -Fqx "$PATH_GUARD" "$HOME/.zshrc"; then
+	fail "the PATH guard is missing or expanded: $(cat "$HOME/.zshrc")"
+elif grep -q 'AGENTS_ARMY_SKILLS' "$HOME/.zshrc"; then
+	fail "the block exports AGENTS_ARMY_SKILLS, which #160 made unnecessary"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: bash on Linux gets ~/.bashrc"
+new_sandbox
+run_installer /bin/bash
+if [ ! -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
+	fail "expected ~/.bashrc only: $(ls -a "$HOME")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: bash on Darwin gets ~/.bash_profile, the login shell's rc file"
+new_sandbox
+SANDBOX_UNAME=Darwin
+run_installer /bin/bash
+unset SANDBOX_UNAME
+if [ ! -f "$HOME/.bash_profile" ] || [ -f "$HOME/.bashrc" ]; then
+	fail "expected ~/.bash_profile only: $(ls -a "$HOME")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: a second run leaves exactly one block and one PATH entry"
+new_sandbox
+run_installer /bin/zsh
+run_installer /bin/zsh
+blocks=$(grep -c 'agents-army install.sh >>>' "$HOME/.zshrc")
+guards=$(grep -Fcx "$PATH_GUARD" "$HOME/.zshrc")
+if [ "$STATUS" -ne 0 ]; then
+	fail "the second run failed: $(cat "$OUT")"
+elif [ "$blocks" != 1 ] || [ "$guards" != 1 ]; then
+	fail "found $blocks managed blocks and $guards PATH guards, expected 1 each"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: an unrecognised login shell installs, prints the block, exits non-zero"
+new_sandbox
+SANDBOX_ROOT="$SANDBOX/root"
+run_installer /usr/bin/fish
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0"
+elif ! grep -q 'rc step failed' "$OUT"; then
+	fail "the failure does not name the rc step: $(cat "$OUT")"
+elif ! grep -Fqx "$PATH_GUARD" "$OUT"; then
+	fail "the block was not printed for pasting: $(cat "$OUT")"
+elif [ ! -x "$STUB_BIN/aarmy" ] || [ ! -d "$SANDBOX_ROOT/SKILLS/mattpocock" ]; then
+	fail "the CLI and catalog steps did not complete first"
+else
+	ok
+fi
+unset SANDBOX_ROOT
+drop_sandbox
+
+CASE="rc: a stale block is rewritten in place, lines around it untouched"
+new_sandbox
+printf 'before\n%s\nPATH="/wrong:$PATH"\n%s\nafter\n' \
+	'# >>> agents-army install.sh >>>' '# <<< agents-army install.sh <<<' \
+	> "$HOME/.zshrc"
+run_installer /bin/zsh
+if grep -q '/wrong' "$HOME/.zshrc"; then
+	fail "the stale guard survived: $(cat "$HOME/.zshrc")"
+elif [ "$(head -n 1 "$HOME/.zshrc")" != before ] ||
+	[ "$(tail -n 1 "$HOME/.zshrc")" != after ]; then
+	fail "lines outside the block were disturbed: $(cat "$HOME/.zshrc")"
+elif ! grep -Fqx "$PATH_GUARD" "$HOME/.zshrc"; then
+	fail "the refreshed block has no PATH guard: $(cat "$HOME/.zshrc")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: an opening marker with no closing one is refused, not repaired"
+new_sandbox
+printf 'keep me\n%s\n' '# >>> agents-army install.sh >>>' > "$HOME/.zshrc"
+run_installer /bin/zsh
+if [ "$STATUS" -eq 0 ]; then
+	fail "expected a non-zero exit, got 0"
+elif [ "$(head -n 1 "$HOME/.zshrc")" != "keep me" ]; then
+	fail "the damaged rc file was rewritten anyway: $(cat "$HOME/.zshrc")"
+else
+	ok
+fi
+drop_sandbox
+
+CASE="rc: a file with no trailing newline is not glued to the marker"
+new_sandbox
+printf 'export EDITOR=vi' > "$HOME/.zshrc"
+run_installer /bin/zsh
+if ! grep -qx 'export EDITOR=vi' "$HOME/.zshrc"; then
+	fail "the last line was glued to the block: $(cat "$HOME/.zshrc")"
 else
 	ok
 fi
