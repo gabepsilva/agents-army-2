@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .paths import SKILLS_DIRNAME
+
 SKILL_FILENAME = "SKILL.md"
 SKIP_FILENAMES = frozenset({"README.md"})
 
@@ -48,6 +50,29 @@ def _skill_name_for(path: Path) -> str | None:
     if (path.parent / SKILL_FILENAME).is_file():
         return None
     return path.stem
+
+
+def resolve_catalog_dir(configured: Path, root: Path) -> Path:
+    """Return the catalog directory to index, given the configured one.
+
+    The configured catalog (see `RuntimePaths.skills_dir`) wins if it exists
+    on disk; otherwise the runtime root's own `SKILLS` is used, so a driver
+    run from a checkout that has no catalog of its own still finds one. This
+    is the rung `paths.py` deliberately cannot answer, because deciding it
+    needs the filesystem. Exactly one catalog wins — the two are never
+    merged.
+
+    Neither existing is an error rather than an empty catalog, and it names
+    both directories, since a user with no catalog anywhere needs to know
+    both places that were consulted.
+    """
+    if configured.is_dir():
+        return configured
+    fallback = root / SKILLS_DIRNAME
+    if fallback.is_dir():
+        return fallback
+    tried = list(dict.fromkeys([str(configured), str(fallback)]))
+    raise SkillError(f"skills directory not found: tried {' and '.join(tried)}")
 
 
 def index_skills(root: Path) -> dict[str, list[Path]]:

@@ -35,6 +35,7 @@ from orchestrator.skills import (
     format_skill_listing,
     index_skills,
     parse_skill_names,
+    resolve_catalog_dir,
     resolve_skills,
 )
 from tests.path_helpers import runtime_paths
@@ -194,6 +195,57 @@ class TestIndexSkills:
         root = tmp_path / "SKILLS"
         root.mkdir()
         assert index_skills(root) == {}
+
+
+class TestResolveCatalogDir:
+    """The three-rung ladder: configured catalog, then `<root>/SKILLS`."""
+
+    def test_configured_catalog_wins_when_it_exists(self, tmp_path: Path) -> None:
+        configured = tmp_path / "checkout" / "SKILLS"
+        configured.mkdir(parents=True)
+        root = tmp_path / "root"
+        (root / "SKILLS").mkdir(parents=True)
+        assert resolve_catalog_dir(configured, root) == configured
+
+    def test_falls_back_to_the_root_catalog_when_configured_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        assert resolve_catalog_dir(
+            tmp_path / "nowhere" / "SKILLS", tmp_path / "root"
+        ) == (fallback)
+
+    def test_an_empty_root_catalog_still_wins_the_rung(self, tmp_path: Path) -> None:
+        """Existing-but-empty is a correct answer, not a skipped rung."""
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        assert list(fallback.iterdir()) == []
+        assert resolve_catalog_dir(tmp_path / "nowhere", tmp_path / "root") == fallback
+
+    def test_a_file_is_not_a_catalog(self, tmp_path: Path) -> None:
+        configured = tmp_path / "SKILLS"
+        configured.write_text("not a dir\n", encoding="utf-8")
+        fallback = tmp_path / "root" / "SKILLS"
+        fallback.mkdir(parents=True)
+        assert resolve_catalog_dir(configured, tmp_path / "root") == fallback
+
+    def test_neither_catalog_names_both_directories(self, tmp_path: Path) -> None:
+        configured = tmp_path / "checkout" / "SKILLS"
+        root = tmp_path / "root"
+        with pytest.raises(SkillError) as excinfo:
+            resolve_catalog_dir(configured, root)
+        assert str(excinfo.value) == (
+            f"skills directory not found: tried {configured} and {root / 'SKILLS'}"
+        )
+
+    def test_one_directory_is_named_once(self, tmp_path: Path) -> None:
+        """The configured catalog can already be the root one; say it once."""
+        root = tmp_path / "root"
+        configured = root / "SKILLS"
+        with pytest.raises(SkillError) as excinfo:
+            resolve_catalog_dir(configured, root)
+        assert str(excinfo.value) == f"skills directory not found: tried {configured}"
 
 
 class TestResolveSkills:

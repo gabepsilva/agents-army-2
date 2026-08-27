@@ -148,6 +148,7 @@ def test_package_surface_reexports_supported_objects_without_shrinking() -> None
         "main",
         "parse_skill_names",
         "paths",
+        "resolve_catalog_dir",
         "resolve_skills",
         "schema",
         "skills",
