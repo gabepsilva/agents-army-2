@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import AgentBackend, TurnResult
 from backends.registry import register_backend
@@ -41,7 +42,7 @@ def test_prompt_flag_and_separator_forward_identical_text(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+    monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "-p", "same prompt"])
     flag_output = capsys.readouterr().out
@@ -279,7 +280,7 @@ def test_version_after_the_separator_stays_prompt_text(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
+    monkeypatch.setattr(core, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
 
@@ -335,6 +336,31 @@ def test_doctor_reporting_names_are_reexported_from_package() -> None:
 
     assert set(moved) <= set(orchestrator.__all__)
     assert all(getattr(orchestrator, name) is getattr(doctor, name) for name in moved)
+
+
+def test_core_names_are_reexported_from_package() -> None:
+    moved = (
+        "Agent",
+        "AgentBusyError",
+        "AgentExistsError",
+        "AgentNotFoundError",
+        "Orchestrator",
+        "OrchestratorError",
+        "StateError",
+        "TeamBusyError",
+        "TRACE",
+        "DEFAULT_BACKEND",
+        "DEFAULT_VALIDATION_RETRIES",
+        "_AgentRecord",
+        "_MAX_REVALIDATE_ATTEMPTS",
+        "_flock",
+        "_is_live",
+        "_load_state_file",
+        "_utcnow",
+    )
+
+    assert set(moved) <= set(orchestrator.__all__)
+    assert all(getattr(orchestrator, name) is getattr(core, name) for name in moved)
 
 
 def test_missing_skills_directory_has_one_stderr_line(

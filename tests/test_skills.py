@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 import orchestrator.skills as skills_module
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -378,7 +379,7 @@ class TestListCommand:
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
+        monkeypatch.setattr(core, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch.spawn("a", "echo")
         _cmd_list(orch, _options(["list"]))
         via_command = capsys.readouterr().out
@@ -556,7 +557,7 @@ class TestTalkSkills:
     def test_unknown_agent_is_created_then_talked_to(
         self, orch: Orchestrator, monkeypatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         _cmd_talk(
             orch,
             _talk_options(["talk", "missing", "--skill", "foo", "-p", "x"]),

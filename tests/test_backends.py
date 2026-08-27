@@ -22,6 +22,7 @@ from typing import cast
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 import orchestrator.doctor as doctor
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
@@ -2834,7 +2835,7 @@ class TestOrchestrator:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         state_file = tmp_path / "state.json"
-        monkeypatch.setattr(orchestrator, "_utcnow", lambda: "2026-08-25T00:00:00Z")
+        monkeypatch.setattr(core, "_utcnow", lambda: "2026-08-25T00:00:00Z")
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         orch.spawn("b", "codex")
         orch.spawn("a", "claude")
@@ -2910,7 +2911,7 @@ class TestOrchestrator:
     def test_ensure_defaults_to_the_default_backend(self, tmp_path: Path) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         agent, _created = orch.ensure("fresh")
-        assert agent.backend.name == orchestrator.DEFAULT_BACKEND
+        assert agent.backend.name == core.DEFAULT_BACKEND
 
     def test_ensure_returns_an_existing_agent_untouched(self, tmp_path: Path) -> None:
         """An existing agent keeps its backend and its session, not a new one."""
@@ -2981,7 +2982,7 @@ class TestOrchestrator:
             calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, 17)
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.subprocess, "run", fake_run)
         monkeypatch.setattr(
             orch,
             "_exclusive",
@@ -3014,7 +3015,7 @@ class TestOrchestrator:
     ) -> None:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("unknown agent launched a CLI")
@@ -3037,7 +3038,7 @@ class TestOrchestrator:
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "state.json"))
         orch.spawn("a", "echo")
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("session-less agent launched a CLI")
@@ -3068,7 +3069,7 @@ class TestOrchestrator:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("pending fork launched a CLI")
@@ -3092,7 +3093,7 @@ class TestOrchestrator:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("unsupported backend launched a CLI")
@@ -3112,7 +3113,7 @@ class TestOrchestrator:
         agent = orch.spawn("a", "echo")
         agent.session_id = "session-1"
         monkeypatch.setattr(
-            orchestrator.subprocess,
+            core.subprocess,
             "run",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("busy agent launched a CLI")
@@ -3748,7 +3749,7 @@ class TestCLI:
         An argparse default of its own would leave `create` on claude however
         that constant changed, so the two would silently disagree.
         """
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "codex")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "codex")
         orch = Orchestrator(runtime_paths(tmp_path, state_file=tmp_path / "s.json"))
         _cmd_create(orch, _options(["create", "a"]))
         assert orch.agents["a"].backend.name == "codex"
@@ -3817,7 +3818,7 @@ class TestCLI:
             calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, 7)
 
-        monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+        monkeypatch.setattr(core.subprocess, "run", fake_run)
 
         with pytest.raises(SystemExit) as excinfo:
             main(["chat", "a"])
@@ -3836,7 +3837,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Talking to a name that does not exist spawns it and runs the turn."""
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         state_file = tmp_path / "s.json"
         orch = Orchestrator(runtime_paths(tmp_path, state_file=state_file))
         _cmd_talk(orch, _talk_options(["talk", "fresh", "--", "hello"]))
@@ -4324,7 +4325,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit) as excinfo:
             main(["talk", "agent", "a", "--version"])
         assert excinfo.value.code == 2
@@ -4578,7 +4579,7 @@ class TestCLI:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         with pytest.raises(SystemExit, match="2"):
             main(["talk", "agent", "a", "--dependency-check"])
         assert capsys.readouterr().out == ""
@@ -4673,7 +4674,7 @@ class TestCLI:
     ) -> None:
         """`talk <new-name>` creates it and runs the turn, not an error."""
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "s.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "echo")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "echo")
         main(["talk", "nope", "-p", "hi"])
         captured = capsys.readouterr()
         assert captured.err == "created agent 'nope' backend=echo\n"

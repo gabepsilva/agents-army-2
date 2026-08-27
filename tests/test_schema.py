@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -698,7 +699,7 @@ class TestValidatedTalk:
         bad = '{"stage":"build","verdict":"banana"}'
         calls = _scripted([bad, bad, bad])
         orch.spawn("a", "scripted")
-        monkeypatch.setattr(orchestrator.time, "monotonic", _stepping_clock(120.0))
+        monkeypatch.setattr(core.time, "monotonic", _stepping_clock(120.0))
         with pytest.raises(ReplyValidationError):
             orch.talk("a", "go", schema=strict_schema, retries=2, timeout=1800)
         budgets = [call["timeout"] for call in calls]
@@ -1139,7 +1140,7 @@ class TestTalkSchema:
     ) -> None:
         _scripted([json.dumps(CONFORMING)])
         monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
-        monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "scripted")
+        monkeypatch.setattr(core, "DEFAULT_BACKEND", "scripted")
         main(
             [
                 "talk",

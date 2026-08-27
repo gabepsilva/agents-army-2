@@ -14,6 +14,7 @@ from typing import TextIO, cast
 import pytest
 
 import orchestrator
+import orchestrator.core as core
 from backends.base import (
     DEFAULT_TURN_TIMEOUT,
     AgentBackend,
@@ -118,14 +119,12 @@ def _flock_probe(path: Path, mode: int) -> TextIO:
 
 class TestUtcNow:
     def test_matches_iso8601_utc_seconds_with_a_z_suffix(self) -> None:
-        assert re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", orchestrator._utcnow()
-        )
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", core._utcnow())
 
     def test_reads_utc_not_local_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Distinct from the format test: a machine whose local clock happens
         to be UTC would pass that one even reading local time by mistake."""
-        real_datetime = orchestrator.datetime
+        real_datetime = core.datetime
         seen_tz = []
 
         class FrozenDatetime(real_datetime):
@@ -134,9 +133,9 @@ class TestUtcNow:
                 seen_tz.append(tz)
                 return real_datetime(2026, 8, 25, 23, 27, 32, tzinfo=tz)
 
-        monkeypatch.setattr(orchestrator, "datetime", FrozenDatetime)
-        assert orchestrator._utcnow() == "2026-08-25T23:27:32Z"
-        assert seen_tz == [orchestrator.UTC]
+        monkeypatch.setattr(core, "datetime", FrozenDatetime)
+        assert core._utcnow() == "2026-08-25T23:27:32Z"
+        assert seen_tz == [core.UTC]
 
 
 class TestAgentDefaults:
