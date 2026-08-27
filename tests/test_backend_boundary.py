@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,153 @@ from tests.backend_helpers import (
     _reported_seconds,
     _subprocess_recorder,
 )
+
+
+@dataclass(frozen=True)
+class BackendRow:
+    """One shipped adapter's enrollment in the shared backend contracts.
+
+    Every expectation below is a literal written here, never a value read off
+    the class under test: a row that asks the object what it declares would
+    pass against a corrupted declaration and assert nothing.
+    """
+
+    module: str
+    backend_cls: type[AgentBackend]
+    expected_name: str
+    expected_enforces_schema: bool
+    expected_supports_fork: bool
+    expected_error: type[TurnError]
+    # The smallest stdout that reaches this adapter's normal result path,
+    # in that CLI's own envelope dialect. Each was checked against the real
+    # parser rather than assumed portable between them.
+    stdout: str
+    # OpenCode is the one intended divergence: it takes its prompt on stdin
+    # because it joins positional arguments before sending them to the model.
+    prompt_on_stdin: bool = False
+
+
+BACKENDS = [
+    BackendRow(
+        module="claude",
+        backend_cls=ClaudeBackend,
+        expected_name="claude",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=ClaudeTurnError,
+        stdout='{"session_id": "s1", "result": "ok"}',
+    ),
+    BackendRow(
+        module="codex",
+        backend_cls=CodexBackend,
+        expected_name="codex",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=CodexTurnError,
+        stdout='{"type": "thread.started", "thread_id": "s1"}',
+    ),
+    BackendRow(
+        module="grok",
+        backend_cls=GrokBackend,
+        expected_name="grok",
+        expected_enforces_schema=True,
+        expected_supports_fork=True,
+        expected_error=GrokTurnError,
+        stdout='{"sessionId": "s1", "text": "ok"}',
+    ),
+    BackendRow(
+        module="opencode",
+        backend_cls=OpenCodeBackend,
+        expected_name="opencode",
+        expected_enforces_schema=False,
+        expected_supports_fork=True,
+        expected_error=OpenCodeTurnError,
+        stdout='{"type": "text", "sessionID": "s1", "part": {"id": "p", "text": "ok"}}',
+        prompt_on_stdin=True,
+    ),
+]
+
+# pytest ids come from the row's own module name, so a failure names the
+# backend rather than "backends2".
+BACKEND_ROWS = pytest.mark.parametrize(
+    "row", BACKENDS, ids=[row.module for row in BACKENDS]
+)
+
+# Distinctive enough that finding it in argv or a log line is never a
+# coincidence.
+PROMPT = "sequoia rutabaga"
+
+
+class TestSharedSubprocessBoundary:
+    """The contract every shipped adapter owes the operating system.
+
+    One row per backend, so a fifth adapter inherits all of it by enrolling
+    rather than by remembering to call a helper.
+    """
+
+    def _run(
+        self,
+        row: BackendRow,
+        monkeypatch: pytest.MonkeyPatch,
+        cwd: Path,
+        *,
+        returncode: int = 0,
+        timeout: int | None = None,
+    ) -> dict:
+        """Drive the row's real ``run_turn`` and return the subprocess kwargs."""
+        fake_run, calls = _subprocess_recorder(_completed(returncode, row.stdout))
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        args = (PROMPT, None, cwd) if timeout is None else (PROMPT, None, cwd, timeout)
+        row.backend_cls().run_turn(*args)
+        return calls[0][1]
+
+    @BACKEND_ROWS
+    def test_runs_its_cli_under_the_shared_subprocess_discipline(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        kwargs = self._run(row, monkeypatch, tmp_path)
+
+        _assert_subprocess_kwargs(
+            kwargs,
+            tmp_path,
+            expected_stdin=None if row.prompt_on_stdin else subprocess.DEVNULL,
+            expected_input=PROMPT if row.prompt_on_stdin else None,
+        )
+
+    @BACKEND_ROWS
+    def test_stdin_is_closed_unless_the_prompt_goes_there(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CLI left reading an inherited pipe blocks until it is killed."""
+        kwargs = self._run(row, monkeypatch, tmp_path)
+
+        if row.prompt_on_stdin:
+            assert "stdin" not in kwargs
+            assert kwargs["input"] == PROMPT
+        else:
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert "input" not in kwargs
+
+    @BACKEND_ROWS
+    def test_forwards_an_explicit_timeout_rather_than_the_default(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The caller's budget, not a number each adapter picked for itself."""
+        kwargs = self._run(row, monkeypatch, tmp_path, timeout=17)
+
+        assert kwargs["timeout"] == 17
+
+    # The prompt-redaction row is deliberately absent: the design's claim that
+    # the `<prompt:Nchars>` form is emitted uniformly by all four adapters is
+    # false, and opencode emits no placeholder at all. Blocked pending the
+    # answer on PR #156 rather than worked around here.
+
+    @BACKEND_ROWS
+    def test_a_non_zero_exit_raises_that_backends_own_error(
+        self, row: BackendRow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(row.expected_error):
+            self._run(row, monkeypatch, tmp_path, returncode=1)
 
 
 class TestRunCliTurn:

@@ -55,7 +55,7 @@ class EchoBackend(AgentBackend):
         return TurnResult(session_id="echo-sid", reply=f"echo:{prompt}", raw="")
 
 
-def _assert_subprocess_kwargs(  # noqa: PLR0913 - one flat kwarg per contract term
+def _assert_subprocess_kwargs(
     kwargs: dict,
     cwd: Path,
     expected_stdin: object = subprocess.DEVNULL,
