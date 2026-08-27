@@ -29,7 +29,8 @@ AGENTS_ARMY_STATE_FILE=/tmp/state.json uv run orchestrator list
 ## Teams
 
 `--team NAME` (on `create`, `talk`, `chat`, `fork`, `list`, `delete`) points
-`STATE_FILE`, `WORKDIR`, and (unless `AGENTS_ARMY_SKILLS` is set) `SKILLS_DIR` at
+the resolved registry path, working directory, and (unless
+`AGENTS_ARMY_SKILLS` is set) skill catalog at
 `$AGENTS_ARMY_TEAMS_DIR/NAME/agents/orchestrator_state.json`,
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree`, and
 `$AGENTS_ARMY_TEAMS_DIR/NAME/worktree/SKILLS` respectively — a named group of
@@ -84,7 +85,7 @@ found. If `$AGENTS_ARMY_TEAMS_DIR` is set, it is walked too and any team not
 already found under `$AGENTS_ARMY_ROOT` is printed as its own group — whether
 `$AGENTS_ARMY_TEAMS_DIR` sits outside `$AGENTS_ARMY_ROOT` or is an ancestor
 of it, so an overlap between the two never drops a team that only the wider
-one reaches. `STATE_FILE` (the registry `list agents`/`talk` actually use —
+one reaches. The resolved registry path (the registry `list agents`/`talk` actually use —
 see the ladder above) is reported as a `(teamless)` group headed by its own
 path, when it exists. Each team is printed with its agent count, its agents'
 names and backends, and a flag when `worktree/` is missing (the state

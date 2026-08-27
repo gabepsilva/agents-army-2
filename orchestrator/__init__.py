@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,18 +49,6 @@ from orchestrator.skills import (
     parse_skill_names,
     resolve_skills,
 )
-
-# Every runtime path, resolved once from the environment. This is the only
-# place in this module that reads process-ambient state at import time; the
-# precedence ladders behind these six values live in orchestrator.paths.
-_PATHS = paths.RuntimePaths.from_env(os.environ, cwd=Path.cwd(), user_home=Path.home())
-ROOT = _PATHS.root
-HOME = _PATHS.home
-STATE_FILE = _PATHS.state_file
-WORKDIR = _PATHS.workdir
-SKILLS_DIR = _PATHS.skills_dir
-TEAMS_DIR = _PATHS.teams_dir
-
 
 # The backend an agent gets when none is named: by `create`, and by the agent a
 # talk creates for a name that does not exist yet.
@@ -1155,11 +1143,12 @@ def _print_teams(runtime_paths: paths.RuntimePaths) -> None:
     groups = [(root, root_teams)]
     if teams_dir is not None:
         # Walked unconditionally, then deduped by path — not skipped
-        # whenever TEAMS_DIR overlaps ROOT. Dropping the whole group
-        # whenever TEAMS_DIR is an *ancestor* of ROOT hid every team outside
-        # ROOT, exactly what this command exists to show. Deduping instead
-        # handles same-dir, descendant, and ancestor with one rule: a team
-        # already shown under ROOT is simply never repeated under TEAMS_DIR.
+        # whenever the configured team directory overlaps the configured root.
+        # Dropping the whole group whenever the team directory is an *ancestor*
+        # of the root hid every team outside the root, exactly what this command
+        # exists to show. Deduping instead handles same-dir, descendant, and
+        # ancestor with one rule: a team already shown under the root is simply
+        # never repeated under the team directory.
         seen = {team.path for team in root_teams}
         extra_teams = [
             team for team in teams.discover(teams_dir) if team.path not in seen
@@ -1205,10 +1194,10 @@ def _print_teams(runtime_paths: paths.RuntimePaths) -> None:
 def _teardown_team(team: str, team_root: Path) -> None:
     """Remove a team's registry, leaving its worktree and git metadata alone.
 
-    Takes the already-resolved `team_root` rather than rebuilding it from
-    `TEAMS_DIR / team`: `_resolve_team` is the one place a team name is
-    joined to a root, whether that root is `TEAMS_DIR` or a `teams.resolve`
-    hit under `ROOT`.
+    Takes the already-resolved `team_root` rather than rebuilding it from a
+    configured team directory: `_resolve_team` is the one place a team name
+    is joined to a root, whether that root is configured directly or found by
+    `teams.resolve`.
 
     Scoped to `agents/`: that directory holds the state file, its lock, and
     the directory of per-agent turn locks. `worktree/` is a git working tree —
@@ -1666,7 +1655,9 @@ def _usage_error(opts: argparse.Namespace, message: str) -> NoReturn:
     raise AssertionError  # pragma: no cover
 
 
-def _validate_team_name(team: str, opts: argparse.Namespace) -> None:
+def _validate_team_name(
+    team: str, opts: argparse.Namespace, runtime_paths: paths.RuntimePaths
+) -> None:
     if not _TEAM_NAME_RE.fullmatch(team) or any(
         segment in (".", "..") for segment in team.split("/")
     ):
@@ -1676,26 +1667,28 @@ def _validate_team_name(team: str, opts: argparse.Namespace) -> None:
             f"{_TEAM_NAME_RE.pattern!r} segment-by-segment, and no segment "
             "may be '.' or '..'",
         )
-    if "/" in team and TEAMS_DIR is not None:
-        # A qualified name is ROOT-relative by construction — it is the
-        # string `list teams` prints under the ROOT header. TEAMS_DIR
-        # supplies its own namespace, so joining a ROOT-relative name under
-        # it double-joins instead of resolving. See the PR description's
-        # worked example (go.sh's export + the printed qualified name).
+    if "/" in team and runtime_paths.teams_dir is not None:
+        # A qualified name is root-relative by construction — it is the
+        # string `list teams` prints under the root header. A configured team
+        # directory supplies its own namespace, so joining one under it
+        # double-joins instead of resolving.
         _usage_error(
             opts,
             f"invalid team name {team!r}: a qualified name is relative to "
             "$AGENTS_ARMY_ROOT and cannot be used while AGENTS_ARMY_TEAMS_DIR "
             f"is set. Use the bare name {team.split('/')[-1]!r}, or "
-            f"unset AGENTS_ARMY_TEAMS_DIR to resolve under {ROOT}.",
+            f"unset AGENTS_ARMY_TEAMS_DIR to resolve under {runtime_paths.root}.",
         )
 
 
-def _resolve_team_root(team: str, opts: argparse.Namespace) -> Path:
+def _resolve_team_root(
+    team: str, opts: argparse.Namespace, runtime_paths: paths.RuntimePaths
+) -> Path:
     """The one place a team name is joined to a root.
 
     `AGENTS_ARMY_TEAMS_DIR` set short-circuits: `team_root` is just
-    `TEAMS_DIR / team`, exactly as before this function existed, with no
+    the configured team directory joined with `team`, exactly as before this
+    function existed, with no
     walk and no ambiguity — the one script that matters (`go.sh`) exports it
     and never reaches the branch below.
 
@@ -1703,37 +1696,40 @@ def _resolve_team_root(team: str, opts: argparse.Namespace) -> Path:
     `teams.resolve` and never guesses: one hit is used, zero or two-or-more
     are reported through `_usage_error` (exit 2) — a usage problem (bad
     name, wrong environment, team lives elsewhere) regardless of which verb
-    asked, teardown included. That is distinct from the `TEAMS_DIR`-set
-    branch's own not-found case, handled by the caller once `team_root`
-    comes back here: a `TEAMS_DIR/name` that simply does not exist on disk
+    asked, teardown included. That is distinct from the configured-team-
+    directory branch's own not-found case, handled by the caller once
+    `team_root` comes back here: a team directory/name that simply does not exist on disk
     is "this resource is not there", not a usage mistake.
     """
-    if TEAMS_DIR is not None:
-        return TEAMS_DIR / team
-    hits = teams.resolve(ROOT, team)
+    if runtime_paths.teams_dir is not None:
+        return runtime_paths.teams_dir / team
+    hits = teams.resolve(runtime_paths.root, team)
     if len(hits) == 1:
         return hits[0]
     if not hits:
         _usage_error(
             opts,
-            f"no team named {team!r} under {ROOT}; a team is a directory "
+            f"no team named {team!r} under {runtime_paths.root}; a team is a directory "
             "with an agents/ or worktree/ subdirectory, e.g.:\n"
             f"  git worktree add -B {team} "
-            f"{ROOT}/<repo>/<workflow>/{team}/worktree ...\n"
+            f"{runtime_paths.root}/<repo>/<workflow>/{team}/worktree ...\n"
             "if the team lives outside $AGENTS_ARMY_ROOT, export "
             "AGENTS_ARMY_TEAMS_DIR to point at its parent",
         )
     _usage_error(
         opts,
-        f"team name {team!r} is ambiguous under {ROOT}:\n"
+        f"team name {team!r} is ambiguous under {runtime_paths.root}:\n"
         + "\n".join(f"  {hit}" for hit in hits)
         + "\nre-run with a qualified name, e.g. --team "
-        + hits[0].relative_to(ROOT).as_posix(),
+        + hits[0].relative_to(runtime_paths.root).as_posix(),
     )
 
 
 def _resolve_team(
-    opts: argparse.Namespace, teardown: bool
+    opts: argparse.Namespace,
+    runtime_paths: paths.RuntimePaths,
+    env: Mapping[str, str],
+    teardown: bool,
 ) -> tuple[paths.RuntimePaths, AbstractContextManager[None]]:
     """Resolve the run's paths and, for a `--team` run, lock the team.
 
@@ -1741,8 +1737,8 @@ def _resolve_team(
     nothing here rebinds module state and a second `main()` in one process
     cannot inherit the first one's team.
 
-    Teamless commands (`opts.team is None`) get the globals as they stand
-    plus `nullcontext()`.
+    Teamless commands (`opts.team is None`) get the supplied runtime paths plus
+    `nullcontext()`.
 
     Every check here runs before `Orchestrator()` is constructed and reports
     through `opts._parser.error(...)` (exit 2), the way `_resolve_talk_prompt`
@@ -1751,29 +1747,21 @@ def _resolve_team(
     which is not a usage error and is left to raise `OrchestratorError`
     (exit 1), the same as any other `delete` of something that isn't there.
     """
-    resolved = paths.RuntimePaths(
-        root=ROOT,
-        home=HOME,
-        state_file=STATE_FILE,
-        workdir=WORKDIR,
-        skills_dir=SKILLS_DIR,
-        teams_dir=TEAMS_DIR,
-    )
     team = opts.team
     if team is None:
-        return resolved, nullcontext()
-    _validate_team_name(team, opts)
-    if "AGENTS_ARMY_STATE_FILE" in os.environ:
+        return runtime_paths, nullcontext()
+    _validate_team_name(team, opts, runtime_paths)
+    if "AGENTS_ARMY_STATE_FILE" in env:
         opts._parser.error(
             "--team cannot be combined with an explicit AGENTS_ARMY_STATE_FILE "
             "(unset it, or drop --team)"
         )
-    if "AGENTS_ARMY_HOME" in os.environ:
+    if "AGENTS_ARMY_HOME" in env:
         opts._parser.error(
             "--team cannot be combined with an explicit AGENTS_ARMY_HOME "
             "(unset it, or drop --team)"
         )
-    team_root = _resolve_team_root(team, opts)
+    team_root = _resolve_team_root(team, opts, runtime_paths)
     opts._team_root = team_root
     worktree = team_root / "worktree"
     if opts.verb in ("create", "talk", "chat", "fork"):
@@ -1811,12 +1799,16 @@ def _resolve_team(
     # busy team fails fast (flock has no writer fairness — see _team_locked).
     mode = fcntl.LOCK_EX | fcntl.LOCK_NB if teardown else fcntl.LOCK_SH
     return (
-        resolved.for_team(team_root, os.environ),
+        runtime_paths.for_team(team_root, env),
         _team_locked(_team_lock_path(team_root), team, mode),
     )
 
 
 def main(argv: list[str] | None = None) -> None:
+    env = dict(os.environ)
+    runtime_paths = paths.RuntimePaths.from_env(
+        env, cwd=Path.cwd(), user_home=Path.home()
+    )
     raw_argv = sys.argv[1:] if argv is None else argv
     separator_index = raw_argv.index("--") if "--" in raw_argv else len(raw_argv)
     separator_present = separator_index < len(raw_argv)
@@ -1853,7 +1845,7 @@ def main(argv: list[str] | None = None) -> None:
     # require NAME, so this is False for them without inspecting opts.team.
     teardown = opts.verb == "delete" and opts.name is None
     try:
-        runtime_paths, team_lock = _resolve_team(opts, teardown)
+        runtime_paths, team_lock = _resolve_team(opts, runtime_paths, env, teardown)
         with team_lock:
             log.debug("cli: dispatching '%s'", opts.verb)
             if teardown:

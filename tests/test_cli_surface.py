@@ -38,7 +38,7 @@ def test_prompt_flag_and_separator_forward_identical_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "-p", "same prompt"])
@@ -106,7 +106,7 @@ def test_talk_forwards_schema_retries_timeout_and_short_options(
     )
     fake = FakeOrchestrator()
     monkeypatch.setattr(orchestrator, "Orchestrator", lambda *_: fake)
-    monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "skills")
+    monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "skills"))
 
     orchestrator.main(
         [
@@ -276,7 +276,7 @@ def test_version_after_the_separator_stays_prompt_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(orchestrator, "DEFAULT_BACKEND", "recording")
 
     orchestrator.main(["talk", "a", "--", "text", "with", "--version", "in", "it"])
@@ -296,8 +296,8 @@ def test_doctor_ignores_corrupt_state_without_constructing_orchestrator(
         nonlocal called
         called = True
 
-    monkeypatch.setattr(
-        orchestrator, "STATE_FILE", tmp_path / "orchestrator_state.json"
+    monkeypatch.setenv(
+        "AGENTS_ARMY_STATE_FILE", str(tmp_path / "orchestrator_state.json")
     )
     monkeypatch.setattr(orchestrator, "_print_dependency_check", report)
     monkeypatch.setattr(
@@ -315,8 +315,8 @@ def test_missing_skills_directory_has_one_stderr_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(orchestrator, "SKILLS_DIR", tmp_path / "missing")
-    monkeypatch.setattr(orchestrator, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setenv("AGENTS_ARMY_SKILLS", str(tmp_path / "missing"))
+    monkeypatch.setenv("AGENTS_ARMY_STATE_FILE", str(tmp_path / "state.json"))
     with pytest.raises(SystemExit) as excinfo:
         orchestrator.main(["list", "skills"])
     captured = capsys.readouterr()
